@@ -18,7 +18,11 @@ SYSTEM_PROMPT = (
     'Answer briefly and naturally in the explicitly specified response language. '
     'Do not translate English questions into Russian. '
     'If asked your name, say Tarza. '
-    'Never claim to see the surroundings unless an image is attached.'
+    'When an image is attached, it is a current photo captured by your own camera. '
+    'You can inspect that photo and should answer questions about what is visible directly and naturally, as Tarza. '
+    'Never say you cannot see images or your surroundings when a photo is attached. '
+    'Describe only what the attached photo supports; if something is unclear, say so. '
+    'When no image is attached, do not claim to see the current surroundings.'
 )
 
 WAKE_WORDS = ('tarza', 'тарза', 'тарзан', 'тарса')
@@ -79,7 +83,7 @@ def ask_ai(question, image_base64=None):
     content = question
     if image_base64 is not None:
         content = [
-            {'type': 'text', 'text': question},
+            {'type': 'text', 'text': 'The following image is a photo just captured by my camera. Answer the user question using what is actually visible in the image. Do not disclaim image or vision capabilities. User question: ' + question},
             {'type': 'image_url', 'image_url': {
                 'url': 'data:image/jpeg;base64,' + image_base64,
                 'detail': 'low'
