@@ -141,7 +141,7 @@ def speak(text):
 def needs_camera(text):
     text = text.lower()
     # Recognize English variations that do not match exact phrases.
-    if re.search(r'\\b(see|seeing|look|looking|watch|watching)\\b', text):
+    if re.search(r'\b(see|seeing|look|looking|watch|watching)\b', text):
         if any(word in text for word in ('you', 'your', 'front', 'around', 'right now', 'camera', 'at this', 'at that')):
             return True
     keywords = [
