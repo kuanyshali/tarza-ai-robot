@@ -3,6 +3,10 @@ import re
 import base64
 import subprocess
 import requests
+import audioop
+import collections
+import time
+import wave
 
 API_KEY = os.environ.get('OPENAI_API_KEY')
 if not API_KEY:
@@ -45,12 +49,68 @@ def show_usage(data):
     print('(Whisper and TTS usage is not included)')
 
 
+def record_until_silence(filename='speech.wav'):
+    # Lightweight energy-based speech detection, processed locally.
+    rate = 16000
+    chunk_bytes = 960  # 30 ms, 16-bit mono
+    silence_seconds = float(os.environ.get('TARZA_SILENCE_SECONDS', '1.5'))
+    min_rms = int(os.environ.get('TARZA_VOICE_RMS', '450'))
+    preroll = collections.deque(maxlen=10)
+    frames = []
+    speaking = False
+    last_voice = None
+    started_at = None
+    noise_floor = 0.0
+
+    print('Listening... Speak naturally; recording ends after a pause.')
+    process = subprocess.Popen([
+        'arecord', '-q', '-D', 'plughw:2,0', '-t', 'raw',
+        '-f', 'S16_LE', '-r', str(rate), '-c', '1'
+    ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        while True:
+            chunk = process.stdout.read(chunk_bytes)
+            if len(chunk) != chunk_bytes:
+                raise RuntimeError('Microphone recording stopped unexpectedly')
+            rms = audioop.rms(chunk, 2)
+            now = time.monotonic()
+            if not speaking:
+                noise_floor = (noise_floor * 0.97 + rms * 0.03) if noise_floor else rms
+                threshold = max(min_rms, int(noise_floor * 2.5))
+                preroll.append(chunk)
+                if rms >= threshold:
+                    speaking = True
+                    started_at = now
+                    last_voice = now
+                    frames.extend(preroll)
+                    print('Speech detected...')
+            else:
+                frames.append(chunk)
+                threshold = max(min_rms, int(noise_floor * 2.0))
+                if rms >= threshold:
+                    last_voice = now
+                if now - last_voice >= silence_seconds:
+                    break
+                if now - started_at >= 45:
+                    print('Maximum recording length reached.')
+                    break
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+    with wave.open(filename, 'wb') as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(rate)
+        audio.writeframes(b''.join(frames))
+
+
 def listen():
-    print('\nListening... Speak within 5 seconds.')
-    subprocess.run([
-        'arecord', '-D', 'plughw:2,0', '-f', 'S16_LE',
-        '-r', '16000', '-c', '1', '-d', '5', 'speech.wav'
-    ], check=True)
+    record_until_silence()
     with open('speech.wav', 'rb') as audio:
         response = requests.post(
             'https://api.openai.com/v1/audio/transcriptions',
