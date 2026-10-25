@@ -32,17 +32,17 @@ def show_usage(data):
     output_tokens = usage.get('completion_tokens', 0)
     session_input_tokens += input_tokens
     session_output_tokens += output_tokens
-    print('\n📊 TARZA — CHAT TOKEN USAGE')
+    print('\nTARZA - CHAT TOKEN USAGE')
     print('Input tokens:       {}'.format(input_tokens))
     print('Output tokens:      {}'.format(output_tokens))
     print('Total tokens:       {}'.format(input_tokens + output_tokens))
     print('Response allowance: {} / {}'.format(max(0, MAX_RESPONSE_TOKENS - output_tokens), MAX_RESPONSE_TOKENS))
     print('Session chat total: {}'.format(session_input_tokens + session_output_tokens))
-    print('(Не включает стоимость Whisper и TTS)')
+    print('(Whisper and TTS usage is not included)')
 
 
 def listen():
-    print('\n🎤 Говори! У тебя 5 секунд...')
+    print('\nListening... Speak within 5 seconds.')
     subprocess.run([
         'arecord', '-D', 'plughw:2,0', '-f', 'S16_LE',
         '-r', '16000', '-c', '1', '-d', '5', 'speech.wav'
@@ -86,11 +86,11 @@ def ask_ai(question, image_base64=None):
     data = response.json()
     show_usage(data)
     answer = data['choices'][0]['message']['content']
-    return answer or 'Не удалось сформировать ответ.'
+    return answer or 'Unable to generate a response.'
 
 
 def see(question):
-    print('📷 Делаю фотографию...')
+    print('Capturing photo...')
     subprocess.run(['python3', 'camera.py'], check=True)
     with open('photo.jpg', 'rb') as image:
         encoded = base64.b64encode(image.read()).decode('utf-8')
@@ -102,7 +102,7 @@ def chat(question):
 
 
 def speak(text):
-    print('🤖 Tarza:', text)
+    print('Tarza:', text)
     response = requests.post(
         'https://api.openai.com/v1/audio/speech',
         headers=HEADERS,
@@ -136,15 +136,15 @@ def needs_camera(text):
 
 
 def main():
-    print('🤖 Tarza запущен! Нажми Ctrl+C для выхода.')
+    print('Tarza started. Press Ctrl+C to exit.')
     while True:
         try:
             heard = listen().strip()
-            print('👤 Ты:', heard)
+            print('You:', heard)
             if not heard:
                 continue
             if not WAKE_PATTERN.search(heard):
-                print('💤 Tarza: Меня не звали, пропускаю.')
+                print('Tarza: Wake word not detected. Skipping.')
                 continue
             question = WAKE_PATTERN.sub('', heard).strip(' ,.!?')
             if not question:
@@ -159,11 +159,11 @@ def main():
             answer = see(question) if needs_camera(question) else chat(question)
             speak(answer)
         except KeyboardInterrupt:
-            print('\nTarza остановлен.')
+            print('\nTarza stopped.')
             break
         except Exception as error:
-            print("Ошибка:", error)
-            print("Tarza остановлен. Проверь микрофон.")
+            print('Error:', error)
+            print('Tarza stopped. Check the microphone and audio device.')
             break
 
 if __name__ == '__main__':
