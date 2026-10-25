@@ -53,8 +53,8 @@ def listen():
             headers=HEADERS,
             files={'file': ('speech.wav', audio, 'audio/wav')},
             data={
-                'model': 'whisper-1',
-                'prompt': 'Tarza is a multilingual voice assistant. Speech may be in English, Russian, or Kazakh. Common phrases: Tarza, how are you? Tarza, hello. Тарза, привет. Тарза, қалайсың?'
+                'model': 'gpt-4o-mini-transcribe',
+                'prompt': 'Transcribe the spoken words verbatim in their original language. Never translate. Keep English speech in English, Russian speech in Russian, and Kazakh speech in Kazakh. The assistant name is Tarza.'
             },
             timeout=60
         )
