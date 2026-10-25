@@ -183,23 +183,34 @@ def chat(question):
 
 def speak(text):
     print('Tarza:', text)
-    response = requests.post(
+    # Stream 24 kHz, 16-bit mono PCM directly to the existing USB speaker.
+    # This avoids waiting for the full MP3 and avoids the FFmpeg conversion.
+    with requests.post(
         'https://api.openai.com/v1/audio/speech',
         headers=HEADERS,
         json={
             'model': 'tts-1', 'voice': 'alloy',
-            'input': text, 'response_format': 'mp3'
+            'input': text, 'response_format': 'pcm'
         },
-        timeout=60
-    )
-    response.raise_for_status()
-    with open('response.mp3', 'wb') as audio:
-        audio.write(response.content)
-    subprocess.run([
-        'ffmpeg', '-y', '-loglevel', 'error', '-i', 'response.mp3',
-        '-ar', '48000', '-ac', '2', 'response.wav'
-    ], check=True)
-    subprocess.run(['aplay', '-D', 'plughw:3,0', 'response.wav'], check=True)
+        stream=True,
+        timeout=(10, 90)
+    ) as response:
+        response.raise_for_status()
+        player = subprocess.Popen([
+            'aplay', '-q', '-D', 'plughw:3,0', '-t', 'raw',
+            '-f', 'S16_LE', '-r', '24000', '-c', '1'
+        ], stdin=subprocess.PIPE)
+        try:
+            for chunk in response.iter_content(chunk_size=4096):
+                if chunk:
+                    player.stdin.write(chunk)
+            player.stdin.close()
+            if player.wait() != 0:
+                raise RuntimeError('Audio playback failed')
+        finally:
+            if player.poll() is None:
+                player.kill()
+                player.wait()
 
 
 def needs_camera(text):
