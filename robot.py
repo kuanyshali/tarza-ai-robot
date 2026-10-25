@@ -52,7 +52,10 @@ def listen():
             'https://api.openai.com/v1/audio/transcriptions',
             headers=HEADERS,
             files={'file': ('speech.wav', audio, 'audio/wav')},
-            data={'model': 'whisper-1'},
+            data={
+                'model': 'whisper-1',
+                'prompt': 'Tarza is a multilingual voice assistant. Speech may be in English, Russian, or Kazakh. Common phrases: Tarza, how are you? Tarza, hello. Тарза, привет. Тарза, қалайсың?'
+            },
             timeout=60
         )
     response.raise_for_status()
