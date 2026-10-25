@@ -14,11 +14,11 @@ session_input_tokens = 0
 session_output_tokens = 0
 
 SYSTEM_PROMPT = (
-    'Ты дружелюбный AI-робот по имени Tarza (Тарза) с камерой, микрофоном и колонкой. '
-    'Отвечай кратко и естественно на языке последнего вопроса пользователя: '
-    'русском, английском или казахском. '
-    'Если спрашивают твоё имя, представься как Tarza. '
-    'Не утверждай, что видишь окружение, если камера не использовалась.'
+    'You are Tarza, a friendly voice assistant with a camera, microphone and speaker. '
+    'Answer briefly and naturally in the explicitly specified response language. '
+    'Do not translate English questions into Russian. '
+    'If asked your name, say Tarza. '
+    'Never claim to see the surroundings unless an image is attached.'
 )
 
 WAKE_WORDS = ('tarza', 'тарза', 'тарзан', 'тарса')
@@ -62,7 +62,20 @@ def listen():
     return response.json()['text']
 
 
+def response_language(question):
+    # The wake word is already removed. Prefer English for mixed Latin/Cyrillic questions.
+    if re.search(r'[a-zA-Z]', question):
+        return 'English'
+    if re.search(r'[әғқңөұүһіӘҒҚҢӨҰҮҺІ]', question):
+        return 'Kazakh'
+    if re.search(r'[а-яА-ЯёЁ]', question):
+        return 'Russian'
+    return 'English'
+
+
 def ask_ai(question, image_base64=None):
+    language = response_language(question)
+    print('Response language:', language)
     content = question
     if image_base64 is not None:
         content = [
@@ -78,7 +91,7 @@ def ask_ai(question, image_base64=None):
         json={
             'model': 'gpt-4o-mini',
             'messages': [
-                {'role': 'system', 'content': SYSTEM_PROMPT},
+                {'role': 'system', 'content': SYSTEM_PROMPT + ' Respond ONLY in ' + language + '. The language is determined from the question after removing the wake word.'},
                 {'role': 'user', 'content': content}
             ],
             'max_completion_tokens': MAX_RESPONSE_TOKENS
@@ -126,16 +139,21 @@ def speak(text):
 
 
 def needs_camera(text):
+    text = text.lower()
+    # Recognize English variations that do not match exact phrases.
+    if re.search(r'\\b(see|seeing|look|looking|watch|watching)\\b', text):
+        if any(word in text for word in ('you', 'your', 'front', 'around', 'right now', 'camera', 'at this', 'at that')):
+            return True
     keywords = [
         'видишь', 'видно', 'посмотри', 'перед тобой', 'перед собой',
         'камера', 'покажи', 'что это', 'какой предмет', 'какого цвета',
-        'what do you see', 'what can you see', 'look at',
+        'what do you see', 'what can you see', 'what are you seeing', 'what do you see in front of you', 'look at',
         'take a picture', 'take a photo', 'what is this', "what's this",
         'what color', 'what colour', 'describe what you see',
         'не көріп тұрсың', 'не көріп отырсың', 'қарашы',
         'мынау не', 'түсі қандай', 'алдыңда не'
     ]
-    return any(keyword in text.lower() for keyword in keywords)
+    return any(keyword in text for keyword in keywords)
 
 
 def main():
@@ -159,7 +177,9 @@ def main():
             )):
                 speak('До встречи!')
                 break
-            answer = see(question) if needs_camera(question) else chat(question)
+            camera_required = needs_camera(question)
+            print('Camera required:', 'Yes' if camera_required else 'No')
+            answer = see(question) if camera_required else chat(question)
             speak(answer)
         except KeyboardInterrupt:
             print('\nTarza stopped.')
