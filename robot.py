@@ -16,6 +16,8 @@ HEADERS = {'Authorization': 'Bearer ' + API_KEY}
 MAX_RESPONSE_TOKENS = 500
 session_input_tokens = 0
 session_output_tokens = 0
+DIALOG_TIMEOUT = float(os.environ.get('TARZA_DIALOG_TIMEOUT', '30'))
+conversation_history = []
 
 SYSTEM_PROMPT = (
     'You are Tarza, a friendly voice assistant with a camera, microphone and speaker. '
@@ -49,7 +51,7 @@ def show_usage(data):
     print('(Whisper and TTS usage is not included)')
 
 
-def record_until_silence(filename='speech.wav'):
+def record_until_silence(filename='speech.wav', wait_seconds=None):
     # Lightweight energy-based speech detection, processed locally.
     rate = 16000
     chunk_bytes = 960  # 30 ms, 16-bit mono
@@ -61,6 +63,7 @@ def record_until_silence(filename='speech.wav'):
     last_voice = None
     started_at = None
     noise_floor = 0.0
+    wait_started = time.monotonic()
 
     print('Listening... Speak naturally; recording ends after a pause.')
     process = subprocess.Popen([
@@ -75,6 +78,8 @@ def record_until_silence(filename='speech.wav'):
             rms = audioop.rms(chunk, 2)
             now = time.monotonic()
             if not speaking:
+                if wait_seconds is not None and now - wait_started >= wait_seconds:
+                    return False
                 noise_floor = (noise_floor * 0.97 + rms * 0.03) if noise_floor else rms
                 threshold = max(min_rms, int(noise_floor * 2.5))
                 preroll.append(chunk)
@@ -107,10 +112,12 @@ def record_until_silence(filename='speech.wav'):
         audio.setsampwidth(2)
         audio.setframerate(rate)
         audio.writeframes(b''.join(frames))
+    return True
 
 
-def listen():
-    record_until_silence()
+def listen(wait_seconds=None):
+    if not record_until_silence(wait_seconds=wait_seconds):
+        return ''
     with open('speech.wav', 'rb') as audio:
         response = requests.post(
             'https://api.openai.com/v1/audio/transcriptions',
@@ -138,6 +145,7 @@ def response_language(question):
 
 
 def ask_ai(question, image_base64=None):
+    global conversation_history
     language = response_language(question)
     print('Response language:', language)
     content = question
@@ -149,15 +157,15 @@ def ask_ai(question, image_base64=None):
                 'detail': 'low'
             }}
         ]
+    messages = [
+        {'role': 'system', 'content': SYSTEM_PROMPT + ' Respond ONLY in ' + language + '. The language is determined from the question after removing the wake word.'}
+    ] + conversation_history + [{'role': 'user', 'content': content}]
     response = requests.post(
         'https://api.openai.com/v1/chat/completions',
         headers=HEADERS,
         json={
             'model': 'gpt-4o-mini',
-            'messages': [
-                {'role': 'system', 'content': SYSTEM_PROMPT + ' Respond ONLY in ' + language + '. The language is determined from the question after removing the wake word.'},
-                {'role': 'user', 'content': content}
-            ],
+            'messages': messages,
             'max_completion_tokens': MAX_RESPONSE_TOKENS
         },
         timeout=90
@@ -166,7 +174,14 @@ def ask_ai(question, image_base64=None):
     data = response.json()
     show_usage(data)
     answer = data['choices'][0]['message']['content']
-    return answer or 'Unable to generate a response.'
+    answer = answer or 'Unable to generate a response.'
+    # Keep only text in history, never large base64 images.
+    conversation_history.extend([
+        {'role': 'user', 'content': question + (' [A camera photo was provided.]' if image_base64 is not None else '')},
+        {'role': 'assistant', 'content': answer}
+    ])
+    conversation_history = conversation_history[-12:]
+    return answer
 
 
 def see(question):
@@ -232,19 +247,34 @@ def needs_camera(text):
 
 
 def main():
+    global conversation_history
     print('Tarza started. Press Ctrl+C to exit.')
+    active_until = 0.0
     while True:
         try:
-            heard = listen().strip()
-            print('You:', heard)
+            remaining = max(0.0, active_until - time.monotonic())
+            if active_until and remaining == 0:
+                active_until = 0.0
+                conversation_history.clear()
+                print('Conversation ended. Say Tarza to start again.')
+            heard = listen(wait_seconds=remaining if active_until else None).strip()
             if not heard:
+                if active_until:
+                    active_until = 0.0
+                    conversation_history.clear()
+                    print('Conversation timed out. Say Tarza to start again.')
                 continue
-            if not WAKE_PATTERN.search(heard):
+            print('You:', heard)
+            woke = bool(WAKE_PATTERN.search(heard))
+            if not active_until and not woke:
                 print('Tarza: Wake word not detected. Skipping.')
                 continue
-            question = WAKE_PATTERN.sub('', heard).strip(' ,.!?')
+            if woke and not active_until:
+                conversation_history.clear()
+            question = WAKE_PATTERN.sub('', heard).strip(' ,.!?') if woke else heard.strip(' ,.!?')
             if not question:
                 speak('Да, я слушаю.')
+                active_until = time.monotonic() + DIALOG_TIMEOUT
                 continue
             if any(word in question.lower() for word in (
                 'выключись', 'заверши работу', 'до свидания',
@@ -256,8 +286,9 @@ def main():
             print('Camera required:', 'Yes' if camera_required else 'No')
             answer = see(question) if camera_required else chat(question)
             speak(answer)
+            active_until = time.monotonic() + DIALOG_TIMEOUT
         except KeyboardInterrupt:
-            print('\nTarza stopped.')
+            print('\\nTarza stopped.')
             break
         except Exception as error:
             print('Error:', error)
