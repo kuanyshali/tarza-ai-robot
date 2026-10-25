@@ -1,0 +1,170 @@
+import os
+import re
+import base64
+import subprocess
+import requests
+
+API_KEY = os.environ.get('OPENAI_API_KEY')
+if not API_KEY:
+    raise RuntimeError('OPENAI_API_KEY is not set')
+
+HEADERS = {'Authorization': 'Bearer ' + API_KEY}
+MAX_RESPONSE_TOKENS = 500
+session_input_tokens = 0
+session_output_tokens = 0
+
+SYSTEM_PROMPT = (
+    'Ты дружелюбный AI-робот по имени Tarza (Тарза) с камерой, микрофоном и колонкой. '
+    'Отвечай кратко и естественно на языке последнего вопроса пользователя: '
+    'русском, английском или казахском. '
+    'Если спрашивают твоё имя, представься как Tarza. '
+    'Не утверждай, что видишь окружение, если камера не использовалась.'
+)
+
+WAKE_WORDS = ('tarza', 'тарза', 'тарзан', 'тарса')
+WAKE_PATTERN = re.compile(r'(?<!\w)(?:' + '|'.join(map(re.escape, WAKE_WORDS)) + r')(?!\w)', re.IGNORECASE)
+
+
+def show_usage(data):
+    global session_input_tokens, session_output_tokens
+    usage = data.get('usage', {})
+    input_tokens = usage.get('prompt_tokens', 0)
+    output_tokens = usage.get('completion_tokens', 0)
+    session_input_tokens += input_tokens
+    session_output_tokens += output_tokens
+    print('\n📊 TARZA — CHAT TOKEN USAGE')
+    print('Input tokens:       {}'.format(input_tokens))
+    print('Output tokens:      {}'.format(output_tokens))
+    print('Total tokens:       {}'.format(input_tokens + output_tokens))
+    print('Response allowance: {} / {}'.format(max(0, MAX_RESPONSE_TOKENS - output_tokens), MAX_RESPONSE_TOKENS))
+    print('Session chat total: {}'.format(session_input_tokens + session_output_tokens))
+    print('(Не включает стоимость Whisper и TTS)')
+
+
+def listen():
+    print('\n🎤 Говори! У тебя 5 секунд...')
+    subprocess.run([
+        'arecord', '-D', 'plughw:2,0', '-f', 'S16_LE',
+        '-r', '16000', '-c', '1', '-d', '5', 'speech.wav'
+    ], check=True)
+    with open('speech.wav', 'rb') as audio:
+        response = requests.post(
+            'https://api.openai.com/v1/audio/transcriptions',
+            headers=HEADERS,
+            files={'file': ('speech.wav', audio, 'audio/wav')},
+            data={'model': 'whisper-1'},
+            timeout=60
+        )
+    response.raise_for_status()
+    return response.json()['text']
+
+
+def ask_ai(question, image_base64=None):
+    content = question
+    if image_base64 is not None:
+        content = [
+            {'type': 'text', 'text': question},
+            {'type': 'image_url', 'image_url': {
+                'url': 'data:image/jpeg;base64,' + image_base64,
+                'detail': 'low'
+            }}
+        ]
+    response = requests.post(
+        'https://api.openai.com/v1/chat/completions',
+        headers=HEADERS,
+        json={
+            'model': 'gpt-4o-mini',
+            'messages': [
+                {'role': 'system', 'content': SYSTEM_PROMPT},
+                {'role': 'user', 'content': content}
+            ],
+            'max_completion_tokens': MAX_RESPONSE_TOKENS
+        },
+        timeout=90
+    )
+    response.raise_for_status()
+    data = response.json()
+    show_usage(data)
+    answer = data['choices'][0]['message']['content']
+    return answer or 'Не удалось сформировать ответ.'
+
+
+def see(question):
+    print('📷 Делаю фотографию...')
+    subprocess.run(['python3', 'camera.py'], check=True)
+    with open('photo.jpg', 'rb') as image:
+        encoded = base64.b64encode(image.read()).decode('utf-8')
+    return ask_ai(question, image_base64=encoded)
+
+
+def chat(question):
+    return ask_ai(question)
+
+
+def speak(text):
+    print('🤖 Tarza:', text)
+    response = requests.post(
+        'https://api.openai.com/v1/audio/speech',
+        headers=HEADERS,
+        json={
+            'model': 'tts-1', 'voice': 'alloy',
+            'input': text, 'response_format': 'mp3'
+        },
+        timeout=60
+    )
+    response.raise_for_status()
+    with open('response.mp3', 'wb') as audio:
+        audio.write(response.content)
+    subprocess.run([
+        'ffmpeg', '-y', '-loglevel', 'error', '-i', 'response.mp3',
+        '-ar', '48000', '-ac', '2', 'response.wav'
+    ], check=True)
+    subprocess.run(['aplay', '-D', 'plughw:3,0', 'response.wav'], check=True)
+
+
+def needs_camera(text):
+    keywords = [
+        'видишь', 'видно', 'посмотри', 'перед тобой', 'перед собой',
+        'камера', 'покажи', 'что это', 'какой предмет', 'какого цвета',
+        'what do you see', 'what can you see', 'look at',
+        'take a picture', 'take a photo', 'what is this', "what's this",
+        'what color', 'what colour', 'describe what you see',
+        'не көріп тұрсың', 'не көріп отырсың', 'қарашы',
+        'мынау не', 'түсі қандай', 'алдыңда не'
+    ]
+    return any(keyword in text.lower() for keyword in keywords)
+
+
+def main():
+    print('🤖 Tarza запущен! Нажми Ctrl+C для выхода.')
+    while True:
+        try:
+            heard = listen().strip()
+            print('👤 Ты:', heard)
+            if not heard:
+                continue
+            if not WAKE_PATTERN.search(heard):
+                print('💤 Tarza: Меня не звали, пропускаю.')
+                continue
+            question = WAKE_PATTERN.sub('', heard).strip(' ,.!?')
+            if not question:
+                speak('Да, я слушаю.')
+                continue
+            if any(word in question.lower() for word in (
+                'выключись', 'заверши работу', 'до свидания',
+                'goodbye', 'shut down', 'stop listening', 'сау бол'
+            )):
+                speak('До встречи!')
+                break
+            answer = see(question) if needs_camera(question) else chat(question)
+            speak(answer)
+        except KeyboardInterrupt:
+            print('\nTarza остановлен.')
+            break
+        except Exception as error:
+            print("Ошибка:", error)
+            print("Tarza остановлен. Проверь микрофон.")
+            break
+
+if __name__ == '__main__':
+    main()
