@@ -16,14 +16,15 @@ HEADERS = {'Authorization': 'Bearer ' + API_KEY}
 MAX_RESPONSE_TOKENS = 500
 session_input_tokens = 0
 session_output_tokens = 0
+ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Tarza').strip() or 'Tarza'
 DIALOG_TIMEOUT = float(os.environ.get('TARZA_DIALOG_TIMEOUT', '30'))
 conversation_history = []
 
 SYSTEM_PROMPT = (
-    'You are Tarza, a friendly voice assistant with a camera, microphone and speaker. '
+    'You are ' + ROBOT_NAME + ', a friendly voice assistant with a camera, microphone and speaker. '
     'Answer briefly and naturally in the explicitly specified response language. '
     'Do not translate English questions into Russian. '
-    'If asked your name, say Tarza. '
+    'If asked your name, say ' + ROBOT_NAME + '. '
     'When a camera photo is attached, treat it as a fresh view from your own eyes. '
     'Speak as a living robot in the first person, naturally and conversationally: "I see...", "In front of me...", or equivalent in the user language. '
     'Never narrate it as an external image, photograph, frame, or camera feed; avoid phrases like "the image shows" or "in this picture". '
@@ -33,7 +34,15 @@ SYSTEM_PROMPT = (
     'When no image is attached, do not claim to see the current surroundings.'
 )
 
-WAKE_WORDS = ('tarza', 'тарза', 'тарзан', 'тарса')
+_wake_words_env = os.environ.get('ROBOT_WAKE_WORDS', '').strip()
+if _wake_words_env:
+    WAKE_WORDS = tuple(w.strip() for w in _wake_words_env.split(',') if w.strip())
+elif ROBOT_NAME.lower() == 'tarza':
+    WAKE_WORDS = ('tarza', 'тарза', 'тарзан', 'тарса')
+else:
+    WAKE_WORDS = (ROBOT_NAME,)
+if not WAKE_WORDS:
+    WAKE_WORDS = (ROBOT_NAME,)
 WAKE_PATTERN = re.compile(r'(?<!\w)(?:' + '|'.join(map(re.escape, WAKE_WORDS)) + r')(?!\w)', re.IGNORECASE)
 
 
@@ -154,7 +163,7 @@ def listen(wait_seconds=None):
             files={'file': ('speech.wav', audio, 'audio/wav')},
             data={
                 'model': 'gpt-4o-mini-transcribe',
-                'prompt': 'Transcribe the spoken words verbatim in their original language. Never translate. Keep English speech in English, Russian speech in Russian, and Kazakh speech in Kazakh. The assistant name is Tarza.'
+                'prompt': 'Transcribe the spoken words verbatim in their original language. Never translate. Keep English speech in English, Russian speech in Russian, and Kazakh speech in Kazakh. The assistant name is ' + ROBOT_NAME + '.'
             },
             timeout=60
         )
@@ -226,7 +235,7 @@ def chat(question):
 
 
 def speak(text):
-    print('Tarza:', text)
+    print(ROBOT_NAME + ':', text)
     # Stream 24 kHz, 16-bit mono PCM directly to the existing USB speaker.
     # This avoids waiting for the full MP3 and avoids the FFmpeg conversion.
     with requests.post(
@@ -277,7 +286,7 @@ def needs_camera(text):
 
 def main():
     global conversation_history
-    print('Tarza started. Press Ctrl+C to exit.')
+    print(ROBOT_NAME + ' started. Press Ctrl+C to exit.')
     active_until = 0.0
     while True:
         try:
@@ -285,18 +294,18 @@ def main():
             if active_until and remaining == 0:
                 active_until = 0.0
                 conversation_history.clear()
-                print('Conversation ended. Say Tarza to start again.')
+                print('Conversation ended. Say ' + ROBOT_NAME + ' to start again.')
             heard = listen(wait_seconds=remaining if active_until else None).strip()
             if not heard:
                 if active_until:
                     active_until = 0.0
                     conversation_history.clear()
-                    print('Conversation timed out. Say Tarza to start again.')
+                    print('Conversation timed out. Say ' + ROBOT_NAME + ' to start again.')
                 continue
             print('You:', heard)
             woke = bool(WAKE_PATTERN.search(heard))
             if not active_until and not woke:
-                print('Tarza: Wake word not detected. Skipping.')
+                print(ROBOT_NAME + ': Wake word not detected. Skipping.')
                 continue
             if woke and not active_until:
                 conversation_history.clear()
@@ -317,11 +326,11 @@ def main():
             speak(answer)
             active_until = time.monotonic() + DIALOG_TIMEOUT
         except KeyboardInterrupt:
-            print('\\nTarza stopped.')
+            print('\\n' + ROBOT_NAME + ' stopped.')
             break
         except Exception as error:
             print('Error:', error)
-            print('Tarza stopped. Check the microphone and audio device.')
+            print(ROBOT_NAME + ' stopped. Check the microphone and audio device.')
             break
 
 if __name__ == '__main__':
