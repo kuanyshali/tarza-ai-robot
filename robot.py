@@ -56,7 +56,7 @@ def record_until_silence(filename='speech.wav', wait_seconds=None):
     rate = 16000
     chunk_bytes = 960  # 30 ms, 16-bit mono
     silence_seconds = float(os.environ.get('TARZA_SILENCE_SECONDS', '1.5'))
-    min_rms = int(os.environ.get('TARZA_VOICE_RMS', '450'))
+    min_rms = int(os.environ.get('TARZA_VOICE_RMS', '350'))
     preroll = collections.deque(maxlen=10)
     frames = []
     speaking = False
