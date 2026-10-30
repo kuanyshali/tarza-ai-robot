@@ -51,6 +51,30 @@ def show_usage(data):
     print('(Whisper and TTS usage is not included)')
 
 
+
+def play_beep(frequency=880, duration=0.12, volume=0.18):
+    # Play a short local cue through the USB speaker before/after recording.
+    import math
+    import struct
+
+    rate = 48000
+    count = int(rate * duration)
+    pcm = bytearray()
+    for i in range(count):
+        fade = max(0.0, min(1.0, i / 240.0, (count - i) / 240.0))
+        value = int(32767 * volume * fade * math.sin(2 * math.pi * frequency * i / rate))
+        pcm.extend(struct.pack('<h', value))
+    try:
+        subprocess.run(
+            ['aplay', '-q', '-D', 'plughw:3,0', '-t', 'raw',
+             '-f', 'S16_LE', '-r', str(rate), '-c', '1'],
+            input=bytes(pcm), stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=3, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def record_until_silence(filename='speech.wav', wait_seconds=None):
     # Lightweight energy-based speech detection, processed locally.
     rate = 16000
@@ -66,6 +90,7 @@ def record_until_silence(filename='speech.wav', wait_seconds=None):
     wait_started = time.monotonic()
 
     print('Listening... Speak naturally; recording ends after a pause.')
+    play_beep(frequency=880)
     process = subprocess.Popen([
         'arecord', '-q', '-D', 'plughw:2,0', '-t', 'raw',
         '-f', 'S16_LE', '-r', str(rate), '-c', '1'
@@ -112,6 +137,8 @@ def record_until_silence(filename='speech.wav', wait_seconds=None):
         audio.setsampwidth(2)
         audio.setframerate(rate)
         audio.writeframes(b''.join(frames))
+    print('Recording finished. Processing...')
+    play_beep(frequency=600, duration=0.16)
     return True
 
 
