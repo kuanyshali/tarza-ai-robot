@@ -7,6 +7,8 @@ import audioop
 import collections
 import time
 import wave
+import threading
+import cv2
 
 API_KEY = os.environ.get('OPENAI_API_KEY')
 if not API_KEY:
@@ -19,6 +21,18 @@ session_output_tokens = 0
 ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Tarza').strip() or 'Tarza'
 DIALOG_TIMEOUT = float(os.environ.get('TARZA_DIALOG_TIMEOUT', '30'))
 conversation_history = []
+VISION_ENABLED = os.environ.get('TARZA_VISION_ENABLED', '1') == '1'
+VISION_INTERVAL = max(0.5, float(os.environ.get('TARZA_VISION_INTERVAL', '2')))
+VISION_COOLDOWN = max(10, float(os.environ.get('TARZA_VISION_COOLDOWN', '30')))
+VISION_THRESHOLD = float(os.environ.get('TARZA_VISION_THRESHOLD', '0.12'))
+VISION_DEVICE = os.environ.get('TARZA_VISION_PIPELINE', '')
+vision_lock = threading.Lock()
+vision_latest_jpeg = None
+vision_latest_at = 0.0
+vision_event = None
+vision_event_at = 0.0
+vision_stop = threading.Event()
+vision_thread = None
 
 SYSTEM_PROMPT = (
     'You are ' + ROBOT_NAME + ', a friendly voice assistant with a camera, microphone and speaker. '
@@ -222,15 +236,134 @@ def ask_ai(question, image_base64=None):
     return answer
 
 
+
+def camera_pipeline():
+    return VISION_DEVICE or (
+        'nvarguscamerasrc ! video/x-raw(memory:NVMM), '
+        'width=1280, height=720, framerate=30/1 ! '
+        'nvvidconv ! video/x-raw, format=BGRx ! '
+        'videoconvert ! video/x-raw, format=BGR ! '
+        'appsink drop=true max-buffers=1 sync=false'
+    )
+
+
+def vision_worker():
+    """Single camera owner: local motion detection; cloud calls only for events."""
+    global vision_latest_jpeg, vision_latest_at, vision_event, vision_event_at
+    camera = None
+    previous = None
+    last_event = 0.0
+    failures = 0
+    try:
+        camera = cv2.VideoCapture(camera_pipeline(), cv2.CAP_GSTREAMER)
+        if not camera.isOpened():
+            print('Vision: camera unavailable; voice remains active.')
+            return
+        print('Vision: continuous camera and local change detection started.')
+        while not vision_stop.is_set():
+            ok, frame = camera.read()
+            if not ok:
+                failures += 1
+                if failures >= 10:
+                    print('Vision: camera read failed repeatedly; stopping vision.')
+                    return
+                vision_stop.wait(0.3)
+                continue
+            failures = 0
+            now = time.monotonic()
+            # Downscale for low CPU load and for inexpensive low-detail vision calls.
+            small = cv2.resize(frame, (320, 180))
+            gray = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (11, 11), 0)
+            success, jpg = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if success:
+                with vision_lock:
+                    vision_latest_jpeg = jpg.tobytes()
+                    vision_latest_at = now
+            if previous is not None:
+                difference = cv2.absdiff(gray, previous)
+                # Fraction of pixels changed noticeably; ignore small sensor noise.
+                changed = float((difference > 30).sum()) / difference.size
+                if changed >= VISION_THRESHOLD and now - last_event >= VISION_COOLDOWN and success:
+                    last_event = now
+                    print('Vision: significant change ({:.0%}); analyzing event...'.format(changed))
+                    try:
+                        description = analyze_vision_event(jpg.tobytes())
+                        with vision_lock:
+                            vision_event = description
+                            vision_event_at = time.monotonic()
+                        print('Vision event:', description)
+                    except Exception as error:
+                        print('Vision: cloud analysis failed:', error)
+            previous = gray
+            vision_stop.wait(VISION_INTERVAL)
+    except Exception as error:
+        print('Vision: worker error:', error)
+    finally:
+        if camera is not None:
+            camera.release()
+
+
+def analyze_vision_event(jpeg):
+    """Bounded, silent cloud event description. No automatic speech."""
+    image = base64.b64encode(jpeg).decode('ascii')
+    response = requests.post(
+        'https://api.openai.com/v1/chat/completions',
+        headers=HEADERS,
+        json={
+            'model': 'gpt-4o-mini',
+            'messages': [
+                {'role': 'system', 'content': (
+                    'You are a visual event observer. Describe only clearly visible '
+                    'objects or actions in one short factual sentence. Do not invent '
+                    'movement or claim what changed from a single frame. '
+                    'Do not identify people. If unclear, say "Unclear scene".')},
+                {'role': 'user', 'content': [
+                    {'type': 'text', 'text': 'Describe the current scene briefly.'},
+                    {'type': 'image_url', 'image_url': {
+                        'url': 'data:image/jpeg;base64,' + image, 'detail': 'low'}}
+                ]}
+            ],
+            'max_completion_tokens': 90
+        },
+        timeout=(10, 45)
+    )
+    response.raise_for_status()
+    data = response.json()
+    show_usage(data)
+    return (data['choices'][0]['message']['content'] or 'Unclear scene').strip()
+
+
+def current_vision_image():
+    with vision_lock:
+        if vision_latest_jpeg is None or time.monotonic() - vision_latest_at > 15:
+            return None
+        return base64.b64encode(vision_latest_jpeg).decode('ascii')
+
+
+def current_vision_event():
+    with vision_lock:
+        if vision_event is None or time.monotonic() - vision_event_at > 120:
+            return None
+        return vision_event
+
+
 def see(question):
-    print('Capturing photo...')
-    subprocess.run(['python3', 'camera.py'], check=True)
-    with open('photo.jpg', 'rb') as image:
-        encoded = base64.b64encode(image.read()).decode('utf-8')
+    encoded = current_vision_image()
+    if encoded is None:
+        if VISION_ENABLED:
+            return ask_ai(question + ' (Camera is temporarily unavailable; do not claim to see.)')
+        print('Capturing photo...')
+        subprocess.run(['python3', 'camera.py'], check=True)
+        with open('photo.jpg', 'rb') as image:
+            encoded = base64.b64encode(image.read()).decode('utf-8')
     return ask_ai(question, image_base64=encoded)
 
 
 def chat(question):
+    event = current_vision_event()
+    if event:
+        # Event is a brief, possibly stale observation, not a current camera view.
+        return ask_ai(question + '\\n[Background vision observation (may be up to 2 minutes old): ' + event + ']')
     return ask_ai(question)
 
 
@@ -286,7 +419,11 @@ def needs_camera(text):
 
 def main():
     global conversation_history
+    global vision_thread
     print(ROBOT_NAME + ' started. Press Ctrl+C to exit.')
+    if VISION_ENABLED:
+        vision_thread = threading.Thread(target=vision_worker, daemon=True)
+        vision_thread.start()
     active_until = 0.0
     while True:
         try:
@@ -334,4 +471,9 @@ def main():
             break
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        vision_stop.set()
+        if vision_thread is not None:
+            vision_thread.join(timeout=3)
