@@ -120,6 +120,45 @@ class RobotTests(unittest.TestCase):
         self.assertEqual(captured[1]['files']['file'][0], 'wake_prefix.wav')
         self.assertEqual(captured[1]['files']['file'][1], b'WAVE')
 
+    def test_alsa_scan_prefers_usb_speaker_even_if_card_number_changes(self):
+        listing = (
+            'card 0: tegrahda [tegra-hda], device 3: HDMI 0 [HDMI 0]\n'
+            'card 2: Adapter [USB Audio Adapter], device 0: USB Audio [USB Audio]\n'
+            'card 4: Speaker [USB Speaker], device 0: USB Audio [USB Audio]\n'
+        )
+        def run(*args, **kwargs):
+            return SimpleNamespace(returncode=0, stdout=listing, stderr='')
+        candidates = isolated(
+            'audio_output_candidates',
+            os=SimpleNamespace(environ={}), re=re,
+            subprocess=SimpleNamespace(run=run, PIPE=-1, TimeoutExpired=TimeoutError),
+        )
+        self.assertEqual(candidates(), ['plughw:4,0', 'plughw:2,0'])
+
+    def test_alsa_device_override(self):
+        candidates = isolated(
+            'audio_output_candidates',
+            os=SimpleNamespace(environ={'SADAM_SPEAKER_DEVICE': 'plughw:CARD=Speaker,DEV=0'}),
+        )
+        self.assertEqual(candidates(), ['plughw:CARD=Speaker,DEV=0'])
+
+    def test_audio_playback_falls_back_on_alsa_error(self):
+        calls = []
+        def run(args, **kwargs):
+            calls.append((args, kwargs))
+            if len(calls) == 1:
+                return SimpleNamespace(returncode=1, stderr=b'Invalid value for card')
+            return SimpleNamespace(returncode=0, stderr=b'')
+        playback = isolated(
+            'play_pcm',
+            audio_output_candidates=lambda: ['plughw:3,0', 'plughw:4,0'],
+            subprocess=SimpleNamespace(run=run, PIPE=-1, DEVNULL=-3, TimeoutExpired=TimeoutError),
+            AudioPlaybackError=RuntimeError,
+        )
+        self.assertEqual(playback(b'PCM', 24000, quiet=True), 'plughw:4,0')
+        self.assertEqual(calls[0][1]['input'], b'PCM')
+        self.assertEqual(calls[1][0][3], 'plughw:4,0')
+
     def test_tts_buffers_pcm_before_playback(self):
         pcm = b'\\x01\\x02' * 24000
         calls = []
@@ -133,23 +172,36 @@ class RobotTests(unittest.TestCase):
             self.assertNotIn('stream', kwargs)
             return AudioResponse()
 
-        def play(args, **kwargs):
-            calls.append((args, kwargs))
-            return SimpleNamespace(returncode=0)
+        def play(data, rate):
+            calls.append((data, rate))
+            return 'plughw:4,0'
 
         speaker = isolated(
             'speak',
             requests=SimpleNamespace(post=post),
-            subprocess=SimpleNamespace(run=play, DEVNULL=-3),
             HEADERS={},
             ROBOT_NAME='Садам',
             DEBUG_TIMING=False,
-            time=time
+            time=time,
+            audio_output_candidates=lambda: ['plughw:4,0'],
+            play_pcm=play,
+            AudioPlaybackError=RuntimeError,
         )
         speaker('Hello!')
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][1]['input'], pcm)
-        self.assertEqual(calls[0][0][0], 'aplay')
+        self.assertEqual(calls, [(pcm, 24000)])
+
+    def test_tts_no_speaker_does_not_request_audio(self):
+        def no_request(*args, **kwargs):
+            self.fail('TTS should not be called if there is no output')
+        speaker = isolated(
+            'speak',
+            requests=SimpleNamespace(post=no_request),
+            HEADERS={}, ROBOT_NAME='Садам', DEBUG_TIMING=False,
+            time=time, audio_output_candidates=lambda: [],
+            AudioPlaybackError=RuntimeError,
+        )
+        with self.assertRaises(RuntimeError):
+            speaker('Hello!')
 
     def test_new_model_payload(self):
         builder = isolated('build_chat_request', REASONING_EFFORT='none')
