@@ -17,6 +17,10 @@ if not API_KEY:
 
 HEADERS = {'Authorization': 'Bearer ' + API_KEY}
 MAX_RESPONSE_TOKENS = 500
+CHAT_MODEL = os.environ.get('SADAM_CHAT_MODEL', 'gpt-6.1-terra')
+ROUTER_MODEL = os.environ.get('SADAM_ROUTER_MODEL', 'gpt-6-luna')
+VISION_MODEL = os.environ.get('SADAM_VISION_MODEL', CHAT_MODEL)
+REASONING_EFFORT = os.environ.get('SADAM_REASONING_EFFORT', 'none')
 session_input_tokens = 0
 session_output_tokens = 0
 ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Садам').strip() or 'Садам'
