@@ -18,7 +18,7 @@ Tests run offline without camera, audio hardware or an API key. Real-device chec
 
 ## Phases and test phrases
 
-1. **Wake-name recovery**: 600 ms audio pre-roll; if the first transcription lacks the name, a second full-audio transcription runs with Egyptian Arabic hints. Check the `Wake retry transcription:` line. If both omit the name, Sadam deliberately ignores the request.
+1. **Wake-name recovery**: 1.5 s audio pre-roll; primary multilingual `gpt-transcribe` transcription with name keywords. If the first transcription lacks the wake name, transcribe only the first 2.7 seconds of the recorded audio. Check the `Wake prefix transcription:` line. If neither contains the name, Sadam deliberately ignores the request.
 2. **Multilingual conversation**: say `Садам, привет`, `Sadam, hello`, `صدام، إزيك؟`, and a Kazakh question. Test with a native Egyptian speaker.
 3. **Visual questions**: say `Садам, что у меня в руке?`, `صدام، شايف إيه قدامك؟`, then `Садам, а в другой руке?`. Expected: `Camera classifier raw result: 'YES'` and `Camera required: Yes`.
 4. **Non-visual questions**: `Садам, какая погода в Астане?` should route to ordinary chat (not camera). The robot does not have live weather data unless a separate weather tool is added.
@@ -28,6 +28,9 @@ Tests run offline without camera, audio hardware or an API key. Real-device chec
 
 ## Configuration
 
+- `TARZA_TRANSCRIBE_MODEL=gpt-transcribe` — recommended current speech-to-text model. To temporarily revert use `TARZA_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe` (legacy, does not support language/keyword hints).
+- `TARZA_PREROLL_SECONDS=1.5` — saves pre-trigger audio so softly spoken names are not clipped.
+- `TARZA_WAKE_PREFIX_SECONDS=2.7` — short initial clip for wake-name recovery.
 - `TARZA_SILENCE_SECONDS=1.0` — recording ends after a second of silence; raise to 1.5 if your friend speaks slowly or pauses mid-sentence.
 - `TARZA_VOICE_RMS=350` — energy threshold for starting speech capture. Lower only if quiet wake words are cut off; background noise can cause false triggers.
 - `TARZA_VISION_ENABLED=1` — camera worker on.
@@ -37,8 +40,8 @@ Tests run offline without camera, audio hardware or an API key. Real-device chec
 
 ## Known limitations
 
-- A second transcription of the **same** recording cannot recover a wake name if the microphone/VAD never captured it. If the name still disappears, collect a short consenting audio sample and inspect the start of `speech.wav`.
-- Cloud STT and semantic camera routing each add API latency and charges; the second STT call happens only when the name is missing.
+- Short-clip transcription cannot recover a wake name if the microphone/VAD never captured it. If the name still disappears, stop the robot after a failed attempt, play back `speech.wav` with `aplay -D plughw:3,0 speech.wav`, and inspect the beginning of the recording. Only share voice samples with the speaker's permission.
+- Cloud STT and semantic camera routing each add API latency and charges; the second short STT call happens only when the name is missing. Keyword hints are not proof that a word was spoken; confirm native-speaker accuracy on-device.
 - Egyptian Arabic speech synthesis with the existing `tts-1/alloy` voice may retain an accent.
 - Higher image detail increases visual API cost compared with low-detail frames.
 - Live external data (weather, elections) needs separate tools; the model must not guess it.
