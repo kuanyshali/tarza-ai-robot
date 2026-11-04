@@ -22,12 +22,16 @@ ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Садам').strip() or 'Садам'
 DIALOG_TIMEOUT = float(os.environ.get('TARZA_DIALOG_TIMEOUT', '30'))
 conversation_history = []
 VISION_ENABLED = os.environ.get('TARZA_VISION_ENABLED', '1') == '1'
+BACKGROUND_VISION_ENABLED = os.environ.get('TARZA_BACKGROUND_ANALYSIS', '0') == '1'
+VISION_IMAGE_WIDTH = max(320, min(1280, int(os.environ.get('TARZA_VISION_IMAGE_WIDTH', '960'))))
+last_camera_question = None
 VISION_INTERVAL = max(0.5, float(os.environ.get('TARZA_VISION_INTERVAL', '2')))
 VISION_COOLDOWN = max(10, float(os.environ.get('TARZA_VISION_COOLDOWN', '30')))
 VISION_THRESHOLD = float(os.environ.get('TARZA_VISION_THRESHOLD', '0.12'))
 VISION_DEVICE = os.environ.get('TARZA_VISION_PIPELINE', '')
 vision_lock = threading.Lock()
 vision_latest_jpeg = None
+vision_latest_detail_jpeg = None
 vision_latest_at = 0.0
 vision_event = None
 vision_event_at = 0.0
@@ -251,7 +255,7 @@ def ask_ai(question, image_base64=None):
             {'type': 'text', 'text': 'This is my current view through my camera. Answer as ' + ROBOT_NAME + ', a robot describing what I see in front of me in FIRST PERSON, as natural spoken conversation. Never say "the image shows", "the photo depicts", or "in the picture". Start with what I see, not a photo description. Keep it brief, grounded in visible details, and acknowledge poor visibility or uncertainty naturally. User question: ' + question},
             {'type': 'image_url', 'image_url': {
                 'url': 'data:image/jpeg;base64,' + image_base64,
-                'detail': 'low'
+                'detail': 'high'
             }}
         ]
     messages = [
@@ -294,7 +298,7 @@ def camera_pipeline():
 
 def vision_worker():
     """Single camera owner: local motion detection; cloud calls only for events."""
-    global vision_latest_jpeg, vision_latest_at, vision_event, vision_event_at
+    global vision_latest_jpeg, vision_latest_detail_jpeg, vision_latest_at, vision_event, vision_event_at
     camera = None
     previous = None
     last_event = 0.0
@@ -321,14 +325,20 @@ def vision_worker():
             gray = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (11, 11), 0)
             success, jpg = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, 75])
             if success:
+                # Keep a higher-resolution frame for explicit visual questions.
+                detail_width = min(VISION_IMAGE_WIDTH, frame.shape[1])
+                detail_height = int(frame.shape[0] * detail_width / frame.shape[1])
+                detail = cv2.resize(frame, (detail_width, detail_height))
+                detail_ok, detail_jpg = cv2.imencode('.jpg', detail, [cv2.IMWRITE_JPEG_QUALITY, 78])
                 with vision_lock:
                     vision_latest_jpeg = jpg.tobytes()
+                    vision_latest_detail_jpeg = detail_jpg.tobytes() if detail_ok else jpg.tobytes()
                     vision_latest_at = now
             if previous is not None:
                 difference = cv2.absdiff(gray, previous)
                 # Fraction of pixels changed noticeably; ignore small sensor noise.
                 changed = float((difference > 30).sum()) / difference.size
-                if changed >= VISION_THRESHOLD and now - last_event >= VISION_COOLDOWN and success:
+                if BACKGROUND_VISION_ENABLED and changed >= VISION_THRESHOLD and now - last_event >= VISION_COOLDOWN and success:
                     last_event = now
                     print('Vision: significant change ({:.0%}); analyzing event...'.format(changed))
                     try:
@@ -380,9 +390,9 @@ def analyze_vision_event(jpeg):
 
 def current_vision_image():
     with vision_lock:
-        if vision_latest_jpeg is None or time.monotonic() - vision_latest_at > 15:
+        if vision_latest_detail_jpeg is None or time.monotonic() - vision_latest_at > 15:
             return None
-        return base64.b64encode(vision_latest_jpeg).decode('ascii')
+        return base64.b64encode(vision_latest_detail_jpeg).decode('ascii')
 
 
 def current_vision_event():
