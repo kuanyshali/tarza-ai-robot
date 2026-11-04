@@ -275,7 +275,8 @@ def transcribe_audio(filename='speech.wav', first_seconds=None):
 
 def recover_wake_question(full_transcription, filename='speech.wav'):
     """Verify the first spoken word in a short audio prefix, never skip the wake rule."""
-    prefix = transcribe_audio(filename=filename, first_seconds=2.7)
+    seconds = float(os.environ.get('TARZA_WAKE_PREFIX_SECONDS', '2.7'))
+    prefix = transcribe_audio(filename=filename, first_seconds=seconds)
     print('Wake prefix transcription:', prefix)
     if wake_question(prefix) is None:
         return None
