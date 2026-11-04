@@ -70,6 +70,31 @@ else:
 if not WAKE_WORDS:
     WAKE_WORDS = (ROBOT_NAME,)
 WAKE_PATTERN = re.compile(r'(?<!\w)(?:' + '|'.join(map(re.escape, sorted(set(WAKE_WORDS), key=len, reverse=True))) + r')(?!\w)', re.IGNORECASE)
+WAKE_CANDIDATES = tuple(set(WAKE_WORDS) | {'садом', 'саднам', 'سعدتم'})
+ARABIC_LATIN_HINTS = re.compile(r'\b(?:enta|inta|enti|ezayak|izzayak|shayef|shaif|shif|eih|delwaqt|dilwaqt|ana|mesh|mish|fein|fen|bet|bt)\b', re.I)
+
+def wake_question(heard):
+    # Wake only when the first word is a name or a close transcription.
+    match = re.match(r'^\s*[\W_]*([\w\u0600-\u06FF]+)', heard, re.UNICODE)
+    if not match:
+        return None
+    word = match.group(1).casefold()
+    if word not in (w.casefold() for w in WAKE_CANDIDATES):
+        from difflib import SequenceMatcher
+        cyr = bool(re.search(r'[а-яё]', word))
+        arab = bool(re.search(r'[\u0600-\u06FF]', word))
+        latin = bool(re.search(r'[a-z]', word))
+        if not (cyr or arab or latin) or len(word) < 4 or len(word) > 8:
+            return None
+        candidates = [w.casefold() for w in WAKE_CANDIDATES
+                      if (bool(re.search(r'[а-яё]', w)) == cyr
+                          and bool(re.search(r'[\u0600-\u06FF]', w)) == arab
+                          and bool(re.search(r'[a-z]', w)) == latin)]
+        similarity = max((SequenceMatcher(None, word, w).ratio() for w in candidates), default=0)
+        if similarity < 0.78:
+            return None
+        print('Wake name approximation:', word, 'score:', round(similarity, 2))
+    return heard[match.end():].strip(' ,.!?،؟')
 
 
 def show_usage(data):
@@ -189,7 +214,7 @@ def listen(wait_seconds=None):
             files={'file': ('speech.wav', audio, 'audio/wav')},
             data={
                 'model': 'gpt-4o-mini-transcribe',
-                'prompt': 'Transcribe the spoken words verbatim in their original language. Never translate. Keep English speech in English, Russian speech in Russian, Kazakh speech in Kazakh, and Arabic speech (including Egyptian dialect) in Arabic. The assistant name can be صدام or سدام. The assistant name is ' + ROBOT_NAME + '.'
+                'prompt': 'Transcribe the spoken words verbatim in their original language. Never translate. Keep English speech in English, Russian speech in Russian, Kazakh speech in Kazakh, and Arabic speech (including Egyptian dialect) in Arabic. Accented name variants include Садом, Саднам, سعدتم. The assistant name can be صدام or سدام. The assistant name is ' + ROBOT_NAME + '.'
             },
             timeout=60
         )
@@ -198,11 +223,10 @@ def listen(wait_seconds=None):
 
 
 def response_language(question):
-    # The wake word is already removed. Prefer English for mixed Latin/Cyrillic questions.
     if re.search(r'[\u0600-\u06FF]', question):
         return 'Egyptian Arabic'
-    if re.search(r'[a-zA-Z]', question):
-        return 'English'
+    if len(ARABIC_LATIN_HINTS.findall(question)) >= 2:
+        return 'Egyptian Arabic'
     if re.search(r'[әғқңөұүһіӘҒҚҢӨҰҮҺІ]', question):
         return 'Kazakh'
     if re.search(r'[а-яА-ЯёЁ]', question):
@@ -411,21 +435,35 @@ def speak(text):
 
 
 def needs_camera(text):
-    text = text.lower()
-    # Recognize English variations that do not match exact phrases.
-    if re.search(r'\b(see|seeing|look|looking|watch|watching)\b', text):
-        if any(word in text for word in ('you', 'your', 'front', 'around', 'right now', 'camera', 'at this', 'at that')):
-            return True
-    keywords = [
-        'видишь', 'видно', 'посмотри', 'перед тобой', 'перед собой',
-        'камера', 'покажи', 'что это', 'какой предмет', 'какого цвета',
-        'what do you see', 'what can you see', 'what are you seeing', 'what do you see in front of you', 'look at',
-        'take a picture', 'take a photo', 'what is this', "what's this",
-        'what color', 'what colour', 'describe what you see',
-        'не көріп тұрсың', 'не көріп отырсың', 'қарашы',
-        'мынау не', 'түсі қандай', 'алдыңда не'
-    ]
-    return any(keyword in text for keyword in keywords)
+    """Use a small semantic classifier instead of fixed camera keywords."""
+    try:
+        response = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers=HEADERS,
+            json={
+                'model': 'gpt-4o-mini',
+                'temperature': 0,
+                'max_completion_tokens': 12,
+                'messages': [
+                    {'role': 'system', 'content': (
+                        'Decide if the user requests information from the robot LIVE CAMERA. '
+                        'Return only YES or NO. YES for seeing or inspecting the current surroundings, '
+                        'visible people, objects, appearance, colors, actions, reading visible text. '
+                        'NO for general knowledge, weather, feelings, past events, hypotheticals, '
+                        'and figurative uses of seeing. Understand Russian, English, Kazakh, '
+                        'Egyptian Arabic, Modern Standard Arabic and transliterated Arabic. '
+                        'When uncertain, answer NO.')},
+                    {'role': 'user', 'content': text}
+                ]
+            },
+            timeout=(5, 15)
+        )
+        response.raise_for_status()
+        result = (response.json()['choices'][0]['message']['content'] or '').strip().upper()
+        return result == 'YES'
+    except Exception as error:
+        print('Camera routing unavailable; defaulting to no camera:', error)
+        return False
 
 
 def main():
@@ -441,10 +479,10 @@ def main():
             if not heard:
                 continue
             print('You:', heard)
-            if not WAKE_PATTERN.search(heard):
+            question = wake_question(heard)
+            if question is None:
                 print(ROBOT_NAME + ': Name not detected. Skipping.')
                 continue
-            question = WAKE_PATTERN.sub('', heard).strip(' ,.!?')
             if not question:
                 speak('Да, я слушаю.')
                 continue
