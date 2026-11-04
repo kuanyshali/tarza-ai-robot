@@ -529,11 +529,9 @@ def needs_camera(text, previous_camera_question=None):
         response = requests.post(
             'https://api.openai.com/v1/chat/completions',
             headers=HEADERS,
-            json={
-                'model': 'gpt-4o-mini',
-                'temperature': 0,
-                'max_tokens': 32,
-                'messages': [
+            json=build_chat_request(
+                ROUTER_MODEL,
+                [
                     {'role': 'system', 'content': (
                         'You are a camera routing classifier for a robot with a live camera. '
                         'Reply with exactly one word: YES or NO. '
@@ -557,8 +555,9 @@ def needs_camera(text, previous_camera_question=None):
                         'When a question is clearly about the present visible scene, prefer YES.'
                     )},
                     {'role': 'user', 'content': ('Previous visual question: ' + previous_camera_question + '\n' if previous_camera_question else '') + 'Current question: ' + text}
-                ]
-            },
+                ],
+                32, temperature=0
+            ),
             timeout=(5, 20)
         )
         response.raise_for_status()
