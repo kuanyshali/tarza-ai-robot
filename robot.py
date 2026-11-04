@@ -42,6 +42,9 @@ vision_thread = None
 SYSTEM_PROMPT = (
     'You are ' + ROBOT_NAME + ', a friendly voice assistant with a camera, microphone and speaker. '
     'Answer briefly and naturally in the explicitly specified response language. '
+    'For friendly greetings or questions like how are you feeling, reply warmly and briefly as a helpful robot. '
+    'Do not volunteer disclaimers such as "I am just a program" or "I have no feelings" in casual small talk. '
+    'Do not invent human bodily feelings or experiences. '
     'Do not translate English questions into Russian. '
     'When the response language is Egyptian Arabic, use natural everyday Egyptian Masri dialect, not formal Modern Standard Arabic, and write in Arabic script. '
     'Understand Egyptian Arabic and Modern Standard Arabic input. '
@@ -425,34 +428,29 @@ def chat(question):
 
 def speak(text):
     print(ROBOT_NAME + ':', text)
-    # Stream 24 kHz, 16-bit mono PCM directly to the existing USB speaker.
-    # This avoids waiting for the full MP3 and avoids the FFmpeg conversion.
-    with requests.post(
+    # Download the entire PCM clip before starting ALSA playback.
+    # Feeding aplay directly from network chunks caused ALSA underruns on Jetson.
+    started = time.monotonic()
+    response = requests.post(
         'https://api.openai.com/v1/audio/speech',
         headers=HEADERS,
         json={
             'model': 'tts-1', 'voice': 'alloy',
             'input': text, 'response_format': 'pcm'
         },
-        stream=True,
         timeout=(10, 90)
-    ) as response:
-        response.raise_for_status()
-        player = subprocess.Popen([
-            'aplay', '-q', '-D', 'plughw:3,0', '-t', 'raw',
-            '-f', 'S16_LE', '-r', '24000', '-c', '1'
-        ], stdin=subprocess.PIPE)
-        try:
-            for chunk in response.iter_content(chunk_size=4096):
-                if chunk:
-                    player.stdin.write(chunk)
-            player.stdin.close()
-            if player.wait() != 0:
-                raise RuntimeError('Audio playback failed')
-        finally:
-            if player.poll() is None:
-                player.kill()
-                player.wait()
+    )
+    response.raise_for_status()
+    pcm = response.content
+    if not pcm:
+        raise RuntimeError('TTS returned empty PCM audio')
+    if DEBUG_TIMING:
+        print('TTS download time: {:.2f}s; audio duration: {:.1f}s'.format(
+            time.monotonic() - started, len(pcm) / (24000.0 * 2)))
+    subprocess.run([
+        'aplay', '-q', '-D', 'plughw:3,0', '-t', 'raw',
+        '-f', 'S16_LE', '-r', '24000', '-c', '1'
+    ], input=pcm, stdout=subprocess.DEVNULL, check=True, timeout=120)
 
 
 def needs_camera(text, previous_camera_question=None):
