@@ -18,7 +18,7 @@ HEADERS = {'Authorization': 'Bearer ' + API_KEY}
 MAX_RESPONSE_TOKENS = 500
 session_input_tokens = 0
 session_output_tokens = 0
-ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Tarza').strip() or 'Tarza'
+ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Садам').strip() or 'Tarza'
 DIALOG_TIMEOUT = float(os.environ.get('TARZA_DIALOG_TIMEOUT', '30'))
 conversation_history = []
 VISION_ENABLED = os.environ.get('TARZA_VISION_ENABLED', '1') == '1'
@@ -51,8 +51,9 @@ SYSTEM_PROMPT = (
 _wake_words_env = os.environ.get('ROBOT_WAKE_WORDS', '').strip()
 if _wake_words_env:
     WAKE_WORDS = tuple(w.strip() for w in _wake_words_env.split(',') if w.strip())
-elif ROBOT_NAME.lower() == 'tarza':
-    WAKE_WORDS = ('tarza', 'тарза', 'тарзан', 'тарса')
+elif ROBOT_NAME.casefold() in ('садам', 'sadam'):
+    # Common Russian/English STT variations of the name Sadam.
+    WAKE_WORDS = ('садам', 'sadam', 'адам', 'adam', 'садан', 'sadan', 'сада', 'sada', 'садамм', 'sadamm')
 else:
     WAKE_WORDS = (ROBOT_NAME,)
 if not WAKE_WORDS:
@@ -67,7 +68,7 @@ def show_usage(data):
     output_tokens = usage.get('completion_tokens', 0)
     session_input_tokens += input_tokens
     session_output_tokens += output_tokens
-    print('\nTARZA - CHAT TOKEN USAGE')
+    print('\n' + ROBOT_NAME + ' - CHAT TOKEN USAGE')
     print('Input tokens:       {}'.format(input_tokens))
     print('Output tokens:      {}'.format(output_tokens))
     print('Total tokens:       {}'.format(input_tokens + output_tokens))
@@ -203,7 +204,7 @@ def ask_ai(question, image_base64=None):
     content = question
     if image_base64 is not None:
         content = [
-            {'type': 'text', 'text': 'This is my current view through my camera. Answer as Tarza, a robot describing what I see in front of me in FIRST PERSON, as natural spoken conversation. Never say "the image shows", "the photo depicts", or "in the picture". Start with what I see, not a photo description. Keep it brief, grounded in visible details, and acknowledge poor visibility or uncertainty naturally. User question: ' + question},
+            {'type': 'text', 'text': 'This is my current view through my camera. Answer as ' + ROBOT_NAME + ', a robot describing what I see in front of me in FIRST PERSON, as natural spoken conversation. Never say "the image shows", "the photo depicts", or "in the picture". Start with what I see, not a photo description. Keep it brief, grounded in visible details, and acknowledge poor visibility or uncertainty naturally. User question: ' + question},
             {'type': 'image_url', 'image_url': {
                 'url': 'data:image/jpeg;base64,' + image_base64,
                 'detail': 'low'
