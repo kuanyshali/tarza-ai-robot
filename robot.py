@@ -324,6 +324,7 @@ def ask_ai(question, image_base64=None):
     global conversation_history
     language = response_language(question)
     print('Response language:', language)
+    print('Answer model:', VISION_MODEL if image_base64 is not None else CHAT_MODEL)
     content = question
     if image_base64 is not None:
         content = [
@@ -339,11 +340,11 @@ def ask_ai(question, image_base64=None):
     response = requests.post(
         'https://api.openai.com/v1/chat/completions',
         headers=HEADERS,
-        json={
-            'model': 'gpt-4o-mini',
-            'messages': messages,
-            'max_completion_tokens': MAX_RESPONSE_TOKENS
-        },
+        json=build_chat_request(
+            VISION_MODEL if image_base64 is not None else CHAT_MODEL,
+            messages,
+            MAX_RESPONSE_TOKENS
+        ),
         timeout=90
     )
     response.raise_for_status()
