@@ -20,6 +20,7 @@ session_input_tokens = 0
 session_output_tokens = 0
 ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Садам').strip() or 'Садам'
 DIALOG_TIMEOUT = float(os.environ.get('TARZA_DIALOG_TIMEOUT', '30'))
+DEBUG_TIMING = os.environ.get('SADAM_DEBUG_TIMING', '1') == '1'
 conversation_history = []
 VISION_ENABLED = os.environ.get('TARZA_VISION_ENABLED', '1') == '1'
 BACKGROUND_VISION_ENABLED = os.environ.get('TARZA_BACKGROUND_ANALYSIS', '0') == '1'
@@ -145,7 +146,7 @@ def record_until_silence(filename='speech.wav', wait_seconds=None):
     # Lightweight energy-based speech detection, processed locally.
     rate = 16000
     chunk_bytes = 960  # 30 ms, 16-bit mono
-    silence_seconds = float(os.environ.get('TARZA_SILENCE_SECONDS', '1.5'))
+    silence_seconds = float(os.environ.get('TARZA_SILENCE_SECONDS', '1.0'))
     min_rms = int(os.environ.get('TARZA_VOICE_RMS', '350'))
     preroll = collections.deque(maxlen=20)  # 600 ms to preserve softly spoken wake names
     frames = []
@@ -215,6 +216,7 @@ def transcribe_audio(filename='speech.wav', retry=False):
               'Keep Russian, English and Kazakh in their spoken language. ')
     if retry:
         prompt += 'Pay particular attention to the first word and the Egyptian Arabic accent. '
+    start = time.monotonic()
     with open(filename, 'rb') as audio:
         response = requests.post(
             'https://api.openai.com/v1/audio/transcriptions',
@@ -224,6 +226,8 @@ def transcribe_audio(filename='speech.wav', retry=False):
             timeout=60
         )
     response.raise_for_status()
+    if DEBUG_TIMING:
+        print('Transcription time: {:.2f}s{}'.format(time.monotonic() - start, ' (retry)' if retry else ''))
     return response.json()['text'].strip()
 
 
@@ -453,6 +457,7 @@ def speak(text):
 
 def needs_camera(text, previous_camera_question=None):
     """Route requests about the currently visible world to the live camera."""
+    start = time.monotonic()
     try:
         response = requests.post(
             'https://api.openai.com/v1/chat/completions',
@@ -493,6 +498,8 @@ def needs_camera(text, previous_camera_question=None):
         data = response.json()
         result = (data['choices'][0]['message'].get('content') or '').strip().upper()
         print('Camera classifier raw result:', repr(result))
+        if DEBUG_TIMING:
+            print('Camera routing time: {:.2f}s'.format(time.monotonic() - start))
         if result in ('YES', 'NO'):
             return result == 'YES'
         print('Camera classifier returned an unexpected result; defaulting to no camera.')
@@ -541,7 +548,10 @@ def main():
                 break
             camera_required = needs_camera(question, previous_camera_question=last_camera_question)
             print('Camera required:', 'Yes' if camera_required else 'No')
+            answer_started = time.monotonic()
             answer = see(question) if camera_required else chat(question)
+            if DEBUG_TIMING:
+                print('Answer generation time: {:.2f}s'.format(time.monotonic() - answer_started))
             last_camera_question = question if camera_required else None
             speak(answer)
         except KeyboardInterrupt:
