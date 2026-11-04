@@ -80,7 +80,7 @@ ARABIC_LATIN_HINTS = re.compile(r'\b(?:enta|inta|enti|ezayak|izzayak|shayef|shai
 
 def wake_question(heard):
     # Wake only when the first word is a name or a close transcription.
-    match = re.match(r'^\s*[\W_]*([\w\u0600-\u06FF]+)', heard, re.UNICODE)
+    match = re.match(r'^\s*[\W_]*(\w+)', heard, re.UNICODE)
     if not match:
         return None
     word = match.group(1).casefold()
