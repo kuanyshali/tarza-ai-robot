@@ -18,7 +18,7 @@ HEADERS = {'Authorization': 'Bearer ' + API_KEY}
 MAX_RESPONSE_TOKENS = 500
 session_input_tokens = 0
 session_output_tokens = 0
-ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Садам').strip() or 'Tarza'
+ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Садам').strip() or 'Садам'
 DIALOG_TIMEOUT = float(os.environ.get('TARZA_DIALOG_TIMEOUT', '30'))
 conversation_history = []
 VISION_ENABLED = os.environ.get('TARZA_VISION_ENABLED', '1') == '1'
@@ -38,6 +38,8 @@ SYSTEM_PROMPT = (
     'You are ' + ROBOT_NAME + ', a friendly voice assistant with a camera, microphone and speaker. '
     'Answer briefly and naturally in the explicitly specified response language. '
     'Do not translate English questions into Russian. '
+    'When the response language is Egyptian Arabic, use natural everyday Egyptian Masri dialect, not formal Modern Standard Arabic, and write in Arabic script. '
+    'Understand Egyptian Arabic and Modern Standard Arabic input. '
     'If asked your name, say ' + ROBOT_NAME + '. '
     'When a camera photo is attached, treat it as a fresh view from your own eyes. '
     'Speak as a living robot in the first person, naturally and conversationally: "I see...", "In front of me...", or equivalent in the user language. '
@@ -60,13 +62,14 @@ elif ROBOT_NAME.casefold() in ('садам', 'sadam', 'саддам', 'saddam'):
         'адам', 'аддам', 'адэм', 'адамм',
         'sadam', 'saddam', 'sadamm', 'saddamm', 'sadan',
         'sadem', 'saddem', 'sedam', 'sedem', 'sada',
+        'صدام', 'سدام', 'صدامم', 'سدامم',
         'adam', 'addam', 'adem'
     )
 else:
     WAKE_WORDS = (ROBOT_NAME,)
 if not WAKE_WORDS:
     WAKE_WORDS = (ROBOT_NAME,)
-WAKE_PATTERN = re.compile(r'(?<!\\w)(?:' + '|'.join(map(re.escape, sorted(set(WAKE_WORDS), key=len, reverse=True))) + r')(?!\\w)', re.IGNORECASE)
+WAKE_PATTERN = re.compile(r'(?<!\w)(?:' + '|'.join(map(re.escape, sorted(set(WAKE_WORDS), key=len, reverse=True))) + r')(?!\w)', re.IGNORECASE)
 
 
 def show_usage(data):
@@ -186,7 +189,7 @@ def listen(wait_seconds=None):
             files={'file': ('speech.wav', audio, 'audio/wav')},
             data={
                 'model': 'gpt-4o-mini-transcribe',
-                'prompt': 'Transcribe the spoken words verbatim in their original language. Never translate. Keep English speech in English, Russian speech in Russian, and Kazakh speech in Kazakh. The assistant name is ' + ROBOT_NAME + '.'
+                'prompt': 'Transcribe the spoken words verbatim in their original language. Never translate. Keep English speech in English, Russian speech in Russian, Kazakh speech in Kazakh, and Arabic speech (including Egyptian dialect) in Arabic. The assistant name can be صدام or سدام. The assistant name is ' + ROBOT_NAME + '.'
             },
             timeout=60
         )
@@ -196,6 +199,8 @@ def listen(wait_seconds=None):
 
 def response_language(question):
     # The wake word is already removed. Prefer English for mixed Latin/Cyrillic questions.
+    if re.search(r'[\u0600-\u06FF]', question):
+        return 'Egyptian Arabic'
     if re.search(r'[a-zA-Z]', question):
         return 'English'
     if re.search(r'[әғқңөұүһіӘҒҚҢӨҰҮҺІ]', question):
