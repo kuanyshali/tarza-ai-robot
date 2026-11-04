@@ -82,14 +82,14 @@ class RobotTests(unittest.TestCase):
         recovered = isolated(
             'recover_wake_question',
             transcribe_audio=lambda **kwargs: 'صدام، تقدر تقول لي؟',
-            wake_question=self.wake
+            wake_question=self.wake, os=os
         )
         self.assertEqual(recovered(normal_question), normal_question)
 
         not_detected = isolated(
             'recover_wake_question',
             transcribe_audio=lambda **kwargs: 'تقدر تقول لي؟',
-            wake_question=self.wake
+            wake_question=self.wake, os=os
         )
         self.assertIsNone(not_detected(normal_question))
 
