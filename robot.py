@@ -440,9 +440,9 @@ def analyze_vision_event(jpeg):
     response = requests.post(
         'https://api.openai.com/v1/chat/completions',
         headers=HEADERS,
-        json={
-            'model': 'gpt-4o-mini',
-            'messages': [
+        json=build_chat_request(
+            ROUTER_MODEL,
+            [
                 {'role': 'system', 'content': (
                     'You are a visual event observer. Describe only clearly visible '
                     'objects or actions in one short factual sentence. Do not invent '
@@ -453,9 +453,8 @@ def analyze_vision_event(jpeg):
                     {'type': 'image_url', 'image_url': {
                         'url': 'data:image/jpeg;base64,' + image, 'detail': 'low'}}
                 ]}
-            ],
-            'max_completion_tokens': 90
-        },
+            ], 90
+        ),
         timeout=(10, 45)
     )
     response.raise_for_status()
