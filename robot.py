@@ -306,6 +306,20 @@ def response_language(question):
     return 'English'
 
 
+def build_chat_request(model, messages, max_tokens, temperature=None):
+    """Return a Chat Completions request compatible with newer GPT models."""
+    payload = {
+        'model': model,
+        'messages': messages,
+        'max_completion_tokens': max_tokens
+    }
+    if model.startswith(('gpt-6', 'gpt-5')):
+        payload['reasoning_effort'] = REASONING_EFFORT
+    elif temperature is not None:
+        payload['temperature'] = temperature
+    return payload
+
+
 def ask_ai(question, image_base64=None):
     global conversation_history
     language = response_language(question)
