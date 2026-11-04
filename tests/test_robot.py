@@ -156,7 +156,7 @@ class RobotTests(unittest.TestCase):
         def post(url, **kwargs):
             seen.append(kwargs['json']['messages'][-1]['content'])
             return FakeResponse('YES' if 'что у меня в руке?' in seen[-1] else 'NO')
-        camera = isolated('needs_camera', requests=SimpleNamespace(post=post), HEADERS={}, time=time, DEBUG_TIMING=False)
+        camera = isolated('needs_camera', requests=SimpleNamespace(post=post), HEADERS={}, time=time, DEBUG_TIMING=False, ROUTER_MODEL='gpt-6-luna', build_chat_request=isolated('build_chat_request', REASONING_EFFORT='none'))
         self.assertTrue(camera('что у меня в руке?'))
         self.assertFalse(camera('какая погода?'))
         self.assertTrue(camera('а в другой руке?', previous_camera_question='что у меня в руке?'))
