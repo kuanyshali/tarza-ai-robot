@@ -143,7 +143,7 @@ def record_until_silence(filename='speech.wav', wait_seconds=None):
     chunk_bytes = 960  # 30 ms, 16-bit mono
     silence_seconds = float(os.environ.get('TARZA_SILENCE_SECONDS', '1.5'))
     min_rms = int(os.environ.get('TARZA_VOICE_RMS', '350'))
-    preroll = collections.deque(maxlen=10)
+    preroll = collections.deque(maxlen=20)  # 600 ms to preserve softly spoken wake names
     frames = []
     speaking = False
     last_voice = None
@@ -204,22 +204,29 @@ def record_until_silence(filename='speech.wav', wait_seconds=None):
     return True
 
 
-def listen(wait_seconds=None):
-    if not record_until_silence(wait_seconds=wait_seconds):
-        return ''
-    with open('speech.wav', 'rb') as audio:
+def transcribe_audio(filename='speech.wav', retry=False):
+    prompt = ('The first spoken word may be the robot name Садам, Sadam, صدام or سدام. '
+              'Preserve the name only if actually spoken. Do not invent it. '
+              'Transcribe Egyptian Arabic in Arabic script, without translating. '
+              'Keep Russian, English and Kazakh in their spoken language. ')
+    if retry:
+        prompt += 'Pay particular attention to the first word and the Egyptian Arabic accent. '
+    with open(filename, 'rb') as audio:
         response = requests.post(
             'https://api.openai.com/v1/audio/transcriptions',
             headers=HEADERS,
-            files={'file': ('speech.wav', audio, 'audio/wav')},
-            data={
-                'model': 'gpt-4o-mini-transcribe',
-                'prompt': 'Transcribe the spoken words verbatim in their original language. Never translate. Keep English speech in English, Russian speech in Russian, Kazakh speech in Kazakh, and Arabic speech (including Egyptian dialect) in Arabic. Accented name variants include Садом, Саднам, سعدتم. The assistant name can be صدام or سدام. The assistant name is ' + ROBOT_NAME + '.'
-            },
+            files={'file': (filename, audio, 'audio/wav')},
+            data={'model': 'gpt-4o-mini-transcribe', 'prompt': prompt},
             timeout=60
         )
     response.raise_for_status()
-    return response.json()['text']
+    return response.json()['text'].strip()
+
+
+def listen(wait_seconds=None):
+    if not record_until_silence(wait_seconds=wait_seconds):
+        return ''
+    return transcribe_audio()
 
 
 def response_language(question):
@@ -497,6 +504,16 @@ def main():
                 continue
             print('You:', heard)
             question = wake_question(heard)
+            if question is None:
+                print('Wake name absent from first transcription; retrying audio once.')
+                try:
+                    retry_heard = transcribe_audio(retry=True)
+                    print('Wake retry transcription:', retry_heard)
+                    question = wake_question(retry_heard)
+                    if question is not None:
+                        heard = retry_heard
+                except Exception as error:
+                    print('Wake retry failed:', error)
             if question is None:
                 print(ROBOT_NAME + ': Name not detected. Skipping.')
                 continue
