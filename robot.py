@@ -451,7 +451,7 @@ def speak(text):
                 player.wait()
 
 
-def needs_camera(text):
+def needs_camera(text, previous_camera_question=None):
     """Route requests about the currently visible world to the live camera."""
     try:
         response = requests.post(
@@ -480,9 +480,11 @@ def needs_camera(text):
                         'Examples: "как дела?" NO; "какая погода?" NO; '
                         '"when did Michael Jackson die?" NO. '
                         'Understand Russian, Kazakh, English, Egyptian Arabic and transliteration. '
+                        'A follow-up about the same object, person or visible scene also needs a NEW camera frame, '
+                        'even if the new question is short, such as "а в другой руке?" or "а теперь?". '
                         'When a question is clearly about the present visible scene, prefer YES.'
                     )},
-                    {'role': 'user', 'content': text}
+                    {'role': 'user', 'content': ('Previous visual question: ' + previous_camera_question + '\n' if previous_camera_question else '') + 'Current question: ' + text}
                 ]
             },
             timeout=(5, 20)
@@ -503,6 +505,7 @@ def needs_camera(text):
 def main():
     global conversation_history
     global vision_thread
+    global last_camera_question
     print(ROBOT_NAME + ' started. Press Ctrl+C to exit.')
     if VISION_ENABLED:
         vision_thread = threading.Thread(target=vision_worker, daemon=True)
@@ -536,9 +539,10 @@ def main():
             )):
                 speak('До встречи!')
                 break
-            camera_required = needs_camera(question)
+            camera_required = needs_camera(question, previous_camera_question=last_camera_question)
             print('Camera required:', 'Yes' if camera_required else 'No')
             answer = see(question) if camera_required else chat(question)
+            last_camera_question = question if camera_required else None
             speak(answer)
         except KeyboardInterrupt:
             print('\\n' + ROBOT_NAME + ' stopped.')
