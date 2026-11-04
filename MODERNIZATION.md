@@ -38,6 +38,10 @@ Tests run offline without camera, audio hardware or an API key. Real-device chec
 - `TARZA_VISION_IMAGE_WIDTH=960` — width of visual answer frames.
 - `ROBOT_WAKE_WORDS` — optional comma-separated override; if set, it replaces the default wake variants.
 
+## GPT model settings
+
+Default chat and vision: `gpt-6.1-terra`. Default camera router: `gpt-6-luna`. Change using environment variables `SADAM_CHAT_MODEL`, `SADAM_VISION_MODEL`, and `SADAM_ROUTER_MODEL`. Low-latency reasoning uses `SADAM_REASONING_EFFORT=none`. All API calls still require a working `OPENAI_API_KEY`.
+
 ## Known limitations
 
 - Short-clip transcription cannot recover a wake name if the microphone/VAD never captured it. If the name still disappears, stop the robot after a failed attempt, play back `speech.wav` with `aplay -D plughw:3,0 speech.wav`, and inspect the beginning of the recording. Only share voice samples with the speaker's permission.
