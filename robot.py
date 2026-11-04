@@ -44,6 +44,7 @@ SYSTEM_PROMPT = (
     'Never narrate it as an external image, photograph, frame, or camera feed; avoid phrases like "the image shows" or "in this picture". '
     'Mention the most noticeable objects first, in one or two short spoken sentences, not a formal scene analysis. '
     'Describe only what you can actually make out. If the view is dark, blurry, or uncertain, say so naturally in the first person without guessing. '
+    'For ordinary questions, answer directly without describing surroundings. '
     'Do not claim to see your surroundings unless a current camera photo is attached. '
     'When no image is attached, do not claim to see the current surroundings.'
 )
@@ -361,10 +362,7 @@ def see(question):
 
 
 def chat(question):
-    event = current_vision_event()
-    if event:
-        # Event is a brief, possibly stale observation, not a current camera view.
-        return ask_ai(question + '\\n[Background vision observation (may be up to 2 minutes old): ' + event + ']')
+    # Do not inject background camera observations into ordinary conversation.
     return ask_ai(question)
 
 
