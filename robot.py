@@ -435,7 +435,7 @@ def speak(text):
 
 
 def needs_camera(text):
-    """Use a small semantic classifier instead of fixed camera keywords."""
+    """Route requests about the currently visible world to the live camera."""
     try:
         response = requests.post(
             'https://api.openai.com/v1/chat/completions',
@@ -443,24 +443,41 @@ def needs_camera(text):
             json={
                 'model': 'gpt-4o-mini',
                 'temperature': 0,
-                'max_completion_tokens': 12,
+                'max_tokens': 32,
                 'messages': [
                     {'role': 'system', 'content': (
-                        'Decide if the user requests information from the robot LIVE CAMERA. '
-                        'Return only YES or NO. YES for seeing or inspecting the current surroundings, '
-                        'visible people, objects, appearance, colors, actions, reading visible text. '
-                        'NO for general knowledge, weather, feelings, past events, hypotheticals, '
-                        'and figurative uses of seeing. Understand Russian, English, Kazakh, '
-                        'Egyptian Arabic, Modern Standard Arabic and transliterated Arabic. '
-                        'When uncertain, answer NO.')},
+                        'You are a camera routing classifier for a robot with a live camera. '
+                        'Reply with exactly one word: YES or NO. '
+                        'YES if answering the user requires seeing the current physical environment '
+                        'or something currently in front of the camera. This includes identifying '
+                        'an object someone is holding, describing what the robot sees, identifying '
+                        'people, clothing, colors, gestures, reading visible text, or checking '
+                        'what is happening nearby. The user need not mention a camera or photo. '
+                        'Examples: "что у меня в руке?" YES; "что ты видишь?" YES; '
+                        '"что перед тобой?" YES; "Смотри, что это?" YES; '
+                        '"what am I holding?" YES; "can you see me?" YES; '
+                        '"شايف إيه قدامك؟" YES; "إيه اللي في إيدي؟" YES. '
+                        'NO if the question can be answered without seeing the current scene, '
+                        'including general knowledge, weather, feelings, history, hypothetical '
+                        'questions, and figurative uses of see. '
+                        'Examples: "как дела?" NO; "какая погода?" NO; '
+                        '"when did Michael Jackson die?" NO. '
+                        'Understand Russian, Kazakh, English, Egyptian Arabic and transliteration. '
+                        'When a question is clearly about the present visible scene, prefer YES.'
+                    )},
                     {'role': 'user', 'content': text}
                 ]
             },
-            timeout=(5, 15)
+            timeout=(5, 20)
         )
         response.raise_for_status()
-        result = (response.json()['choices'][0]['message']['content'] or '').strip().upper()
-        return result == 'YES'
+        data = response.json()
+        result = (data['choices'][0]['message'].get('content') or '').strip().upper()
+        print('Camera classifier raw result:', repr(result))
+        if result in ('YES', 'NO'):
+            return result == 'YES'
+        print('Camera classifier returned an unexpected result; defaulting to no camera.')
+        return False
     except Exception as error:
         print('Camera routing unavailable; defaulting to no camera:', error)
         return False
