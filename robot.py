@@ -7,6 +7,7 @@ import audioop
 import collections
 import time
 import wave
+import io
 import threading
 import cv2
 
@@ -21,6 +22,7 @@ session_output_tokens = 0
 ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Садам').strip() or 'Садам'
 DIALOG_TIMEOUT = float(os.environ.get('TARZA_DIALOG_TIMEOUT', '30'))
 DEBUG_TIMING = os.environ.get('SADAM_DEBUG_TIMING', '1') == '1'
+TRANSCRIBE_MODEL = os.environ.get('TARZA_TRANSCRIBE_MODEL', 'gpt-transcribe')
 conversation_history = []
 VISION_ENABLED = os.environ.get('TARZA_VISION_ENABLED', '1') == '1'
 BACKGROUND_VISION_ENABLED = os.environ.get('TARZA_BACKGROUND_ANALYSIS', '0') == '1'
@@ -151,7 +153,8 @@ def record_until_silence(filename='speech.wav', wait_seconds=None):
     chunk_bytes = 960  # 30 ms, 16-bit mono
     silence_seconds = float(os.environ.get('TARZA_SILENCE_SECONDS', '1.0'))
     min_rms = int(os.environ.get('TARZA_VOICE_RMS', '350'))
-    preroll = collections.deque(maxlen=20)  # 600 ms to preserve softly spoken wake names
+    preroll_seconds = max(0.6, min(3.0, float(os.environ.get('TARZA_PREROLL_SECONDS', '1.5'))))
+    preroll = collections.deque(maxlen=int(preroll_seconds / 0.03))
     frames = []
     speaking = False
     last_voice = None
@@ -212,26 +215,72 @@ def record_until_silence(filename='speech.wav', wait_seconds=None):
     return True
 
 
-def transcribe_audio(filename='speech.wav', retry=False):
-    prompt = ('The first spoken word may be the robot name Садам, Sadam, صدام or سدام. '
-              'Preserve the name only if actually spoken. Do not invent it. '
-              'Transcribe Egyptian Arabic in Arabic script, without translating. '
-              'Keep Russian, English and Kazakh in their spoken language. ')
-    if retry:
-        prompt += 'Pay particular attention to the first word and the Egyptian Arabic accent. '
-    start = time.monotonic()
-    with open(filename, 'rb') as audio:
-        response = requests.post(
-            'https://api.openai.com/v1/audio/transcriptions',
-            headers=HEADERS,
-            files={'file': (filename, audio, 'audio/wav')},
-            data={'model': 'gpt-4o-mini-transcribe', 'prompt': prompt},
-            timeout=60
-        )
+def wake_audio_prefix(filename='speech.wav', seconds=None):
+    """Export only the start of the recorded audio as WAV in memory."""
+    if seconds is None:
+        seconds = float(os.environ.get('TARZA_WAKE_PREFIX_SECONDS', '2.7'))
+    seconds = max(1.5, min(4.0, seconds))
+    with wave.open(filename, 'rb') as source:
+        rate = source.getframerate()
+        channels = source.getnchannels()
+        width = source.getsampwidth()
+        frames = source.readframes(int(rate * seconds))
+    output = io.BytesIO()
+    with wave.open(output, 'wb') as dest:
+        dest.setnchannels(channels)
+        dest.setsampwidth(width)
+        dest.setframerate(rate)
+        dest.writeframes(frames)
+    return output.getvalue()
+
+
+def transcribe_audio(filename='speech.wav', first_seconds=None):
+    """Multilingual transcription with literal wake-name hints, not forced output."""
+    prompt = ('This is a multilingual voice assistant conversation. '
+              'The assistant may be addressed as صدام, Saddam, Садам or Саддам. '
+              'Write only what is actually audible, including the first word if spoken. '
+              'Never insert a wake name that was not spoken. '
+              'Preserve Egyptian Arabic in Arabic script, and do not translate.')
+    if first_seconds is None:
+        with open(filename, 'rb') as audio:
+            audio_bytes = audio.read()
+        upload_name = 'speech.wav'
+    else:
+        audio_bytes = wake_audio_prefix(filename, first_seconds)
+        upload_name = 'wake_prefix.wav'
+        prompt = ('Transcribe the first audible words exactly as spoken. '
+                  'The first word could be صدام, Saddam, Садам or Саддам. '
+                  'Only write this name if it is actually audible. '
+                  'Do not translate or invent any words.')
+    data = [('model', TRANSCRIBE_MODEL), ('prompt', prompt)]
+    if TRANSCRIBE_MODEL == 'gpt-transcribe':
+        for keyword in ('صدام', 'سدام', 'Saddam', 'Sadam', 'Садам', 'Саддам'):
+            data.append(('keywords[]', keyword))
+        for language in ('ar', 'ru', 'en', 'kk'):
+            data.append(('languages[]', language))
+    started = time.monotonic()
+    response = requests.post(
+        'https://api.openai.com/v1/audio/transcriptions',
+        headers=HEADERS,
+        files={'file': (upload_name, audio_bytes, 'audio/wav')},
+        data=data,
+        timeout=60
+    )
     response.raise_for_status()
     if DEBUG_TIMING:
-        print('Transcription time: {:.2f}s{}'.format(time.monotonic() - start, ' (retry)' if retry else ''))
+        label = ' (wake prefix)' if first_seconds is not None else ''
+        print('Transcription time: {:.2f}s{}'.format(time.monotonic() - started, label))
     return response.json()['text'].strip()
+
+
+def recover_wake_question(full_transcription, filename='speech.wav'):
+    """Verify the first spoken word in a short audio prefix, never skip the wake rule."""
+    prefix = transcribe_audio(filename=filename, first_seconds=2.7)
+    print('Wake prefix transcription:', prefix)
+    if wake_question(prefix) is None:
+        return None
+    print('Wake detected in audio prefix; retaining the complete question transcript.')
+    return full_transcription.strip()
 
 
 def listen(wait_seconds=None):
@@ -523,15 +572,11 @@ def main():
             print('You:', heard)
             question = wake_question(heard)
             if question is None:
-                print('Wake name absent from first transcription; retrying audio once.')
+                print('Wake name absent in full transcript; checking first seconds of audio.')
                 try:
-                    retry_heard = transcribe_audio(retry=True)
-                    print('Wake retry transcription:', retry_heard)
-                    question = wake_question(retry_heard)
-                    if question is not None:
-                        heard = retry_heard
+                    question = recover_wake_question(heard)
                 except Exception as error:
-                    print('Wake retry failed:', error)
+                    print('Wake prefix check failed:', error)
             if question is None:
                 print(ROBOT_NAME + ': Name not detected. Skipping.')
                 continue
