@@ -430,32 +430,18 @@ def main():
     if VISION_ENABLED:
         vision_thread = threading.Thread(target=vision_worker, daemon=True)
         vision_thread.start()
-    active_until = 0.0
     while True:
         try:
-            remaining = max(0.0, active_until - time.monotonic())
-            if active_until and remaining == 0:
-                active_until = 0.0
-                conversation_history.clear()
-                print('Conversation ended. Say ' + ROBOT_NAME + ' to start again.')
-            heard = listen(wait_seconds=remaining if active_until else None).strip()
+            heard = listen(wait_seconds=None).strip()
             if not heard:
-                if active_until:
-                    active_until = 0.0
-                    conversation_history.clear()
-                    print('Conversation timed out. Say ' + ROBOT_NAME + ' to start again.')
                 continue
             print('You:', heard)
-            woke = bool(WAKE_PATTERN.search(heard))
-            if not active_until and not woke:
-                print(ROBOT_NAME + ': Wake word not detected. Skipping.')
+            if not WAKE_PATTERN.search(heard):
+                print(ROBOT_NAME + ': Name not detected. Skipping.')
                 continue
-            if woke and not active_until:
-                conversation_history.clear()
-            question = WAKE_PATTERN.sub('', heard).strip(' ,.!?') if woke else heard.strip(' ,.!?')
+            question = WAKE_PATTERN.sub('', heard).strip(' ,.!?')
             if not question:
                 speak('Да, я слушаю.')
-                active_until = time.monotonic() + DIALOG_TIMEOUT
                 continue
             if any(word in question.lower() for word in (
                 'выключись', 'заверши работу', 'до свидания',
@@ -467,7 +453,6 @@ def main():
             print('Camera required:', 'Yes' if camera_required else 'No')
             answer = see(question) if camera_required else chat(question)
             speak(answer)
-            active_until = time.monotonic() + DIALOG_TIMEOUT
         except KeyboardInterrupt:
             print('\\n' + ROBOT_NAME + ' stopped.')
             break
