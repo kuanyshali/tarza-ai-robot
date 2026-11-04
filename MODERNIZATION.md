@@ -38,13 +38,31 @@ Tests run offline without camera, audio hardware or an API key. Real-device chec
 - `TARZA_VISION_IMAGE_WIDTH=960` — width of visual answer frames.
 - `ROBOT_WAKE_WORDS` — optional comma-separated override; if set, it replaces the default wake variants.
 
+## USB speaker recovery
+
+ALSA card numbers can change after reboot or reconnect. The robot now scans `aplay -l` on each playback, prefers devices labeled as USB speakers, and tries another USB playback output if the first fails. A missing speaker logs an error but does not stop the voice assistant.
+
+To inspect available devices:
+
+```bash
+aplay -l
+```
+
+When more than one USB playback device appears, set an explicit output, replacing the example card number with the speaker's actual ALSA card:
+
+```bash
+SADAM_SPEAKER_DEVICE=plughw:1,0 python3 robot.py
+```
+
+The same selection is used for status beeps and spoken responses. The microphone currently still uses its configured card number `plughw:2,0`. If that changes too, inspect `arecord -l` before changing capture settings.
+
 ## GPT model settings
 
 Default chat and vision: `gpt-6.1-terra`. Default camera router: `gpt-6-luna`. Change using environment variables `SADAM_CHAT_MODEL`, `SADAM_VISION_MODEL`, and `SADAM_ROUTER_MODEL`. Low-latency reasoning uses `SADAM_REASONING_EFFORT=none`. All API calls still require a working `OPENAI_API_KEY`.
 
 ## Known limitations
 
-- Short-clip transcription cannot recover a wake name if the microphone/VAD never captured it. If the name still disappears, stop the robot after a failed attempt, play back `speech.wav` with `aplay -D plughw:3,0 speech.wav`, and inspect the beginning of the recording. Only share voice samples with the speaker's permission.
+- Short-clip transcription cannot recover a wake name if the microphone/VAD never captured it. If the name still disappears, stop the robot after a failed attempt, play back `speech.wav` with `aplay -D plughw:<speaker-card>,0 speech.wav` (replace the number using `aplay -l`), and inspect the beginning of the recording. Only share voice samples with the speaker's permission.
 - Cloud STT and semantic camera routing each add API latency and charges; the second short STT call happens only when the name is missing. Keyword hints are not proof that a word was spoken; confirm native-speaker accuracy on-device.
 - Egyptian Arabic speech synthesis with the existing `tts-1/alloy` voice may retain an accent.
 - Higher image detail increases visual API cost compared with low-detail frames.
