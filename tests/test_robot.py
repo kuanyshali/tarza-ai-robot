@@ -151,6 +151,16 @@ class RobotTests(unittest.TestCase):
         self.assertEqual(calls[0][1]['input'], pcm)
         self.assertEqual(calls[0][0][0], 'aplay')
 
+    def test_new_model_payload(self):
+        builder = isolated('build_chat_request', REASONING_EFFORT='none')
+        payload = builder('gpt-6.1-terra', [{'role': 'user', 'content': 'hello'}], 500)
+        self.assertEqual(payload['model'], 'gpt-6.1-terra')
+        self.assertEqual(payload['reasoning_effort'], 'none')
+        self.assertNotIn('temperature', payload)
+        self.assertEqual(payload['max_completion_tokens'], 500)
+        legacy = builder('gpt-4o-mini', [], 32, 0)
+        self.assertEqual(legacy['temperature'], 0)
+
     def test_camera_router(self):
         seen = []
         def post(url, **kwargs):
