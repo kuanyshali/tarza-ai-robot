@@ -131,8 +131,78 @@ def show_usage(data):
 
 
 
+class AudioPlaybackError(RuntimeError):
+    """No usable output device or ALSA playback failed."""
+
+
+def audio_output_candidates():
+    """Find USB playback devices by their current ALSA index, not a fixed card number.
+
+    SADAM_SPEAKER_DEVICE lets the user select an exact ALSA name such as
+    plughw:CARD=Speaker,DEV=0 or plughw:1,0 when multiple USB devices exist.
+    """
+    override = os.environ.get('SADAM_SPEAKER_DEVICE', '').strip()
+    if override:
+        return [override]
+    try:
+        result = subprocess.run(
+            ['aplay', '-l'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print('Audio device scan failed:', error)
+        return []
+    if result.returncode != 0:
+        print('Audio device scan failed:', result.stderr.strip())
+        return []
+
+    matches = re.findall(
+        r'^card\s+(\d+):\s*([^\[]+)\[([^\]]+)\],\s*device\s+(\d+):\s*(.*)$',
+        result.stdout, re.MULTILINE
+    )
+    choices = []
+    for card, _shortname, longname, device, description in matches:
+        label = (_shortname + ' ' + longname + ' ' + description).lower()
+        # Avoid silently using an HDMI output when the USB speaker disappears.
+        if 'usb' not in label and 'xiaomi' not in label and 'speaker' not in label:
+            continue
+        preferred = int('speaker' in label or 'xiaomi' in label)
+        choices.append((preferred, 'plughw:{},{}'.format(card, device), label))
+    choices.sort(key=lambda item: -item[0])
+    # Preserve discovery order for otherwise equivalent USB devices.
+    return [device for _priority, device, _label in choices]
+
+
+def play_pcm(pcm, rate, timeout=120, quiet=False):
+    """Try available USB outputs and report failures instead of killing the assistant."""
+    devices = audio_output_candidates()
+    if not devices:
+        raise AudioPlaybackError(
+            'USB playback device not found. Run aplay -l, reconnect the speaker, '
+            'or set SADAM_SPEAKER_DEVICE=plughw:<card>,0'
+        )
+    errors = []
+    for device in devices:
+        try:
+            result = subprocess.run(
+                ['aplay', '-q', '-D', device, '-t', 'raw',
+                 '-f', 'S16_LE', '-r', str(rate), '-c', '1'],
+                input=pcm, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                timeout=timeout, check=False
+            )
+            if result.returncode == 0:
+                if not quiet:
+                    print('Audio output:', device)
+                return device
+            message = result.stderr.decode('utf-8', errors='replace').strip()
+            errors.append('{}: {}'.format(device, message or 'ALSA exit ' + str(result.returncode)))
+        except (OSError, subprocess.TimeoutExpired) as error:
+            errors.append('{}: {}'.format(device, error))
+    raise AudioPlaybackError('All USB outputs failed: ' + '; '.join(errors))
+
+
 def play_beep(frequency=880, duration=0.12, volume=0.18):
-    # Play a short local cue through the USB speaker before/after recording.
+    # Nonessential audio cue; failure should never stop the microphone.
     import math
     import struct
 
@@ -144,13 +214,8 @@ def play_beep(frequency=880, duration=0.12, volume=0.18):
         value = int(32767 * volume * fade * math.sin(2 * math.pi * frequency * i / rate))
         pcm.extend(struct.pack('<h', value))
     try:
-        subprocess.run(
-            ['aplay', '-q', '-D', 'plughw:3,0', '-t', 'raw',
-             '-f', 'S16_LE', '-r', str(rate), '-c', '1'],
-            input=bytes(pcm), stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, timeout=3, check=False
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        play_pcm(bytes(pcm), rate, timeout=3, quiet=True)
+    except AudioPlaybackError:
         pass
 
 
@@ -499,8 +564,11 @@ def chat(question):
 
 def speak(text):
     print(ROBOT_NAME + ':', text)
-    # Download the entire PCM clip before starting ALSA playback.
-    # Feeding aplay directly from network chunks caused ALSA underruns on Jetson.
+    # Validate the device first to avoid paying for TTS while the speaker is missing.
+    if not audio_output_candidates():
+        raise AudioPlaybackError(
+            'USB speaker not detected; use aplay -l or set SADAM_SPEAKER_DEVICE'
+        )
     started = time.monotonic()
     response = requests.post(
         'https://api.openai.com/v1/audio/speech',
@@ -518,10 +586,7 @@ def speak(text):
     if DEBUG_TIMING:
         print('TTS download time: {:.2f}s; audio duration: {:.1f}s'.format(
             time.monotonic() - started, len(pcm) / (24000.0 * 2)))
-    subprocess.run([
-        'aplay', '-q', '-D', 'plughw:3,0', '-t', 'raw',
-        '-f', 'S16_LE', '-r', '24000', '-c', '1'
-    ], input=pcm, stdout=subprocess.DEVNULL, check=True, timeout=120)
+    return play_pcm(pcm, rate=24000)
 
 
 def needs_camera(text, previous_camera_question=None):
@@ -621,6 +686,10 @@ def main():
         except KeyboardInterrupt:
             print('\\n' + ROBOT_NAME + ' stopped.')
             break
+        except AudioPlaybackError as error:
+            print('Audio playback unavailable:', error)
+            print('Sadam is still listening; check USB speaker / aplay -l.')
+            continue
         except Exception as error:
             print('Error:', error)
             print(ROBOT_NAME + ' stopped. Check the microphone and audio device.')
