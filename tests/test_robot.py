@@ -59,6 +59,37 @@ class RobotTests(unittest.TestCase):
         self.assertEqual(language('не көріп тұрсың'), 'Kazakh')
         self.assertEqual(language('what do you see'), 'English')
 
+    def test_tts_buffers_pcm_before_playback(self):
+        pcm = b'\\x01\\x02' * 24000
+        calls = []
+        class AudioResponse:
+            content = pcm
+            def raise_for_status(self):
+                pass
+
+        def post(url, **kwargs):
+            self.assertIn('/audio/speech', url)
+            self.assertNotIn('stream', kwargs)
+            return AudioResponse()
+
+        def play(args, **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(returncode=0)
+
+        speaker = isolated(
+            'speak',
+            requests=SimpleNamespace(post=post),
+            subprocess=SimpleNamespace(run=play, DEVNULL=-3),
+            HEADERS={},
+            ROBOT_NAME='Садам',
+            DEBUG_TIMING=False,
+            time=time
+        )
+        speaker('Hello!')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]['input'], pcm)
+        self.assertEqual(calls[0][0][0], 'aplay')
+
     def test_camera_router(self):
         seen = []
         def post(url, **kwargs):
