@@ -52,14 +52,21 @@ SYSTEM_PROMPT = (
 _wake_words_env = os.environ.get('ROBOT_WAKE_WORDS', '').strip()
 if _wake_words_env:
     WAKE_WORDS = tuple(w.strip() for w in _wake_words_env.split(',') if w.strip())
-elif ROBOT_NAME.casefold() in ('садам', 'sadam'):
-    # Common Russian/English STT variations of the name Sadam.
-    WAKE_WORDS = ('садам', 'sadam', 'адам', 'adam', 'садан', 'sadan', 'сада', 'sada', 'садамм', 'sadamm')
+elif ROBOT_NAME.casefold() in ('садам', 'sadam', 'саддам', 'saddam'):
+    # Short transcription variants for Russian, Kazakh and English accents.
+    WAKE_WORDS = (
+        'садам', 'саддам', 'садамм', 'саддан', 'садан', 'сада',
+        'садэм', 'саддэм', 'сэдэм', 'сэддам', 'сэдем',
+        'адам', 'аддам', 'адэм', 'адамм',
+        'sadam', 'saddam', 'sadamm', 'saddamm', 'sadan',
+        'sadem', 'saddem', 'sedam', 'sedem', 'sada',
+        'adam', 'addam', 'adem'
+    )
 else:
     WAKE_WORDS = (ROBOT_NAME,)
 if not WAKE_WORDS:
     WAKE_WORDS = (ROBOT_NAME,)
-WAKE_PATTERN = re.compile(r'(?<!\w)(?:' + '|'.join(map(re.escape, WAKE_WORDS)) + r')(?!\w)', re.IGNORECASE)
+WAKE_PATTERN = re.compile(r'(?<!\\w)(?:' + '|'.join(map(re.escape, sorted(set(WAKE_WORDS), key=len, reverse=True))) + r')(?!\\w)', re.IGNORECASE)
 
 
 def show_usage(data):
