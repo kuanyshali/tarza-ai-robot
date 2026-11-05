@@ -369,10 +369,10 @@ def utterance_may_continue(transcript):
     if not clean:
         return False
     return bool(re.search(
-        r'(?:\\b(?:and|but|because|if|when|that|which|or|so|to|with|'
+        r'(?:\b(?:and|but|because|if|when|that|which|or|so|to|with|'
         r'а|но|потому|потому что|если|когда|который|чтобы|и|или|'
         r'мен|бірақ|өйткені|егер|және|сондықтан|'
-        r'و|بس|عشان|لأن|لو|يعني)\\b|(?:что|как|почему|где)\\s+бы)$',
+        r'و|بس|عشان|لأن|لو|يعني)\b|(?:что|как|почему|где)\s+бы)$',
         clean
     ))
 
