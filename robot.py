@@ -390,8 +390,8 @@ def recover_wake_question(full_transcription, filename='speech.wav'):
     return full_transcription.strip()
 
 
-def listen(wait_seconds=None):
-    if not record_until_silence(wait_seconds=wait_seconds):
+def listen(wait_seconds=None, beep=True):
+    if not record_until_silence(wait_seconds=wait_seconds, beep=beep):
         return ''
     return transcribe_audio()
 
@@ -414,9 +414,9 @@ def utterance_may_continue(transcript):
     ))
 
 
-def listen_complete(wait_seconds=None):
+def listen_complete(wait_seconds=None, beep=True):
     """Capture one spoken turn; if it sounds unfinished, collect brief add-ons."""
-    first = listen(wait_seconds=wait_seconds)
+    first = listen(wait_seconds=wait_seconds, beep=beep)
     if not first:
         return ''
     parts = [first.strip()]
@@ -430,7 +430,7 @@ def listen_complete(wait_seconds=None):
         if not incomplete:
             break
         print('Sentence sounds unfinished; listening for continuation...')
-        more = listen(wait_seconds=CONTINUATION_WAIT)
+        more = listen(wait_seconds=CONTINUATION_WAIT, beep=False)
         if not more:
             break
         parts.append(more.strip())
@@ -1030,7 +1030,8 @@ def main():
                 heard = transcribe_audio().strip()
             else:
                 heard = listen_complete(
-                    wait_seconds=max(0.0, dialog_until - time.monotonic()) if active else None
+                    wait_seconds=max(0.0, dialog_until - time.monotonic()) if active else None,
+                    beep=not active
                 ).strip()
             if not heard:
                 if active:
