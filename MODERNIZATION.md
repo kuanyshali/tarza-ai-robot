@@ -20,7 +20,7 @@ Tests run offline without camera, audio hardware or an API key. Real-device chec
 
 1. **Wake-name recovery**: 1.5 s audio pre-roll; primary multilingual `gpt-transcribe` transcription with name keywords. If the first transcription lacks the wake name, transcribe only the first 2.7 seconds of the recorded audio. Check the `Wake prefix transcription:` line. If neither contains the name, Sadam deliberately ignores the request.
 2. **Multilingual conversation**: say `Садам, привет`, `Sadam, hello`, `صدام، إزيك؟`, and a Kazakh question. Test with a native Egyptian speaker.
-3. **Visual questions**: say `Садам, что у меня в руке?`, `صدام، شايف إيه قدامك؟`, then `Садам, а в другой руке?`. Expected: `Camera classifier raw result: 'YES'` and `Camera required: Yes`.
+3. **Visual questions**: say `Садам, что у меня в руке?`, `صدام، شايف إيه قدامك؟`, then `Садам, а в другой руке?`. Expected: `Camera routing: local YES` or `Camera classifier raw result: 'YES'`, then `Camera required: Yes`.
 4. **Non-visual questions**: `Садам, какая погода в Астане?` should route to ordinary chat (not camera). The robot does not have live weather data unless a separate weather tool is added.
 5. **Budget**: background cloud vision is now OFF by default. Camera capture and local change detection remain ON. To enable event descriptions explicitly, run `TARZA_BACKGROUND_ANALYSIS=1 python3 robot.py`.
 6. **Image detail**: direct visual questions use a higher-resolution camera frame (default 960 px wide), instead of 320 px. Set `TARZA_VISION_IMAGE_WIDTH=640` to reduce bandwidth/cost, or `1280` for more detail.
@@ -31,30 +31,33 @@ Tests run offline without camera, audio hardware or an API key. Real-device chec
 - `TARZA_TRANSCRIBE_MODEL=gpt-transcribe` — recommended current speech-to-text model. To temporarily revert use `TARZA_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe` (legacy, does not support language/keyword hints).
 - `TARZA_PREROLL_SECONDS=1.5` — saves pre-trigger audio so softly spoken names are not clipped.
 - `TARZA_WAKE_PREFIX_SECONDS=2.7` — short initial clip for wake-name recovery.
-- `TARZA_SILENCE_SECONDS=1.0` — recording ends after a second of silence; raise to 1.5 if your friend speaks slowly or pauses mid-sentence.
+- `TARZA_SILENCE_SECONDS=0.7` — default ends recording after 0.7 seconds of silence. Set to `1.0` or `1.5` if endings get clipped or speech has long pauses.
 - `TARZA_VOICE_RMS=350` — energy threshold for starting speech capture. Lower only if quiet wake words are cut off; background noise can cause false triggers.
 - `TARZA_VISION_ENABLED=1` — camera worker on.
 - `TARZA_BACKGROUND_ANALYSIS=0` — disable unsolicited cloud vision spending.
 - `TARZA_VISION_IMAGE_WIDTH=960` — width of visual answer frames.
 - `ROBOT_WAKE_WORDS` — optional comma-separated override; if set, it replaces the default wake variants.
 
-## USB speaker recovery
+## Xiaomi USB speaker: automatic identity, never KT
 
-ALSA card numbers can change after reboot or reconnect. The robot now scans `aplay -l` on each playback, prefers devices labeled as USB speakers, and tries another USB playback output if the first fails. A missing speaker logs an error but does not stop the voice assistant.
-
-To inspect available devices:
+The confirmed Xiaomi currently appears in `aplay -l` as `USB Composite Device`. The robot finds its current ALSA card number on every playback and **never** falls back to `KT USB Audio` (the microphone adapter), HDMI or another generic USB output. If the exact Xiaomi label is absent or duplicated, voice playback fails with an explicit message while the listening loop continues. If a different device reports the same exact label, identification is not guaranteed; verify actual hardware before using it.
 
 ```bash
 aplay -l
 ```
 
-When more than one USB playback device appears, set an explicit output, replacing the example card number with the speaker's actual ALSA card:
+The microphone still uses `plughw:2,0`; that is independent of Xiaomi's playback card number.
 
-```bash
-SADAM_SPEAKER_DEVICE=plughw:1,0 python3 robot.py
-```
+## Latency optimization
 
-The same selection is used for status beeps and spoken responses. The microphone currently still uses its configured card number `plughw:2,0`. If that changes too, inspect `arecord -l` before changing capture settings.
+- Obvious visual requests and simple greetings are routed **locally**, without another API call. Uncertain requests still use the semantic camera classifier.
+- OpenAI TTS uses PCM HTTP streaming. Playback starts after an adjustable **1.8-second audio prebuffer**, instead of waiting for the whole TTS response. For network instability / ALSA underruns, increase the buffer, for example:
+  ```bash
+  SADAM_TTS_PREBUFFER_SECONDS=3.0 python3 robot.py
+  ```
+- Speech capture ends after 0.7 seconds of silence, adjustable with `TARZA_SILENCE_SECONDS`.
+- Log `TTS first playback` is the relevant latency measurement. The streaming total also includes audio playback.
+- Running `python3 -m unittest discover -s tests -v` is recommended before real-device tests. Jetson USB-audio behavior and network timing cannot be verified in offline tests.
 
 ## GPT model settings
 
