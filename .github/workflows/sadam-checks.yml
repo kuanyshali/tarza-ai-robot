@@ -12,6 +12,6 @@ jobs:
         with:
           python-version: '3.11'
       - name: Compile robot code
-        run: python -m py_compile robot.py
+        run: python -m py_compile robot.py sadam_features.py wake_listener.py
       - name: Offline unit tests
         run: python -m unittest discover -s tests -v
