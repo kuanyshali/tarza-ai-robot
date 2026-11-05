@@ -131,74 +131,38 @@ def show_usage(data):
 
 
 
+# Xiaomi USB speaker: explicitly configured as ALSA card 3, device 0.
+# No automatic device scanning or fallback to the microphone's USB adapter.
+XIAOMI_SPEAKER_DEVICE = 'plughw:3,0'
+
+
 class AudioPlaybackError(RuntimeError):
-    """No usable output device or ALSA playback failed."""
-
-
-def audio_output_candidates():
-    """Find USB playback devices by their current ALSA index, not a fixed card number.
-
-    SADAM_SPEAKER_DEVICE lets the user select an exact ALSA name such as
-    plughw:CARD=Speaker,DEV=0 or plughw:1,0 when multiple USB devices exist.
-    """
-    override = os.environ.get('SADAM_SPEAKER_DEVICE', '').strip()
-    if override:
-        return [override]
-    try:
-        result = subprocess.run(
-            ['aplay', '-l'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            universal_newlines=True, timeout=5, check=False
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        print('Audio device scan failed:', error)
-        return []
-    if result.returncode != 0:
-        print('Audio device scan failed:', result.stderr.strip())
-        return []
-
-    matches = re.findall(
-        r'^card\s+(\d+):\s*([^\[]+)\[([^\]]+)\],\s*device\s+(\d+):\s*(.*)$',
-        result.stdout, re.MULTILINE
-    )
-    choices = []
-    for card, _shortname, longname, device, description in matches:
-        label = (_shortname + ' ' + longname + ' ' + description).lower()
-        # Avoid silently using an HDMI output when the USB speaker disappears.
-        if 'usb' not in label and 'xiaomi' not in label and 'speaker' not in label:
-            continue
-        preferred = int('speaker' in label or 'xiaomi' in label)
-        choices.append((preferred, 'plughw:{},{}'.format(card, device), label))
-    choices.sort(key=lambda item: -item[0])
-    # Preserve discovery order for otherwise equivalent USB devices.
-    return [device for _priority, device, _label in choices]
+    """The explicitly configured Xiaomi speaker could not play audio."""
 
 
 def play_pcm(pcm, rate, timeout=120, quiet=False):
-    """Try available USB outputs and report failures instead of killing the assistant."""
-    devices = audio_output_candidates()
-    if not devices:
-        raise AudioPlaybackError(
-            'USB playback device not found. Run aplay -l, reconnect the speaker, '
-            'or set SADAM_SPEAKER_DEVICE=plughw:<card>,0'
+    """Play exclusively through Xiaomi, never through another USB audio card."""
+    command = [
+        'aplay', '-q', '-D', XIAOMI_SPEAKER_DEVICE, '-t', 'raw',
+        '-f', 'S16_LE', '-r', str(rate), '-c', '1'
+    ]
+    try:
+        result = subprocess.run(
+            command, input=pcm, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, timeout=timeout, check=False
         )
-    errors = []
-    for device in devices:
-        try:
-            result = subprocess.run(
-                ['aplay', '-q', '-D', device, '-t', 'raw',
-                 '-f', 'S16_LE', '-r', str(rate), '-c', '1'],
-                input=pcm, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                timeout=timeout, check=False
-            )
-            if result.returncode == 0:
-                if not quiet:
-                    print('Audio output:', device)
-                return device
-            message = result.stderr.decode('utf-8', errors='replace').strip()
-            errors.append('{}: {}'.format(device, message or 'ALSA exit ' + str(result.returncode)))
-        except (OSError, subprocess.TimeoutExpired) as error:
-            errors.append('{}: {}'.format(device, error))
-    raise AudioPlaybackError('All USB outputs failed: ' + '; '.join(errors))
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AudioPlaybackError(
+            'Xiaomi at {} unavailable: {}'.format(XIAOMI_SPEAKER_DEVICE, error)
+        )
+    if result.returncode != 0:
+        message = result.stderr.decode('utf-8', errors='replace').strip()
+        raise AudioPlaybackError(
+            'Xiaomi at {} failed: {}'.format(XIAOMI_SPEAKER_DEVICE, message)
+        )
+    if not quiet:
+        print('Audio output (Xiaomi):', XIAOMI_SPEAKER_DEVICE)
+    return XIAOMI_SPEAKER_DEVICE
 
 
 def play_beep(frequency=880, duration=0.12, volume=0.18):
@@ -564,11 +528,7 @@ def chat(question):
 
 def speak(text):
     print(ROBOT_NAME + ':', text)
-    # Validate the device first to avoid paying for TTS while the speaker is missing.
-    if not audio_output_candidates():
-        raise AudioPlaybackError(
-            'USB speaker not detected; use aplay -l or set SADAM_SPEAKER_DEVICE'
-        )
+    # Output is pinned to Xiaomi (plughw:3,0); no automatic device selection.
     started = time.monotonic()
     response = requests.post(
         'https://api.openai.com/v1/audio/speech',
