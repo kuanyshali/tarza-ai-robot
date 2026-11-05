@@ -329,6 +329,54 @@ class RobotTests(unittest.TestCase):
         self.assertFalse(gate('Друг, закажи мне такси', 'I see a chair.'))
         self.assertEqual(len(calls), 1)
 
+    def test_barge_in_accepts_only_explicit_wake_name(self):
+        import threading
+        class Player:
+            stopped = False
+            def poll(self):
+                return -15 if self.stopped else None
+            def terminate(self):
+                self.stopped = True
+        player = Player()
+        stop = threading.Event()
+        cancelled = threading.Event()
+        worker = isolated(
+            'barge_in_worker',
+            record_until_silence=lambda **kwargs: True,
+            transcribe_audio=lambda **kwargs: 'Садам, стоп',
+            wake_question=self.wake,
+            interrupt_lock=threading.Lock(),
+            pending_interrupt=None
+        )
+        worker(player, stop, cancelled, 'Today is sunny.')
+        self.assertTrue(cancelled.is_set())
+        self.assertTrue(player.stopped)
+        self.assertEqual(worker.__globals__['pending_interrupt'], 'Садам, стоп')
+
+    def test_barge_in_ignores_unaddressed_background_voice(self):
+        import threading
+        class Player:
+            times = 0
+            def poll(self):
+                self.times += 1
+                return None if self.times < 3 else 0
+            def terminate(self):
+                raise AssertionError('Background speech must not stop TTS')
+        player = Player()
+        stop = threading.Event()
+        cancelled = threading.Event()
+        worker = isolated(
+            'barge_in_worker',
+            record_until_silence=lambda **kwargs: True,
+            transcribe_audio=lambda **kwargs: 'Да, я понял тебя',
+            wake_question=self.wake,
+            interrupt_lock=threading.Lock(),
+            pending_interrupt=None
+        )
+        worker(player, stop, cancelled, 'Some text')
+        self.assertFalse(cancelled.is_set())
+        self.assertIsNone(worker.__globals__['pending_interrupt'])
+
     def test_new_model_payload(self):
         builder = isolated('build_chat_request', REASONING_EFFORT='none')
         payload = builder('gpt-6.1-terra', [{'role': 'user', 'content': 'hello'}], 500)
