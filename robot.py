@@ -1074,6 +1074,12 @@ def main():
                 continue
 
             if not question:
+                if offline_woke:
+                    # Activation beep already played; wait for the question
+                    # instead of generating an unnecessary TTS response.
+                    print('Wake acknowledged; listening for a question.')
+                    dialog_until = time.monotonic() + DIALOG_TIMEOUT
+                    continue
                 reply = 'Да, я слушаю.'
                 speak(reply)
                 last_answer = reply
