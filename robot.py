@@ -558,7 +558,8 @@ def chat(question):
 
 def speak(text):
     print(ROBOT_NAME + ':', text)
-    # Output is pinned to Xiaomi (plughw:3,0); no automatic device selection.
+    # Check the Xiaomi before making a paid OpenAI TTS request.
+    xiaomi_speaker_device()
     started = time.monotonic()
     response = requests.post(
         'https://api.openai.com/v1/audio/speech',
