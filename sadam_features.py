@@ -71,20 +71,20 @@ def weather_city(question, default_city=None):
     if not match:
         return default
     value = match.group(1).strip(' ,.!?،؟')
+    # The speaker may append "كام" ("how much") after the city.
     value = re.split(
         r'(?i)\b(?:today|tomorrow|now|right now|please|currently|'
-        r'сегодня|завтра|сейчас|пожалуйста|бүгін|ертең|اليوم|بكره|دلوقتي)\b',
+        r'сегодня|завтра|сейчас|пожалуйста|бүгін|ертең|'
+        r'اليوم|بكره|دلوقتي|حاليا|كام|قد|كم|إيه|ايه)\b',
         value, maxsplit=1
     )[0].strip(' ,.!?،؟')
-    # Common spoken Russian/Kazakh/Arabic forms of Astana are not geocoder names.
     aliases = {
         'астане': 'Astana', 'астана': 'Astana', 'астану': 'Astana',
         'астананың': 'Astana', 'астанада': 'Astana',
-        'أستانا': 'Astana', 'استانا': 'Astana', 'астан': 'Astana',
+        'أستانا': 'Astana', 'استانا': 'Astana',
         'алматы': 'Almaty', 'алмате': 'Almaty', 'алматыда': 'Almaty'
     }
     return aliases.get(value.casefold(), value or default)
-
 
 def wants_tomorrow(question):
     return bool(re.search(r'(?i)\b(?:tomorrow|завтра|ертең|بكره|غدا)\b', question or ''))
@@ -162,6 +162,33 @@ def get_weather(question, language='Russian', session=requests):
     return answer
 
 
+def clean_spoken_answer(value, max_chars=460):
+    """Drop web citations, raw URLs and markdown before TTS, with a length cap."""
+    spoken = value or ''
+    # Nested citations sometimes arrive as ([site]([url](url))).
+    spoken = re.sub(
+        r'\s*\(\[[^]\n]+\]\(\[https?://[^]\n]+\]\(https?://[^)]+\)\)\)',
+        '', spoken, flags=re.I
+    )
+    # Ordinary search citations: ([site](https://...)).
+    spoken = re.sub(
+        r'\s*\(\[[^]\n]+\]\(https?://[^)]+\)\)',
+        '', spoken, flags=re.I
+    )
+    spoken = re.sub(r'\[[^]\n]+\]\(https?://[^)]+\)', '', spoken)
+    spoken = re.sub(r'【[^】]+】', '', spoken)
+    spoken = re.sub(r'https?://[^\s)\]>]+', '', spoken)
+    spoken = re.sub(r'\*\*|__|[#`]', '', spoken)
+    spoken = re.sub(r'\s+', ' ', spoken).strip()
+    if len(spoken) > max_chars:
+        short = spoken[:max_chars]
+        boundary = max(short.rfind('. '), short.rfind('؟ '), short.rfind('! '))
+        spoken = (short[:boundary + 1] if boundary > 100 else short.rsplit(' ', 1)[0]).rstrip(' ,;:-')
+        if not spoken.endswith(('.', '!', '?', '؟')):
+            spoken += '.'
+    return spoken
+
+
 def search_web(question, language, history, headers, session=requests):
     """Official Chat Completions search model; cites sources in terminal."""
     if not WEB_ENABLED:
@@ -201,10 +228,7 @@ def search_web(question, language, history, headers, session=requests):
             print('Web source: {} {}'.format(ref.get('title', ''), ref['url']))
     if not answer:
         raise ValueError('Web search returned no answer')
-    # Citations should remain visible in console, not read aloud by TTS.
-    answer = re.sub(r'【[^】]+】', '', answer)
-    answer = re.sub(r'\[(?:\d+|source)\]\(https?://[^)]+\)', '', answer, flags=re.I)
-    return answer.strip()
+    return clean_spoken_answer(answer)
 
 
 def semantic_turn_incomplete(text, headers, session=requests):
