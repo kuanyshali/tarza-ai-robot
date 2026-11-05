@@ -301,7 +301,7 @@ class RobotTests(unittest.TestCase):
     def test_listen_complete_joins_incomplete_fragments(self):
         responses = iter(['Sadam, I wanted to ask because', 'I have a question.', ''])
         wait_calls = []
-        def listen(wait_seconds=None):
+        def listen(wait_seconds=None, beep=True):
             wait_calls.append(wait_seconds)
             return next(responses)
         joiner = isolated(
