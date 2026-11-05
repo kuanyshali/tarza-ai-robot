@@ -348,14 +348,28 @@ def transcribe_audio(filename='speech.wav', first_seconds=None):
         for language in ('ar', 'ru', 'en', 'kk'):
             data.append(('languages[]', language))
     started = time.monotonic()
-    response = requests.post(
-        'https://api.openai.com/v1/audio/transcriptions',
-        headers=HEADERS,
-        files={'file': (upload_name, audio_bytes, 'audio/wav')},
-        data=data,
-        timeout=60
-    )
-    response.raise_for_status()
+    # Retry only transient 5xx/connection errors once. Never retry auth,
+    # quota, or malformed requests; those are not transient.
+    for attempt in range(2):
+        try:
+            response = requests.post(
+                'https://api.openai.com/v1/audio/transcriptions',
+                headers=HEADERS,
+                files={'file': (upload_name, audio_bytes, 'audio/wav')},
+                data=data,
+                timeout=(10, 35)
+            )
+            response.raise_for_status()
+            break
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.HTTPError) as error:
+            status = getattr(getattr(error, 'response', None), 'status_code', None)
+            retryable = status is None or status >= 500
+            if attempt or not retryable:
+                raise
+            print('Transient transcription error; retrying once:', error)
+            time.sleep(0.3)
     if DEBUG_TIMING:
         label = ' (wake prefix)' if first_seconds is not None else ''
         print('Transcription time: {:.2f}s{}'.format(time.monotonic() - started, label))
