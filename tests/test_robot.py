@@ -181,34 +181,72 @@ class RobotTests(unittest.TestCase):
         self.assertEqual(calls[0][0][3], 'plughw:7,0')
         self.assertEqual(len(calls), 1)
 
-    def test_tts_buffers_pcm_before_playback(self):
-        pcm = b'\\x01\\x02' * 24000
+    def test_streamed_tts_starts_before_download_finishes(self):
+        events = []
+        class AudioResponse:
+            def iter_content(self, chunk_size):
+                events.append('chunk1')
+                yield b'A' * 50000
+                events.append('chunk2')
+                yield b'B' * 12000
+            def close(self):
+                events.append('closed')
+        class FakeStdin:
+            closed = False
+            def write(self, data):
+                events.append(('write', len(data)))
+            def close(self):
+                self.closed = True
+        class FakeStderr:
+            def read(self):
+                return b''
+            def close(self):
+                pass
+        class FakePlayer:
+            def __init__(self, *args, **kwargs):
+                events.append(('spawn', args[0][3]))
+                self.stdin = FakeStdin()
+                self.stderr = FakeStderr()
+            def wait(self, timeout=None):
+                return 0
+            def poll(self):
+                return 0
+        stream = isolated(
+            'stream_tts_to_xiaomi',
+            subprocess=SimpleNamespace(Popen=FakePlayer, PIPE=-1, DEVNULL=-3,
+                                        TimeoutExpired=TimeoutError),
+            time=time, TTS_PREBUFFER_SECONDS=1.0, DEBUG_TIMING=False,
+            AudioPlaybackError=RuntimeError
+        )
+        result = stream(AudioResponse(), 'plughw:5,0', time.monotonic())
+        self.assertEqual(result, 'plughw:5,0')
+        self.assertTrue(events.index(('spawn', 'plughw:5,0')) < events.index('chunk2'))
+        self.assertIn(('write', 50000), events)
+        self.assertIn(('write', 12000), events)
+        self.assertEqual(events[-1], 'closed')
+
+    def test_tts_streams_only_to_verified_xiaomi(self):
         calls = []
         class AudioResponse:
-            content = pcm
             def raise_for_status(self):
                 pass
-
+            def close(self):
+                pass
         def post(url, **kwargs):
             self.assertIn('/audio/speech', url)
-            self.assertNotIn('stream', kwargs)
+            self.assertTrue(kwargs['stream'])
             return AudioResponse()
-
-        def play(data, rate):
-            calls.append((data, rate))
-            return 'plughw:5,0'
-
+        def stream(response, device, started):
+            calls.append(device)
+            return device
         speaker = isolated(
-            'speak',
-            requests=SimpleNamespace(post=post),
-            HEADERS={}, ROBOT_NAME='Садам',
-            DEBUG_TIMING=False, time=time,
+            'speak', requests=SimpleNamespace(post=post), HEADERS={},
+            ROBOT_NAME='Садам', time=time,
             xiaomi_speaker_device=lambda: 'plughw:5,0',
-            play_pcm=play,
-            AudioPlaybackError=RuntimeError,
+            stream_tts_to_xiaomi=stream
         )
-        speaker('Hello!')
-        self.assertEqual(calls, [(pcm, 24000)])
+        self.assertEqual(speaker('Hello!'), 'plughw:5,0')
+        self.assertEqual(calls, ['plughw:5,0'])
 
     def test_tts_no_xiaomi_does_not_request_audio(self):
         def no_request(*args, **kwargs):
@@ -218,12 +256,25 @@ class RobotTests(unittest.TestCase):
         speaker = isolated(
             'speak',
             requests=SimpleNamespace(post=no_request),
-            HEADERS={}, ROBOT_NAME='Садам', DEBUG_TIMING=False,
+            HEADERS={}, ROBOT_NAME='Садам',
             time=time, xiaomi_speaker_device=no_xiaomi,
             AudioPlaybackError=RuntimeError,
         )
         with self.assertRaisesRegex(RuntimeError, 'Xiaomi missing'):
             speaker('Hello!')
+
+    def test_local_camera_route_multilingual_and_ambiguous(self):
+        local = isolated('local_camera_route', re=re)
+        for question in ('Как дела?', 'how are you?', 'thanks!', 'Сәлем!'):
+            with self.subTest(question=question):
+                self.assertIs(local(question), False)
+        for question in ('Что у меня в руке?', 'what am I holding?',
+                         'не көріп тұрсың?', 'شايف إيه قدامك؟',
+                         'are you good? what am I holding?'):
+            with self.subTest(question=question):
+                self.assertIs(local(question), True)
+        self.assertIsNone(local('какая погода сегодня?'))
+        self.assertIs(local('а теперь?', previous_camera_question='Что видишь?'), True)
 
     def test_new_model_payload(self):
         builder = isolated('build_chat_request', REASONING_EFFORT='none')
@@ -240,7 +291,7 @@ class RobotTests(unittest.TestCase):
         def post(url, **kwargs):
             seen.append(kwargs['json']['messages'][-1]['content'])
             return FakeResponse('YES' if 'что у меня в руке?' in seen[-1] else 'NO')
-        camera = isolated('needs_camera', requests=SimpleNamespace(post=post), HEADERS={}, time=time, DEBUG_TIMING=False, ROUTER_MODEL='gpt-6-luna', build_chat_request=isolated('build_chat_request', REASONING_EFFORT='none'))
+        camera = isolated('needs_camera', local_camera_route=isolated('local_camera_route', re=re), requests=SimpleNamespace(post=post), HEADERS={}, time=time, DEBUG_TIMING=False, ROUTER_MODEL='gpt-6-luna', build_chat_request=isolated('build_chat_request', REASONING_EFFORT='none'))
         self.assertTrue(camera('что у меня в руке?'))
         self.assertFalse(camera('какая погода?'))
         self.assertTrue(camera('а в другой руке?', previous_camera_question='что у меня в руке?'))
