@@ -377,6 +377,40 @@ class RobotTests(unittest.TestCase):
         self.assertFalse(cancelled.is_set())
         self.assertIsNone(worker.__globals__['pending_interrupt'])
 
+    def test_direct_arabic_question_does_not_need_intent_api(self):
+        local = isolated('local_followup_intent', re=re)
+        self.assertTrue(local('تقدر توصفلي اللي حصل في غزة ده إبادة جماعية ولا لأ؟'))
+        self.assertTrue(local('А это правда?'))
+        self.assertTrue(local('What happened yesterday?'))
+        self.assertIsNone(local('Друг, я вернусь через минуту'))
+        called = []
+        def no_network(*args, **kwargs):
+            called.append(True)
+            raise AssertionError('Direct question must not call API')
+        gate = isolated(
+            'followup_is_addressed',
+            re=re, local_followup_intent=local,
+            requests=SimpleNamespace(post=no_network)
+        )
+        self.assertTrue(gate('تقدر توصفلي اللي حصل في غزة ده إبادة جماعية ولا لأ؟'))
+        self.assertEqual(called, [])
+
+    def test_ambiguous_intent_timeout_does_not_hang(self):
+        local = isolated('local_followup_intent', re=re)
+        calls = []
+        def timeout_post(url, **kwargs):
+            calls.append(kwargs)
+            raise TimeoutError('request timed out')
+        gate = isolated(
+            'followup_is_addressed', re=re,
+            local_followup_intent=local,
+            requests=SimpleNamespace(post=timeout_post),
+            HEADERS={}, ROUTER_MODEL='gpt-6-luna',
+            build_chat_request=isolated('build_chat_request', REASONING_EFFORT='none')
+        )
+        self.assertFalse(gate('Друг, я вернусь через минуту', 'Hello'))
+        self.assertEqual(calls[0]['timeout'], (3, 4))
+
     def test_new_model_payload(self):
         builder = isolated('build_chat_request', REASONING_EFFORT='none')
         payload = builder('gpt-6.1-terra', [{'role': 'user', 'content': 'hello'}], 500)
