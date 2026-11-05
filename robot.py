@@ -1052,7 +1052,8 @@ def main():
                     }.get(language, 'Live weather unavailable.')
                 last_online_request = False
                 last_camera_question = None
-            elif online_search_intent(question, recent_context=last_online_request):
+            elif (online_search_intent(question, recent_context=last_online_request)
+                  and local_camera_route(question, last_camera_question) is not True):
                 print('Tool: live web search')
                 try:
                     answer = search_web(question, language, conversation_history, HEADERS)
