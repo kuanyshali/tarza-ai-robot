@@ -76,7 +76,14 @@ def weather_city(question, default_city=None):
         r'сегодня|завтра|сейчас|пожалуйста|бүгін|ертең|اليوم|بكره|دلوقتي)\b',
         value, maxsplit=1
     )[0].strip(' ,.!?،؟')
-    return value or default
+    # Common spoken Russian/Kazakh/Arabic forms of Astana are not geocoder names.
+    aliases = {
+        'астане': 'Astana', 'астана': 'Astana', 'астану': 'Astana',
+        'астананың': 'Astana', 'астанада': 'Astana',
+        'أستانا': 'Astana', 'استانا': 'Astana', 'астан': 'Astana',
+        'алматы': 'Almaty', 'алмате': 'Almaty', 'алматыда': 'Almaty'
+    }
+    return aliases.get(value.casefold(), value or default)
 
 
 def wants_tomorrow(question):
