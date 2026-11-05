@@ -1,6 +1,6 @@
 # Sadam modernization: Jetson Nano validation
 
-This release keeps **name required for every request**. The camera is not automatically narrated during ordinary chat.
+The wake name is required to **start** a conversation, but not for each follow-up during an active dialogue. The camera is not automatically narrated during ordinary chat.
 
 ## Update and validate
 
@@ -31,7 +31,7 @@ Tests run offline without camera, audio hardware or an API key. Real-device chec
 - `TARZA_TRANSCRIBE_MODEL=gpt-transcribe` — recommended current speech-to-text model. To temporarily revert use `TARZA_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe` (legacy, does not support language/keyword hints).
 - `TARZA_PREROLL_SECONDS=1.5` — saves pre-trigger audio so softly spoken names are not clipped.
 - `TARZA_WAKE_PREFIX_SECONDS=2.7` — short initial clip for wake-name recovery.
-- `TARZA_SILENCE_SECONDS=0.7` — default ends recording after 0.7 seconds of silence. Set to `1.0` or `1.5` if endings get clipped or speech has long pauses.
+- `TARZA_SILENCE_SECONDS=1.15` — default waits for 1.15 seconds of silence before accepting a spoken segment. Set to `1.5` or `1.8` for speakers who pause frequently, or `0.9` for faster response.
 - `TARZA_VOICE_RMS=350` — energy threshold for starting speech capture. Lower only if quiet wake words are cut off; background noise can cause false triggers.
 - `TARZA_VISION_ENABLED=1` — camera worker on.
 - `TARZA_BACKGROUND_ANALYSIS=0` — disable unsolicited cloud vision spending.
@@ -47,6 +47,15 @@ aplay -l
 ```
 
 The microphone still uses `plughw:2,0`; that is independent of Xiaomi's playback card number.
+
+## Continuous conversation and sentence endings
+
+- Say **Садам / Саддам / Sadam / Saddam / صدام** to initiate a dialogue. Following replies may omit the wake name for **20 seconds after each spoken robot reply** (configurable via `TARZA_DIALOG_TIMEOUT=20`). After a timeout, the name is mandatory again.
+- While the dialogue is open, the robot checks whether an unaddressed utterance is likely directed at it. The semantic intent check costs an additional small model call on ambiguous follow-ups and **is not speaker identification**; other people's direct questions or brief acknowledgements can still trigger the robot. For reliable speaker isolation, a dedicated voice verification system is needed.
+- Say `отбой`, `спи`, or `go to sleep` to close the dialogue without stopping the robot process. `Ctrl+C` stops the application.
+- Voice activation waits for **1.15 seconds of quiet** by default. After STT, if the sentence ends on a known incomplete conjunction (e.g. `потому что`, `because`, `если`, `and`), Sadam listens for another **2.5 seconds** for a continuation and combines the transcripts. This is a **heuristic**, not full semantic turn-end detection.
+- `TARZA_CONTINUATION_WAIT=2.5`, `TARZA_MAX_CONTINUATIONS=2` and `TARZA_DIALOG_TIMEOUT=20` configure these behaviors. Longer waits trade reaction speed for less interruption.
+- For strict wake-word-only behavior, set `TARZA_DIALOG_TIMEOUT=5` (minimum value), though the follow-up window is still nonzero.
 
 ## Latency optimization
 
