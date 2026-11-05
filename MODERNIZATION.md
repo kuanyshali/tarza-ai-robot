@@ -9,7 +9,7 @@ Stop the running robot with Ctrl+C, then:
 ```bash
 cd ~/ai_robot
 git pull origin main
-python3 -m py_compile robot.py
+python3 -m py_compile robot.py sadam_features.py
 python3 -m unittest discover -s tests -v
 python3 robot.py
 ```
@@ -67,6 +67,30 @@ The microphone still uses `plughw:2,0`; that is independent of Xiaomi's playback
 - Speech capture ends after 0.7 seconds of silence, adjustable with `TARZA_SILENCE_SECONDS`.
 - Log `TTS first playback` is the relevant latency measurement. The streaming total also includes audio playback.
 - Running `python3 -m unittest discover -s tests -v` is recommended before real-device tests. Jetson USB-audio behavior and network timing cannot be verified in offline tests.
+
+## Live weather, online search and conversational voice interruption
+
+This version adds `sadam_features.py` (Python 3.6 compatible).
+
+- **Live weather** via Open-Meteo geocoding + current forecast. Ask `Садам, какая погода в Астане?`, `Sadam, weather in Dubai tomorrow?`, `Садам, ауа райы қандай?`, or `صدام، الجو عامل إيه؟`. With no city, the configured default is Astana. Defaults can be changed using `SADAM_DEFAULT_CITY`. Source is printed in the terminal; failed API requests produce an explicit retry response rather than fabricated measurements. Open-Meteo may require an appropriate license for commercial projects.
+- **Live web answers** via OpenAI's documented `gpt-5-search-api` Chat Completions integration with `web_search_options`. News, elections, results, presidents, and other current facts trigger search. Its citations/links are printed to the console. Search adds API usage charges and latency; configure `SADAM_WEB_MODEL` for an available search-supported model or disable via `SADAM_WEB_ENABLED=0`. The previous `gpt-6.1-terra` remains the default for ordinary conversation and images.
+- **Direct personality:** More natural, concise replies; challenge and controversial topics are answered factually rather than with boilerplate refusals. Current results require live data to avoid guessing.
+- **Semantic turn ends:** At 1.15 seconds of silence, a small model assesses if a phrase is unfinished (except very short inputs). If it says WAIT, Sadam listens up to `TARZA_CONTINUATION_WAIT=2.5` seconds and joins the transcript, up to two times. This adds a small API call and a little latency; set `SADAM_SEMANTIC_END=0` to use only the existing inexpensive heuristic.
+- **Barge-in:** While Xiaomi is audibly talking, the Jetson microphone listens in another thread. Saying **`Садам, стоп`** (or **`Sadam, stop`**, `صدام، اسكت`) may interrupt playback; saying `Садам, <new question>` interrupts and processes the new question. A wake word is mandatory to reduce accidental interruption from background speech. No claim of speaker/voice identity verification. This feature may be affected by acoustic feedback from the speaker; set `SADAM_BARGE_IN=0` to disable it if audio becomes unstable. Barge-in works while TTS is playing, not while the model is still generating a response.
+
+### Validate on Jetson
+
+```bash
+cd ~/ai_robot
+git pull origin main
+python3 -m py_compile robot.py sadam_features.py
+python3 -m unittest discover -s tests -v
+python3 robot.py
+```
+
+Voice-check prompts: `Садам, какая погода в Астане?`, `Садам, кто победил вчера на выборах в Мичигане?`, `Садам, расскажи длинную историю...` followed mid-playback by `Садам, стоп`. Compare console lines `Tool: live weather`, `Tool: live web search`, `Voice interruption detected:` and `Audio output (Xiaomi)`.
+
+If anything breaks, first try the safe fallback `SADAM_BARGE_IN=0 SADAM_SEMANTIC_END=0 python3 robot.py`, keeping camera, wake-name dialogue, search, and Xiaomi intact.
 
 ## GPT model settings
 
