@@ -23,7 +23,7 @@ class WebWeatherTests(unittest.TestCase):
             self.assertFalse(feature.online_search_intent(phrase))
         self.assertFalse(feature.weather_intent('What am I holding?'))
         self.assertEqual(feature.weather_city('What is the weather in Dubai today?'), 'Dubai')
-        self.assertEqual(feature.weather_city('Какая погода в Астане?'), 'Астане')
+        self.assertEqual(feature.weather_city('Какая погода в Астане?'), 'Astana')
         self.assertTrue(feature.wants_tomorrow('weather in Astana tomorrow'))
 
     def test_live_news_route(self):
