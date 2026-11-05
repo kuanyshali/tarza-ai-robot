@@ -678,7 +678,7 @@ def local_camera_route(text, previous_camera_question=None):
         r'что (?:перед тобой|здесь|тут)|'
         r'посмотри|смотри (?:на|сюда|что)|покажи|какого цвета|'
         r'что на мне|кто (?:перед тобой|рядом со мной)|'
-        r'what (?:am i|i am) holding|what (?:do|can) you see|'
+        r'what (?:am i|i am|i.m) holding|what (?:do|can) you see|'
         r'can you see (?:me|this|that|it)|look at|take (?:a )?photo|'
         r'what is (?:in my hand|this|that|in front of you)|'
         r'what color is (?:this|that|my)|what am i wearing|'
