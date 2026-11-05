@@ -33,7 +33,9 @@ DEBUG_TIMING = os.environ.get('SADAM_DEBUG_TIMING', '1') == '1'
 TTS_PREBUFFER_SECONDS = max(0.7, min(5.0, float(os.environ.get('SADAM_TTS_PREBUFFER_SECONDS', '1.8'))))
 TRANSCRIBE_MODEL = os.environ.get('TARZA_TRANSCRIBE_MODEL', 'gpt-transcribe')
 conversation_history = []
-BARGE_IN_ENABLED = os.environ.get('SADAM_BARGE_IN', '1') == '1'
+# A single open microphone next to the speaker hears TTS as its own speech.
+# Disable experimental barge-in by default until proper echo cancellation exists.
+BARGE_IN_ENABLED = os.environ.get('SADAM_BARGE_IN', '0') == '1'
 SEMANTIC_END_ENABLED = os.environ.get('SADAM_SEMANTIC_END', '1') == '1'
 interrupt_lock = threading.Lock()
 pending_interrupt = None
