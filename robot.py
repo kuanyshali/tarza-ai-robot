@@ -24,7 +24,9 @@ REASONING_EFFORT = os.environ.get('SADAM_REASONING_EFFORT', 'none')
 session_input_tokens = 0
 session_output_tokens = 0
 ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Садам').strip() or 'Садам'
-DIALOG_TIMEOUT = float(os.environ.get('TARZA_DIALOG_TIMEOUT', '30'))
+DIALOG_TIMEOUT = max(5.0, float(os.environ.get('TARZA_DIALOG_TIMEOUT', '20')))
+CONTINUATION_WAIT = max(1.0, float(os.environ.get('TARZA_CONTINUATION_WAIT', '2.5')))
+MAX_CONTINUATION_SEGMENTS = max(0, min(3, int(os.environ.get('TARZA_MAX_CONTINUATIONS', '2'))))
 DEBUG_TIMING = os.environ.get('SADAM_DEBUG_TIMING', '1') == '1'
 TTS_PREBUFFER_SECONDS = max(0.7, min(5.0, float(os.environ.get('SADAM_TTS_PREBUFFER_SECONDS', '1.8'))))
 TRANSCRIBE_MODEL = os.environ.get('TARZA_TRANSCRIBE_MODEL', 'gpt-transcribe')
@@ -218,7 +220,7 @@ def record_until_silence(filename='speech.wav', wait_seconds=None):
     # Lightweight energy-based speech detection, processed locally.
     rate = 16000
     chunk_bytes = 960  # 30 ms, 16-bit mono
-    silence_seconds = float(os.environ.get('TARZA_SILENCE_SECONDS', '0.7'))
+    silence_seconds = float(os.environ.get('TARZA_SILENCE_SECONDS', '1.15'))
     min_rms = int(os.environ.get('TARZA_VOICE_RMS', '350'))
     preroll_seconds = max(0.6, min(3.0, float(os.environ.get('TARZA_PREROLL_SECONDS', '1.5'))))
     preroll = collections.deque(maxlen=int(preroll_seconds / 0.03))
@@ -355,6 +357,88 @@ def listen(wait_seconds=None):
     if not record_until_silence(wait_seconds=wait_seconds):
         return ''
     return transcribe_audio()
+
+
+def utterance_may_continue(transcript):
+    """Conservative textual clues that a speaker stopped in mid-sentence.
+
+    Punctuation produced by STT is not reliable enough to end an utterance.
+    This triggers a *short* additional listen, not an indefinite recording.
+    """
+    clean = re.sub(r'[\s.,!?،؟…:;]+$', '', transcript.casefold()).strip()
+    if not clean:
+        return False
+    return bool(re.search(
+        r'(?:\\b(?:and|but|because|if|when|that|which|or|so|to|with|'
+        r'а|но|потому|потому что|если|когда|который|чтобы|и|или|'
+        r'мен|бірақ|өйткені|егер|және|сондықтан|'
+        r'و|بس|عشان|لأن|لو|يعني)\\b|(?:что|как|почему|где)\\s+бы)$',
+        clean
+    ))
+
+
+def listen_complete(wait_seconds=None):
+    """Capture one spoken turn; if it sounds unfinished, collect brief add-ons."""
+    first = listen(wait_seconds=wait_seconds)
+    if not first:
+        return ''
+    parts = [first.strip()]
+    for _ in range(MAX_CONTINUATION_SEGMENTS):
+        if not utterance_may_continue(parts[-1]):
+            break
+        print('Sentence sounds unfinished; listening for continuation...')
+        more = listen(wait_seconds=CONTINUATION_WAIT)
+        if not more:
+            break
+        parts.append(more.strip())
+    return ' '.join(parts).strip()
+
+
+def followup_is_addressed(text, previous_answer=''):
+    """Best-effort intent gate: speech identity cannot be verified by this mic."""
+    q = text.strip()
+    if not q:
+        return False
+    # Small, clearly conversational replies are cheap to identify locally.
+    if re.fullmatch(
+        r'(?:yes|yeah|yep|no|nope|okay|ok|sure|thanks|thank you|'
+        r'да|нет|ага|угу|хорошо|понял|спасибо|'
+        r'иә|жоқ|жарайды|рахмет|'
+        r'اه|أيوه|ايوه|لا|تمام|شكرا)[.!?\s]*', q.casefold()
+    ):
+        return True
+    try:
+        response = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers=HEADERS,
+            json=build_chat_request(
+                ROUTER_MODEL,
+                [
+                    {'role': 'system', 'content': (
+                        'You are checking a voice robot open-dialogue follow-up. '
+                        'Reply exactly YES or NO. YES only when the new speech is '
+                        'plausibly addressed to the assistant in response to its '
+                        'immediately preceding message or asks it a direct question/command. '
+                        'NO for ambient conversations between other people, third-person '
+                        'talk about someone else, TV/audio, or unrelated speech. '
+                        'If uncertain, reply NO. This is intent filtering, not speaker '
+                        'identification. Understand Russian, Kazakh, English and Arabic.'
+                    )},
+                    {'role': 'user', 'content': (
+                        'Assistant last said: ' + previous_answer[-350:] +
+                        '\\nNew utterance: ' + q[:500]
+                    )}
+                ], 12, temperature=0
+            ),
+            timeout=(5, 15)
+        )
+        response.raise_for_status()
+        result = (response.json()['choices'][0]['message'].get('content') or '').strip().upper()
+        print('Follow-up intent:', result)
+        return result == 'YES'
+    except Exception as error:
+        print('Follow-up intent unavailable; ignoring unaddressed speech:', error)
+        return False
 
 
 def response_language(question):
@@ -770,24 +854,63 @@ def main():
     if VISION_ENABLED:
         vision_thread = threading.Thread(target=vision_worker, daemon=True)
         vision_thread.start()
+    dialog_until = 0.0
+    last_answer = ''
     while True:
         try:
-            heard = listen(wait_seconds=None).strip()
+            active = time.monotonic() < dialog_until
+            if not active and dialog_until:
+                print('Dialogue timeout; wake name required again.')
+                dialog_until = 0.0
+                last_camera_question = None
+            heard = listen_complete(
+                wait_seconds=max(0.0, dialog_until - time.monotonic()) if active else None
+            ).strip()
             if not heard:
+                if active:
+                    dialog_until = 0.0
+                    last_camera_question = None
+                    print('Dialogue ended; say ' + ROBOT_NAME + ' to begin again.')
                 continue
             print('You:', heard)
             question = wake_question(heard)
-            if question is None:
-                print('Wake name absent in full transcript; checking first seconds of audio.')
+            named = question is not None
+            if not named and not active:
+                print('Wake name absent; checking beginning of recording.')
                 try:
-                    question = recover_wake_question(heard)
+                    recovered = recover_wake_question(heard)
+                    if recovered is not None:
+                        question, named = recovered, True
                 except Exception as error:
                     print('Wake prefix check failed:', error)
-            if question is None:
+            if named:
+                # An explicit wake word starts or refreshes the conversation.
+                dialog_until = time.monotonic() + DIALOG_TIMEOUT
+                print('Dialogue: wake name detected; open for {:.0f}s.'.format(DIALOG_TIMEOUT))
+            elif active:
+                if not followup_is_addressed(heard, last_answer):
+                    print('Dialogue: ignored speech not clearly addressed to robot.')
+                    # Do not extend the dialog window for ambient conversation.
+                    continue
+                question = heard
+            else:
                 print(ROBOT_NAME + ': Name not detected. Skipping.')
                 continue
+
             if not question:
-                speak('Да, я слушаю.')
+                reply = 'Да, я слушаю.'
+                speak(reply)
+                last_answer = reply
+                dialog_until = time.monotonic() + DIALOG_TIMEOUT
+                continue
+            if re.search(
+                r'^(?:спи|отбой|хватит слушать|закрой диалог|'
+                r'go to sleep|end conversation|stop talking|'
+                r'болды|тоқта|خلاص|اسكت)[!?.\s]*$', question.casefold()
+            ):
+                dialog_until = 0.0
+                last_camera_question = None
+                print('Dialogue closed; name required again.')
                 continue
             if any(word in question.lower() for word in (
                 'выключись', 'заверши работу', 'до свидания',
@@ -802,13 +925,19 @@ def main():
             if DEBUG_TIMING:
                 print('Answer generation time: {:.2f}s'.format(time.monotonic() - answer_started))
             last_camera_question = question if camera_required else None
+            # Open the follow-up window only after talking, not while TTS plays.
+            last_answer = answer
             speak(answer)
+            dialog_until = time.monotonic() + DIALOG_TIMEOUT
+            print('Dialogue: listening for follow-up without wake name.')
         except KeyboardInterrupt:
             print('\\n' + ROBOT_NAME + ' stopped.')
             break
         except AudioPlaybackError as error:
             print('Audio playback unavailable:', error)
             print('Sadam is still listening; check USB speaker / aplay -l.')
+            # The turn was addressed to us; preserve the dialogue window.
+            dialog_until = time.monotonic() + DIALOG_TIMEOUT
             continue
         except Exception as error:
             print('Error:', error)
