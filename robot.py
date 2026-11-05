@@ -623,6 +623,8 @@ def stream_tts_to_xiaomi(response, device, started_at):
                 time.monotonic() - started_at, received / bytes_per_second))
         print('Audio output (Xiaomi):', device)
         return device
+    except requests.exceptions.RequestException as error:
+        raise AudioPlaybackError('TTS network stream interrupted: {}'.format(error))
     except (OSError, subprocess.TimeoutExpired, BrokenPipeError) as error:
         raise AudioPlaybackError('Xiaomi {} streaming error: {}'.format(device, error))
     finally:
