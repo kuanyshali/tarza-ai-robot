@@ -19,7 +19,12 @@ FUNCTIONS = {node.name: node for node in TREE.body if isinstance(node, ast.Funct
 
 def isolated(name, **environment):
     node = FUNCTIONS[name]
-    module = ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[]))
+    # ast.Module(type_ignores=...) was introduced after Jetson's Python 3.6.
+    try:
+        module = ast.Module(body=[node], type_ignores=[])
+    except TypeError:
+        module = ast.Module(body=[node])
+    module = ast.fix_missing_locations(module)
     namespace = dict(environment)
     exec(compile(module, str(ROOT / 'robot.py'), 'exec'), namespace)
     return namespace[name]
@@ -216,7 +221,8 @@ class RobotTests(unittest.TestCase):
             subprocess=SimpleNamespace(Popen=FakePlayer, PIPE=-1, DEVNULL=-3,
                                         TimeoutExpired=TimeoutError),
             time=time, TTS_PREBUFFER_SECONDS=1.0, DEBUG_TIMING=False,
-            AudioPlaybackError=RuntimeError
+            AudioPlaybackError=RuntimeError, threading=__import__('threading'),
+            BARGE_IN_ENABLED=False, requests=__import__('requests')
         )
         result = stream(AudioResponse(), 'plughw:5,0', time.monotonic())
         self.assertEqual(result, 'plughw:5,0')
@@ -236,7 +242,7 @@ class RobotTests(unittest.TestCase):
             self.assertIn('/audio/speech', url)
             self.assertTrue(kwargs['stream'])
             return AudioResponse()
-        def stream(response, device, started):
+        def stream(response, device, started, spoken_text=''):
             calls.append(device)
             return device
         speaker = isolated(
@@ -301,7 +307,8 @@ class RobotTests(unittest.TestCase):
         joiner = isolated(
             'listen_complete', listen=listen,
             utterance_may_continue=isolated('utterance_may_continue', re=re),
-            MAX_CONTINUATION_SEGMENTS=2, CONTINUATION_WAIT=2.5
+            MAX_CONTINUATION_SEGMENTS=2, CONTINUATION_WAIT=2.5,
+            SEMANTIC_END_ENABLED=False
         )
         self.assertEqual(joiner(wait_seconds=15), 
                          'Sadam, I wanted to ask because I have a question.')
