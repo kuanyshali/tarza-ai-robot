@@ -10,6 +10,8 @@ import wave
 import io
 import threading
 import cv2
+from sadam_features import (weather_intent, WEATHER_ENABLED, get_weather,
+                            online_search_intent, search_web, semantic_turn_incomplete)
 
 API_KEY = os.environ.get('OPENAI_API_KEY')
 if not API_KEY:
@@ -31,6 +33,11 @@ DEBUG_TIMING = os.environ.get('SADAM_DEBUG_TIMING', '1') == '1'
 TTS_PREBUFFER_SECONDS = max(0.7, min(5.0, float(os.environ.get('SADAM_TTS_PREBUFFER_SECONDS', '1.8'))))
 TRANSCRIBE_MODEL = os.environ.get('TARZA_TRANSCRIBE_MODEL', 'gpt-transcribe')
 conversation_history = []
+BARGE_IN_ENABLED = os.environ.get('SADAM_BARGE_IN', '1') == '1'
+SEMANTIC_END_ENABLED = os.environ.get('SADAM_SEMANTIC_END', '1') == '1'
+interrupt_lock = threading.Lock()
+pending_interrupt = None
+
 VISION_ENABLED = os.environ.get('TARZA_VISION_ENABLED', '1') == '1'
 BACKGROUND_VISION_ENABLED = os.environ.get('TARZA_BACKGROUND_ANALYSIS', '0') == '1'
 VISION_IMAGE_WIDTH = max(320, min(1280, int(os.environ.get('TARZA_VISION_IMAGE_WIDTH', '960'))))
@@ -68,7 +75,12 @@ SYSTEM_PROMPT = (
     'Describe only what you can actually make out. If the view is dark, blurry, or uncertain, say so naturally in the first person without guessing. '
     'For ordinary questions, answer directly without describing surroundings. '
     'Do not claim to see your surroundings unless a current camera photo is attached. '
-    'When no image is attached, do not claim to see the current surroundings.'
+    'When no image is attached, do not claim to see the current surroundings. '
+    'Be candid, warm, and sometimes lightly witty, not evasive or preachy. '
+    'Answer controversial, political and challenging questions directly using known facts; '
+    'represent serious disagreements fairly and separate facts from opinions. '
+    'Never invent live news or weather. The application provides live sources when needed, '
+    'so do not repeatedly claim that the entire robot has no internet access.'
 )
 
 _wake_words_env = os.environ.get('ROBOT_WAKE_WORDS', '').strip()
@@ -216,11 +228,13 @@ def play_beep(frequency=880, duration=0.12, volume=0.18):
         pass
 
 
-def record_until_silence(filename='speech.wav', wait_seconds=None):
+def record_until_silence(filename='speech.wav', wait_seconds=None, stop_event=None,
+                         beep=True, silence_override=None):
     # Lightweight energy-based speech detection, processed locally.
     rate = 16000
     chunk_bytes = 960  # 30 ms, 16-bit mono
-    silence_seconds = float(os.environ.get('TARZA_SILENCE_SECONDS', '1.15'))
+    silence_seconds = (silence_override if silence_override is not None else
+                       float(os.environ.get('TARZA_SILENCE_SECONDS', '1.15')))
     min_rms = int(os.environ.get('TARZA_VOICE_RMS', '350'))
     preroll_seconds = max(0.6, min(3.0, float(os.environ.get('TARZA_PREROLL_SECONDS', '1.5'))))
     preroll = collections.deque(maxlen=int(preroll_seconds / 0.03))
@@ -232,13 +246,16 @@ def record_until_silence(filename='speech.wav', wait_seconds=None):
     wait_started = time.monotonic()
 
     print('Listening... Speak naturally; recording ends after a pause.')
-    play_beep(frequency=880)
+    if beep:
+        play_beep(frequency=880)
     process = subprocess.Popen([
         'arecord', '-q', '-D', 'plughw:2,0', '-t', 'raw',
         '-f', 'S16_LE', '-r', str(rate), '-c', '1'
     ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                return False
             chunk = process.stdout.read(chunk_bytes)
             if len(chunk) != chunk_bytes:
                 raise RuntimeError('Microphone recording stopped unexpectedly')
@@ -280,7 +297,8 @@ def record_until_silence(filename='speech.wav', wait_seconds=None):
         audio.setframerate(rate)
         audio.writeframes(b''.join(frames))
     print('Recording finished. Processing...')
-    play_beep(frequency=600, duration=0.16)
+    if beep:
+        play_beep(frequency=600, duration=0.16)
     return True
 
 
@@ -384,7 +402,13 @@ def listen_complete(wait_seconds=None):
         return ''
     parts = [first.strip()]
     for _ in range(MAX_CONTINUATION_SEGMENTS):
-        if not utterance_may_continue(parts[-1]):
+        incomplete = utterance_may_continue(parts[-1])
+        if not incomplete and SEMANTIC_END_ENABLED:
+            try:
+                incomplete = semantic_turn_incomplete(parts[-1], HEADERS)
+            except Exception as error:
+                print('Semantic end detection unavailable; using pause:', error)
+        if not incomplete:
             break
         print('Sentence sounds unfinished; listening for continuation...')
         more = listen(wait_seconds=CONTINUATION_WAIT)
