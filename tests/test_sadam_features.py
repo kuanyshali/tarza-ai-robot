@@ -82,6 +82,34 @@ class WebWeatherTests(unittest.TestCase):
         self.assertIn('web_search_options', observed[0][1]['json'])
         self.assertEqual(observed[0][1]['json']['model'], feature.WEB_SEARCH_MODEL)
 
+    def test_arabic_city_with_spoken_question_suffix(self):
+        self.assertEqual(
+            feature.weather_city('صدام، تقدر تقوللي الطقس دلوقتي في أستانا كام؟'),
+            'Astana'
+        )
+        self.assertEqual(
+            feature.weather_city('صدام، درجة الحرارة في أستانا دلوقتي كام؟'),
+            'Astana'
+        )
+
+    def test_web_citations_are_never_read_aloud(self):
+        answer = (
+            'الديمقراطي **عبدول إل-سايد** فاز بالانتخابات. '
+            '([michiganpublic.org]([https://www.michiganpublic.org/a]'
+            '(https://www.michiganpublic.org/a)))'
+        )
+        spoken = feature.clean_spoken_answer(answer)
+        self.assertIn('عبدول إل-سايد', spoken)
+        self.assertNotIn('https://', spoken)
+        self.assertNotIn('michiganpublic.org', spoken)
+        self.assertNotIn('**', spoken)
+
+    def test_long_search_answer_is_capped_for_tts(self):
+        answer = 'This is a complete sentence. ' + ('Extra information ' * 180)
+        spoken = feature.clean_spoken_answer(answer)
+        self.assertLessEqual(len(spoken), 460)
+        self.assertNotIn('http', spoken)
+
     def test_semantic_end_only_waits_on_explicit_wait(self):
         observed = []
         def post(url, **kwargs):
