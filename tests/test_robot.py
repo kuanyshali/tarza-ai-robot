@@ -122,9 +122,9 @@ class RobotTests(unittest.TestCase):
 
     def test_xiaomi_device_follows_alsa_card_changes_and_ignores_kt(self):
         listing = (
-            'card 0: tegrahda [tegra-hda], device 3: HDMI 0 [HDMI 0]\\n'
-            'card 2: Audio [KT USB Audio], device 0: USB Audio [USB Audio]\\n'
-            'card 5: Device [USB Composite Device], device 0: USB Audio [USB Audio]\\n'
+            'card 0: tegrahda [tegra-hda], device 3: HDMI 0 [HDMI 0]\n'
+            'card 2: Audio [KT USB Audio], device 0: USB Audio [USB Audio]\n'
+            'card 5: Device [USB Composite Device], device 0: USB Audio [USB Audio]\n'
         )
         def run(*args, **kwargs):
             return SimpleNamespace(returncode=0, stdout=listing, stderr='')
@@ -139,7 +139,7 @@ class RobotTests(unittest.TestCase):
     def test_xiaomi_absent_never_falls_back_to_kt(self):
         def run(*args, **kwargs):
             return SimpleNamespace(returncode=0,
-                stdout='card 2: Audio [KT USB Audio], device 0: USB Audio [USB Audio]\\n',
+                stdout='card 2: Audio [KT USB Audio], device 0: USB Audio [USB Audio]\n',
                 stderr='')
         finder = isolated(
             'xiaomi_speaker_device', re=re,
@@ -153,8 +153,8 @@ class RobotTests(unittest.TestCase):
     def test_xiaomi_multiple_matching_devices_refused(self):
         def run(*args, **kwargs):
             return SimpleNamespace(returncode=0,
-                stdout=('card 3: Device [USB Composite Device], device 0: USB Audio [USB Audio]\\n'
-                        'card 4: Device [USB Composite Device], device 0: USB Audio [USB Audio]\\n'),
+                stdout=('card 3: Device [USB Composite Device], device 0: USB Audio [USB Audio]\n'
+                        'card 4: Device [USB Composite Device], device 0: USB Audio [USB Audio]\n'),
                 stderr='')
         finder = isolated(
             'xiaomi_speaker_device', re=re,
