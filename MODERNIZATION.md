@@ -92,6 +92,26 @@ Voice-check prompts: `Садам, какая погода в Астане?`, `С
 
 If anything breaks, first try the safe fallback `SADAM_BARGE_IN=0 SADAM_SEMANTIC_END=0 python3 robot.py`, keeping camera, wake-name dialogue, search, and Xiaomi intact.
 
+## Fixes from 2026-11-05 on-device log
+
+- **Intent gate timeout:** Direct questions (with `?` or Arabic `؟`) are accepted during an active dialogue without a cloud routing call. Ambiguous utterances have a `(3, 4)`-second connection/read timeout rather than waiting 15 seconds. If that check fails, background chatter is still ignored, but direct questions are preserved.
+- **Arabic weather:** City parsing removes trailing `كام` from requests like `الطقس دلوقتي في أستانا كام؟`, so it geocodes Astana rather than the non-existent `أستانا كام`.
+- **News voice playback:** Search links and Markdown citations are printed separately in the console, **not** fed to Xiaomi. Spoken answers are capped to avoid lengthy URLs and one-minute TTS responses.
+- **TTS acoustic echo:** `SADAM_BARGE_IN` now defaults to `0`. In the submitted log, the microphone repeatedly recorded the speaker while Xiaomi was playing, triggering many billable ASR calls. The feature remains opt-in (`SADAM_BARGE_IN=1`) for experimental tests with suitable acoustic echo cancellation or isolated mic/speaker placement.
+- **Transient speech-to-text 520 errors:** One retry with a small delay on server-side 5xx and connection errors; no retries for authentication or insufficient-credit failures.
+
+No hardware testing has been run from GitHub. To validate these patches:
+
+```bash
+cd ~/ai_robot
+git pull --ff-only origin main
+python3 -m py_compile robot.py sadam_features.py
+python3 -m unittest discover -s tests -v
+python3 robot.py
+```
+
+Test: `صدام، تقدر تقوللي الطقس دلوقتي في أستانا كام؟` and then, without wake name, `تقدر توصفلي اللي حصل في غزة ده إبادة جماعية ولا لأ؟`. The log should say `Follow-up intent (local): YES` on the second utterance. If a test fails, do **not** proceed to hardware run.
+
 ## GPT model settings
 
 Default chat and vision: `gpt-6.1-terra`. Default camera router: `gpt-6-luna`. Change using environment variables `SADAM_CHAT_MODEL`, `SADAM_VISION_MODEL`, and `SADAM_ROUTER_MODEL`. Low-latency reasoning uses `SADAM_REASONING_EFFORT=none`. All API calls still require a working `OPENAI_API_KEY`.
