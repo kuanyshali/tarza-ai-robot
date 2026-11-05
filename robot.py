@@ -10,6 +10,7 @@ import wave
 import io
 import threading
 import cv2
+from wake_listener import load_vosk_model, record_wake_phrase
 from sadam_features import (weather_intent, WEATHER_ENABLED, get_weather,
                             online_search_intent, search_web, semantic_turn_incomplete)
 
@@ -27,6 +28,8 @@ session_input_tokens = 0
 session_output_tokens = 0
 ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Садам').strip() or 'Садам'
 DIALOG_TIMEOUT = max(5.0, float(os.environ.get('TARZA_DIALOG_TIMEOUT', '20')))
+WAKE_MODE = os.environ.get('SADAM_WAKE_MODE', 'legacy').strip().lower()
+WAKE_MODEL_PATH = os.environ.get('SADAM_WAKE_MODEL', 'models/vosk-model-small-ru-0.22')
 CONTINUATION_WAIT = max(1.0, float(os.environ.get('TARZA_CONTINUATION_WAIT', '2.5')))
 MAX_CONTINUATION_SEGMENTS = max(0, min(3, int(os.environ.get('TARZA_MAX_CONTINUATIONS', '2'))))
 DEBUG_TIMING = os.environ.get('SADAM_DEBUG_TIMING', '1') == '1'
@@ -998,6 +1001,13 @@ def main():
     dialog_until = 0.0
     last_answer = ''
     last_online_request = False
+    offline_model = None
+    if WAKE_MODE == 'vosk':
+        # Do not silently fall back to costly cloud wake checks.
+        offline_model = load_vosk_model(WAKE_MODEL_PATH)
+        print('Wake mode: offline Vosk at', WAKE_MODEL_PATH)
+    elif WAKE_MODE != 'legacy':
+        raise ValueError('Unknown SADAM_WAKE_MODE: ' + WAKE_MODE)
     while True:
         try:
             active = time.monotonic() < dialog_until
@@ -1006,9 +1016,18 @@ def main():
                 dialog_until = 0.0
                 last_camera_question = None
             interrupted = pop_pending_interrupt()
+            offline_woke = False
             if interrupted:
                 print('Processing interrupted request.')
                 heard = interrupted
+            elif not active and offline_model is not None:
+                if not record_wake_phrase(offline_model):
+                    continue
+                # Confirm activation through the Xiaomi speaker once, not on
+                # arbitrary ambient speech. Then transcribe full wake+question.
+                play_beep(frequency=1040, duration=0.10)
+                offline_woke = True
+                heard = transcribe_audio().strip()
             else:
                 heard = listen_complete(
                     wait_seconds=max(0.0, dialog_until - time.monotonic()) if active else None
@@ -1022,7 +1041,7 @@ def main():
             print('You:', heard)
             question = wake_question(heard)
             named = question is not None
-            if not named and not active:
+            if not named and not active and not offline_woke:
                 print('Wake name absent; checking beginning of recording.')
                 try:
                     recovered = recover_wake_question(heard)
@@ -1030,6 +1049,15 @@ def main():
                         question, named = recovered, True
                 except Exception as error:
                     print('Wake prefix check failed:', error)
+            if offline_woke and not named:
+                # Local wake detector fired, but cloud STT omitted its name.
+                # Verify the first audio seconds before accepting the turn.
+                try:
+                    recovered = recover_wake_question(heard)
+                    if recovered is not None:
+                        question, named = recovered, True
+                except Exception as error:
+                    print('Offline wake confirmation failed:', error)
             if named:
                 # An explicit wake word starts or refreshes the conversation.
                 dialog_until = time.monotonic() + DIALOG_TIMEOUT
