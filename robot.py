@@ -665,7 +665,52 @@ def chat(question):
     return ask_ai(question)
 
 
-def stream_tts_to_xiaomi(response, device, started_at):
+def pop_pending_interrupt():
+    """Take one recognized barge-in utterance from the TTS microphone thread."""
+    global pending_interrupt
+    with interrupt_lock:
+        heard = pending_interrupt
+        pending_interrupt = None
+    return heard
+
+
+def barge_in_worker(player, stop_event, cancel_event, spoken_text):
+    """Capture only explicit wake-name speech while the speaker is playing.
+
+    The loudspeaker may leak into the mic. To avoid acting on random voices,
+    barge-in requires the wake name. This is NOT speaker identity verification.
+    """
+    global pending_interrupt
+    while not stop_event.is_set() and player.poll() is None:
+        try:
+            detected = record_until_silence(
+                filename='interrupt_speech.wav',
+                wait_seconds=5, stop_event=stop_event, beep=False,
+                silence_override=0.65
+            )
+            if not detected or stop_event.is_set() or player.poll() is not None:
+                continue
+            heard = transcribe_audio(filename='interrupt_speech.wav').strip()
+            question = wake_question(heard)
+            if question is None:
+                continue
+            # Do not act if the mic merely heard the text the robot just spoke.
+            if heard.casefold() in spoken_text.casefold():
+                continue
+            with interrupt_lock:
+                pending_interrupt = heard
+            print('Voice interruption detected:', heard)
+            cancel_event.set()
+            if player.poll() is None:
+                player.terminate()
+            return
+        except Exception as error:
+            if not stop_event.is_set():
+                print('Barge-in monitor warning:', error)
+            return
+
+
+def stream_tts_to_xiaomi(response, device, started_at, spoken_text=''):
     """Start PCM playback after a safety prebuffer while receiving the rest.
 
     Playback is exclusive to the verified Xiaomi; a network stall may still
@@ -678,8 +723,14 @@ def stream_tts_to_xiaomi(response, device, started_at):
     player = None
     received = 0
     playback_started = None
+    monitor_stop = threading.Event()
+    monitor_cancel = threading.Event()
+    monitor = None
     try:
         for chunk in response.iter_content(chunk_size=8192):
+            if monitor_cancel.is_set():
+                print('TTS interrupted by wake voice.')
+                return 'interrupted'
             if not chunk:
                 continue
             received += len(chunk)
@@ -693,6 +744,13 @@ def stream_tts_to_xiaomi(response, device, started_at):
                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE
                 )
+                if BARGE_IN_ENABLED:
+                    monitor = threading.Thread(
+                        target=barge_in_worker,
+                        args=(player, monitor_stop, monitor_cancel, spoken_text),
+                        daemon=True
+                    )
+                    monitor.start()
                 playback_started = time.monotonic()
                 if DEBUG_TIMING:
                     print('TTS first playback: {:.2f}s (prebuffer {:.1f}s)'.format(
@@ -702,6 +760,8 @@ def stream_tts_to_xiaomi(response, device, started_at):
             else:
                 player.stdin.write(chunk)
 
+        if monitor_cancel.is_set():
+            return 'interrupted'
         if player is None:
             if not buffer:
                 raise RuntimeError('TTS returned empty PCM audio')
@@ -712,16 +772,27 @@ def stream_tts_to_xiaomi(response, device, started_at):
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE
             )
+            if BARGE_IN_ENABLED:
+                monitor = threading.Thread(
+                    target=barge_in_worker,
+                    args=(player, monitor_stop, monitor_cancel, spoken_text),
+                    daemon=True
+                )
+                monitor.start()
             playback_started = time.monotonic()
             if DEBUG_TIMING:
                 print('TTS first playback: {:.2f}s (short response)'.format(
                     playback_started - started_at))
             player.stdin.write(buffer)
+        if monitor_cancel.is_set():
+            return 'interrupted'
         player.stdin.close()
         # Capturing aplay's errors after playback; unlike communicate(), avoids
         # buffering the entire streamed response before playback can begin.
         error_output = player.stderr.read()
         result = player.wait(timeout=120)
+        if monitor_cancel.is_set():
+            return 'interrupted'
         if result != 0:
             raise AudioPlaybackError(
                 'Xiaomi {} failed: {}'.format(
@@ -732,10 +803,15 @@ def stream_tts_to_xiaomi(response, device, started_at):
         print('Audio output (Xiaomi):', device)
         return device
     except requests.exceptions.RequestException as error:
+        if monitor_cancel.is_set():
+            return 'interrupted'
         raise AudioPlaybackError('TTS network stream interrupted: {}'.format(error))
     except (OSError, subprocess.TimeoutExpired, BrokenPipeError) as error:
+        if monitor_cancel.is_set():
+            return 'interrupted'
         raise AudioPlaybackError('Xiaomi {} streaming error: {}'.format(device, error))
     finally:
+        monitor_stop.set()
         response.close()
         if player is not None:
             if player.stdin and not player.stdin.closed:
@@ -745,6 +821,8 @@ def stream_tts_to_xiaomi(response, device, started_at):
                 player.wait()
             if player.stderr:
                 player.stderr.close()
+        if monitor is not None:
+            monitor.join(timeout=1.0)
 
 
 def speak(text):
@@ -767,7 +845,7 @@ def speak(text):
     except Exception:
         response.close()
         raise
-    return stream_tts_to_xiaomi(response, device, started)
+    return stream_tts_to_xiaomi(response, device, started, spoken_text=text)
 
 
 def local_camera_route(text, previous_camera_question=None):
