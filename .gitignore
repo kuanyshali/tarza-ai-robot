@@ -9,3 +9,6 @@ photo.jpg
 *.log
 .venv/
 venv/
+
+# Offline speech recognition models (downloaded on-device)
+models/
