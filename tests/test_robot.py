@@ -276,6 +276,52 @@ class RobotTests(unittest.TestCase):
         self.assertIsNone(local('какая погода сегодня?'))
         self.assertIs(local('а теперь?', previous_camera_question='Что видишь?'), True)
 
+    def test_unfinished_sentence_rules(self):
+        unfinished = isolated('utterance_may_continue', re=re)
+        for sample in (
+            'Sadam, tell me about this and',
+            'Я хотел спросить, потому что...',
+            'Что ты думаешь, если',
+            'I want to know because.',
+            'Мен ойлаймын, бірақ',
+            'قول لي عشان',
+        ):
+            with self.subTest(sample=sample):
+                self.assertTrue(unfinished(sample))
+        for sample in ('Как дела?', 'What am I holding?', 'Сколько будет два плюс два?'):
+            with self.subTest(sample=sample):
+                self.assertFalse(unfinished(sample))
+
+    def test_listen_complete_joins_incomplete_fragments(self):
+        responses = iter(['Sadam, I wanted to ask because', 'I have a question.', ''])
+        wait_calls = []
+        def listen(wait_seconds=None):
+            wait_calls.append(wait_seconds)
+            return next(responses)
+        joiner = isolated(
+            'listen_complete', listen=listen,
+            utterance_may_continue=isolated('utterance_may_continue', re=re),
+            MAX_CONTINUATION_SEGMENTS=2, CONTINUATION_WAIT=2.5
+        )
+        self.assertEqual(joiner(wait_seconds=15), 
+                         'Sadam, I wanted to ask because I have a question.')
+        self.assertEqual(wait_calls, [15, 2.5])
+
+    def test_followup_intent_rejects_ambient_and_keeps_short_answer(self):
+        calls = []
+        def post(url, **kwargs):
+            calls.append(kwargs)
+            return FakeResponse('NO')
+        gate = isolated(
+            'followup_is_addressed',
+            re=re, requests=SimpleNamespace(post=post), HEADERS={},
+            ROUTER_MODEL='gpt-6-luna',
+            build_chat_request=isolated('build_chat_request', REASONING_EFFORT='none')
+        )
+        self.assertTrue(gate('Yes', 'Would you like me to continue?'))
+        self.assertFalse(gate('Друг, закажи мне такси', 'I see a chair.'))
+        self.assertEqual(len(calls), 1)
+
     def test_new_model_payload(self):
         builder = isolated('build_chat_request', REASONING_EFFORT='none')
         payload = builder('gpt-6.1-terra', [{'role': 'user', 'content': 'hello'}], 500)
