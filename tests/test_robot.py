@@ -321,7 +321,8 @@ class RobotTests(unittest.TestCase):
             return FakeResponse('NO')
         gate = isolated(
             'followup_is_addressed',
-            re=re, requests=SimpleNamespace(post=post), HEADERS={},
+            re=re, local_followup_intent=isolated('local_followup_intent', re=re),
+            requests=SimpleNamespace(post=post), HEADERS={},
             ROUTER_MODEL='gpt-6-luna',
             build_chat_request=isolated('build_chat_request', REASONING_EFFORT='none')
         )
