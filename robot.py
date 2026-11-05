@@ -131,38 +131,68 @@ def show_usage(data):
 
 
 
-# Xiaomi USB speaker: explicitly configured as ALSA card 3, device 0.
-# No automatic device scanning or fallback to the microphone's USB adapter.
-XIAOMI_SPEAKER_DEVICE = 'plughw:3,0'
+# The Xiaomi USB speaker currently reports itself to ALSA as
+# "USB Composite Device". KT USB Audio is the microphone adapter, NOT a speaker.
+# Match the hardware label, never a hard-coded ALSA card index or generic USB output.
+XIAOMI_ALSA_LABEL = 'USB Composite Device'
 
 
 class AudioPlaybackError(RuntimeError):
-    """The explicitly configured Xiaomi speaker could not play audio."""
+    """The identified Xiaomi USB speaker is missing or playback failed."""
+
+
+def xiaomi_speaker_device():
+    """Find exactly one Xiaomi by ALSA's USB Composite Device label; fail closed."""
+    try:
+        result = subprocess.run(
+            ['aplay', '-l'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AudioPlaybackError('Cannot list ALSA playback devices: {}'.format(error))
+    if result.returncode != 0:
+        raise AudioPlaybackError('Cannot list ALSA playback devices: {}'.format(
+            result.stderr.strip()))
+    matches = re.findall(
+        r'^card\s+(\d+):\s*[^\[]+\[([^\]]+)\],\s*device\s+(\d+):',
+        result.stdout, re.MULTILINE
+    )
+    devices = [
+        'plughw:{},{}'.format(card, dev)
+        for card, name, dev in matches
+        if name.strip() == XIAOMI_ALSA_LABEL
+    ]
+    if not devices:
+        raise AudioPlaybackError(
+            'Xiaomi speaker (USB Composite Device) not detected in aplay -l; '
+            'refusing to use KT USB Audio or another playback device.'
+        )
+    if len(devices) != 1:
+        raise AudioPlaybackError(
+            'Multiple USB Composite Device playback endpoints found: {}; '
+            'cannot safely identify Xiaomi.'.format(', '.join(devices))
+        )
+    return devices[0]
 
 
 def play_pcm(pcm, rate, timeout=120, quiet=False):
-    """Play exclusively through Xiaomi, never through another USB audio card."""
-    command = [
-        'aplay', '-q', '-D', XIAOMI_SPEAKER_DEVICE, '-t', 'raw',
-        '-f', 'S16_LE', '-r', str(rate), '-c', '1'
-    ]
+    """Play only through the identified Xiaomi; never fall back to KT USB Audio."""
+    device = xiaomi_speaker_device()
     try:
         result = subprocess.run(
-            command, input=pcm, stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE, timeout=timeout, check=False
+            ['aplay', '-q', '-D', device, '-t', 'raw',
+             '-f', 'S16_LE', '-r', str(rate), '-c', '1'],
+            input=pcm, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=timeout, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise AudioPlaybackError(
-            'Xiaomi at {} unavailable: {}'.format(XIAOMI_SPEAKER_DEVICE, error)
-        )
+        raise AudioPlaybackError('Xiaomi {} unavailable: {}'.format(device, error))
     if result.returncode != 0:
         message = result.stderr.decode('utf-8', errors='replace').strip()
-        raise AudioPlaybackError(
-            'Xiaomi at {} failed: {}'.format(XIAOMI_SPEAKER_DEVICE, message)
-        )
+        raise AudioPlaybackError('Xiaomi {} playback failed: {}'.format(device, message))
     if not quiet:
-        print('Audio output (Xiaomi):', XIAOMI_SPEAKER_DEVICE)
-    return XIAOMI_SPEAKER_DEVICE
+        print('Audio output (Xiaomi):', device)
+    return device
 
 
 def play_beep(frequency=880, duration=0.12, volume=0.18):
