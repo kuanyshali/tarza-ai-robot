@@ -14,18 +14,18 @@ WEB_ENABLED = os.environ.get('SADAM_WEB_ENABLED', '1') == '1'
 WEATHER_ENABLED = os.environ.get('SADAM_WEATHER_ENABLED', '1') == '1'
 
 WEATHER_WORDS = re.compile(
-    r'(?i)(?:\\bweather\\b|\\bforecast\\b|\\btemperature\\b|'
-    r'погод\\w*|температур\\w*|ауа рай\\w*|күн рай\\w*|'
+    r'(?i)(?:\bweather\b|\bforecast\b|\btemperature\b|'
+    r'погод\w*|температур\w*|ауа рай\w*|күн рай\w*|'
     r'الطقس|الجو|حرارة|درجة الحرارة)'
 )
 RECENT_WORDS = re.compile(
-    r'(?i)(?:\\b(?:today|yesterday|tomorrow|latest|current|recent|'
+    r'(?i)(?:\b(?:today|yesterday|tomorrow|latest|current|recent|'
     r'now|breaking|news|election|elections|results|score|winner|'
     r'president|prime minister|stock price|exchange rate|live|'
-    r'who won|who is the)\\b|'
-    r'сегодня|вчера|завтра|сейчас|последн\\w*|свеж\\w*|новост\\w*|'
-    r'выбор\\w*|результат\\w*|побед\\w*|президент\\w*|'
-    r'бүгін|кеше|ертең|жаңалық\\w*|сайлау\\w*|'
+    r'who won|who is the)\b|'
+    r'сегодня|вчера|завтра|сейчас|последн\w*|свеж\w*|новост\w*|'
+    r'выбор\w*|результат\w*|побед\w*|президент\w*|'
+    r'бүгін|кеше|ертең|жаңалық\w*|сайлау\w*|'
     r'النهارده|امبارح|أمس|اليوم|بكره|الأخبار|انتخابات|فاز|النتيجة|الرئيس)'
 )
 
@@ -63,24 +63,24 @@ def weather_city(question, default_city=None):
     default = default_city or DEFAULT_CITY
     # Allow short city names in Latin/Cyrillic and Arabic, but never URLs.
     match = re.search(
-        r'(?i)(?:\\b(?:in|for|at)\\s+|\\b(?:в|во|для)\\s+|'
-        r'\\b(?:في|بمدينة)\\s+|\\b(?:қаласында|қаласындағы)\\s+)'
-        r'([A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі\\u0600-\\u06FF\\- ]{2,45})',
+        r'(?i)(?:\b(?:in|for|at)\s+|\b(?:в|во|для)\s+|'
+        r'\b(?:في|بمدينة)\s+|\b(?:қаласында|қаласындағы)\s+)'
+        r'([A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі\u0600-\u06FF\- ]{2,45})',
         question or ''
     )
     if not match:
         return default
     value = match.group(1).strip(' ,.!?،؟')
     value = re.split(
-        r'(?i)\\b(?:today|tomorrow|now|right now|please|currently|'
-        r'сегодня|завтра|сейчас|пожалуйста|бүгін|ертең|اليوم|بكره|دلوقتي)\\b',
+        r'(?i)\b(?:today|tomorrow|now|right now|please|currently|'
+        r'сегодня|завтра|сейчас|пожалуйста|бүгін|ертең|اليوم|بكره|دلوقتي)\b',
         value, maxsplit=1
     )[0].strip(' ,.!?،؟')
     return value or default
 
 
 def wants_tomorrow(question):
-    return bool(re.search(r'(?i)\\b(?:tomorrow|завтра|ертең|بكره|غدا)\\b', question or ''))
+    return bool(re.search(r'(?i)\b(?:tomorrow|завтра|ертең|بكره|غدا)\b', question or ''))
 
 
 def online_search_intent(question, recent_context=False):
@@ -196,7 +196,7 @@ def search_web(question, language, history, headers, session=requests):
         raise ValueError('Web search returned no answer')
     # Citations should remain visible in console, not read aloud by TTS.
     answer = re.sub(r'【[^】]+】', '', answer)
-    answer = re.sub(r'\\[(?:\\d+|source)\\]\\(https?://[^)]+\\)', '', answer, flags=re.I)
+    answer = re.sub(r'\[(?:\d+|source)\]\(https?://[^)]+\)', '', answer, flags=re.I)
     return answer.strip()
 
 
