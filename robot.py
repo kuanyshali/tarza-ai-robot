@@ -26,6 +26,7 @@ session_output_tokens = 0
 ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Садам').strip() or 'Садам'
 DIALOG_TIMEOUT = float(os.environ.get('TARZA_DIALOG_TIMEOUT', '30'))
 DEBUG_TIMING = os.environ.get('SADAM_DEBUG_TIMING', '1') == '1'
+TTS_PREBUFFER_SECONDS = max(0.7, min(5.0, float(os.environ.get('SADAM_TTS_PREBUFFER_SECONDS', '1.8'))))
 TRANSCRIBE_MODEL = os.environ.get('TARZA_TRANSCRIBE_MODEL', 'gpt-transcribe')
 conversation_history = []
 VISION_ENABLED = os.environ.get('TARZA_VISION_ENABLED', '1') == '1'
@@ -217,7 +218,7 @@ def record_until_silence(filename='speech.wav', wait_seconds=None):
     # Lightweight energy-based speech detection, processed locally.
     rate = 16000
     chunk_bytes = 960  # 30 ms, 16-bit mono
-    silence_seconds = float(os.environ.get('TARZA_SILENCE_SECONDS', '1.0'))
+    silence_seconds = float(os.environ.get('TARZA_SILENCE_SECONDS', '0.7'))
     min_rms = int(os.environ.get('TARZA_VOICE_RMS', '350'))
     preroll_seconds = max(0.6, min(3.0, float(os.environ.get('TARZA_PREROLL_SECONDS', '1.5'))))
     preroll = collections.deque(maxlen=int(preroll_seconds / 0.03))
@@ -556,10 +557,90 @@ def chat(question):
     return ask_ai(question)
 
 
+def stream_tts_to_xiaomi(response, device, started_at):
+    """Start PCM playback after a safety prebuffer while receiving the rest.
+
+    Playback is exclusive to the verified Xiaomi; a network stall may still
+    cause an ALSA underrun, so the buffer is configurable. Do not silently
+    repeat/replay speech on a failure.
+    """
+    bytes_per_second = 24000 * 2  # mono 16-bit PCM returned by tts-1
+    prebuffer_bytes = int(TTS_PREBUFFER_SECONDS * bytes_per_second)
+    buffer = bytearray()
+    player = None
+    received = 0
+    playback_started = None
+    try:
+        for chunk in response.iter_content(chunk_size=8192):
+            if not chunk:
+                continue
+            received += len(chunk)
+            if player is None:
+                buffer.extend(chunk)
+                if len(buffer) < prebuffer_bytes:
+                    continue
+                player = subprocess.Popen(
+                    ['aplay', '-q', '-D', device, '-t', 'raw',
+                     '-f', 'S16_LE', '-r', '24000', '-c', '1'],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE
+                )
+                playback_started = time.monotonic()
+                if DEBUG_TIMING:
+                    print('TTS first playback: {:.2f}s (prebuffer {:.1f}s)'.format(
+                        playback_started - started_at, len(buffer) / bytes_per_second))
+                player.stdin.write(buffer)
+                buffer.clear()
+            else:
+                player.stdin.write(chunk)
+
+        if player is None:
+            if not buffer:
+                raise RuntimeError('TTS returned empty PCM audio')
+            # Short utterances may not fill the prebuffer; play once complete.
+            player = subprocess.Popen(
+                ['aplay', '-q', '-D', device, '-t', 'raw',
+                 '-f', 'S16_LE', '-r', '24000', '-c', '1'],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE
+            )
+            playback_started = time.monotonic()
+            if DEBUG_TIMING:
+                print('TTS first playback: {:.2f}s (short response)'.format(
+                    playback_started - started_at))
+            player.stdin.write(buffer)
+        player.stdin.close()
+        # Capturing aplay's errors after playback; unlike communicate(), avoids
+        # buffering the entire streamed response before playback can begin.
+        error_output = player.stderr.read()
+        result = player.wait(timeout=120)
+        if result != 0:
+            raise AudioPlaybackError(
+                'Xiaomi {} failed: {}'.format(
+                    device, error_output.decode('utf-8', errors='replace').strip()))
+        if DEBUG_TIMING:
+            print('TTS streaming total: {:.2f}s; audio duration: {:.1f}s'.format(
+                time.monotonic() - started_at, received / bytes_per_second))
+        print('Audio output (Xiaomi):', device)
+        return device
+    except (OSError, subprocess.TimeoutExpired, BrokenPipeError) as error:
+        raise AudioPlaybackError('Xiaomi {} streaming error: {}'.format(device, error))
+    finally:
+        response.close()
+        if player is not None:
+            if player.stdin and not player.stdin.closed:
+                player.stdin.close()
+            if player.poll() is None:
+                player.kill()
+                player.wait()
+            if player.stderr:
+                player.stderr.close()
+
+
 def speak(text):
     print(ROBOT_NAME + ':', text)
-    # Check the Xiaomi before making a paid OpenAI TTS request.
-    xiaomi_speaker_device()
+    # Validate the ONLY allowed output before making a paid TTS request.
+    device = xiaomi_speaker_device()
     started = time.monotonic()
     response = requests.post(
         'https://api.openai.com/v1/audio/speech',
@@ -568,20 +649,66 @@ def speak(text):
             'model': 'tts-1', 'voice': 'alloy',
             'input': text, 'response_format': 'pcm'
         },
+        stream=True,
         timeout=(10, 90)
     )
-    response.raise_for_status()
-    pcm = response.content
-    if not pcm:
-        raise RuntimeError('TTS returned empty PCM audio')
-    if DEBUG_TIMING:
-        print('TTS download time: {:.2f}s; audio duration: {:.1f}s'.format(
-            time.monotonic() - started, len(pcm) / (24000.0 * 2)))
-    return play_pcm(pcm, rate=24000)
+    try:
+        response.raise_for_status()
+    except Exception:
+        response.close()
+        raise
+    return stream_tts_to_xiaomi(response, device, started)
+
+
+def local_camera_route(text, previous_camera_question=None):
+    """Route only unambiguous visual/nonvisual utterances; defer others to AI."""
+    q = ' '.join(text.casefold().strip().split())
+    if not q:
+        return None
+    # Visual follow-ups remain tied to a fresh camera frame, not an old image.
+    if previous_camera_question and re.search(
+        r'^(?:а теперь|а сейчас|а в другой руке|ну а теперь|and now|what about now|'
+        r'and the other|what about the other|now what|ал қазір|енді ше|'
+        r'طب دلوقتي|ودلوقتي|طيب دلوقتي)[?!.\s]*$', q
+    ):
+        return True
+
+    visual = (
+        r'что (?:ты )?видишь|что (?:у меня|я) (?:в руке|держу)|'
+        r'что (?:перед тобой|здесь|тут)|'
+        r'посмотри|смотри (?:на|сюда|что)|покажи|какого цвета|'
+        r'что на мне|кто (?:перед тобой|рядом со мной)|'
+        r'what (?:am i|i am) holding|what (?:do|can) you see|'
+        r'can you see (?:me|this|that|it)|look at|take (?:a )?photo|'
+        r'what is (?:in my hand|this|that|in front of you)|'
+        r'what color is (?:this|that|my)|what am i wearing|'
+        r'қолымда не|не көріп тұр|қарашы|қарап жібер|'
+        r'شايف|شوف|بص|في إيدي|قدامك|قدامي|لون ده'
+    )
+    if re.search(visual, q):
+        return True
+
+    # Only trivial small talk can safely skip the cloud camera classifier.
+    nonvisual = (
+        r'(?:hi|hello|hey|привет|сәлем|салам|сәлеметсің бе|'
+        r'مرحبا|أهلا|اهلا)[!?.\s]*|'
+        r'(?:how are you|how are you doing|are you good|how is it going|'
+        r'как дела|как ты|как поживаешь|қалайсың|қалың қалай|'
+        r'عامل ايه|ازيك|إزيك)[!?.\s]*|'
+        r'(?:thank you|thanks|спасибо|рахмет|شكرا)[!?.\s]*'
+    )
+    if re.fullmatch(nonvisual, q):
+        return False
+    return None
 
 
 def needs_camera(text, previous_camera_question=None):
     """Route requests about the currently visible world to the live camera."""
+    quick = local_camera_route(text, previous_camera_question)
+    if quick is not None:
+        if DEBUG_TIMING:
+            print('Camera routing: local', 'YES' if quick else 'NO')
+        return quick
     start = time.monotonic()
     try:
         response = requests.post(
