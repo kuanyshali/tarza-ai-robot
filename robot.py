@@ -1013,7 +1013,7 @@ def main():
                 continue
             # A wake-word interruption with "stop" cancels only this reply.
             if re.fullmatch(
-                r'(?:стоп|перестань|хватит|stop|quiet|سكوت|اسكت|тоқта)[!?.\\s]*',
+                r'(?:стоп|перестань|хватит|stop|quiet|سكوت|اسكت|тоқта)[!?.\s]*',
                 question.casefold()
             ):
                 dialog_until = time.monotonic() + DIALOG_TIMEOUT
