@@ -418,19 +418,43 @@ def listen_complete(wait_seconds=None):
     return ' '.join(parts).strip()
 
 
-def followup_is_addressed(text, previous_answer=''):
-    """Best-effort intent gate: speech identity cannot be verified by this mic."""
-    q = text.strip()
+def local_followup_intent(text, previous_answer=''):
+    """Local decision for clear direct questions versus obvious ambient speech.
+
+    Returns True, False, or None (ambiguous). This is not voice identification.
+    """
+    q = (text or '').strip().casefold()
     if not q:
         return False
-    # Small, clearly conversational replies are cheap to identify locally.
     if re.fullmatch(
         r'(?:yes|yeah|yep|no|nope|okay|ok|sure|thanks|thank you|'
         r'да|нет|ага|угу|хорошо|понял|спасибо|'
         r'иә|жоқ|жарайды|рахмет|'
-        r'اه|أيوه|ايوه|لا|تمام|شكرا)[.!?\s]*', q.casefold()
+        r'اه|أيوه|ايوه|لا|تمام|شكرا)[.!?\s]*', q
     ):
         return True
+    # Explicit questions and camera-directed follow-ups should not be lost
+    # because a network-only speaker-intent check timed out.
+    if '?' in q or '؟' in q:
+        return True
+    if re.search(
+        r'(?:^(?:tell me|can you|could you|what|why|how|who|where|when|'
+        r'скажи|расскажи|объясни|покажи|посмотри|'
+        r'айтып бер|түсіндір|көрсет|'
+        r'تقدر|ممكن|قوللي|قولي|اشرحلي|وريني)\b)',
+        q
+    ):
+        return True
+    return None
+
+
+def followup_is_addressed(text, previous_answer=''):
+    """Fast best-effort intent gate; fail open only for direct questions."""
+    quick = local_followup_intent(text, previous_answer)
+    if quick is not None:
+        print('Follow-up intent (local):', 'YES' if quick else 'NO')
+        return quick
+    q = text.strip()
     try:
         response = requests.post(
             'https://api.openai.com/v1/chat/completions',
@@ -439,30 +463,29 @@ def followup_is_addressed(text, previous_answer=''):
                 ROUTER_MODEL,
                 [
                     {'role': 'system', 'content': (
-                        'You are checking a voice robot open-dialogue follow-up. '
-                        'Reply exactly YES or NO. YES only when the new speech is '
-                        'plausibly addressed to the assistant in response to its '
-                        'immediately preceding message or asks it a direct question/command. '
-                        'NO for ambient conversations between other people, third-person '
-                        'talk about someone else, TV/audio, or unrelated speech. '
-                        'If uncertain, reply NO. This is intent filtering, not speaker '
-                        'identification. Understand Russian, Kazakh, English and Arabic.'
+                        'Check whether an utterance is directed at a voice robot '
+                        'as a continuation of its immediately preceding reply. '
+                        'Return exactly YES or NO. NO for unrelated background '
+                        'conversation, TV and third-person talk. If unsure, NO. '
+                        'This does not identify the speaker. Russian, Kazakh, '
+                        'English and Egyptian Arabic supported.'
                     )},
                     {'role': 'user', 'content': (
                         'Assistant last said: ' + previous_answer[-350:] +
-                        '\\nNew utterance: ' + q[:500]
+                        '\nNew utterance: ' + q[:500]
                     )}
                 ], 12, temperature=0
             ),
-            timeout=(5, 15)
+            timeout=(3, 4)
         )
         response.raise_for_status()
         result = (response.json()['choices'][0]['message'].get('content') or '').strip().upper()
         print('Follow-up intent:', result)
         return result == 'YES'
     except Exception as error:
-        print('Follow-up intent unavailable; ignoring unaddressed speech:', error)
-        return False
+        print('Follow-up intent API unavailable:', error)
+        # Preserve direct questions while not accepting random chatter.
+        return local_followup_intent(text, previous_answer) is True
 
 
 def response_language(question):
