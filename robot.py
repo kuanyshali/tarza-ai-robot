@@ -958,6 +958,7 @@ def main():
         vision_thread.start()
     dialog_until = 0.0
     last_answer = ''
+    last_online_request = False
     while True:
         try:
             active = time.monotonic() < dialog_until
@@ -965,9 +966,14 @@ def main():
                 print('Dialogue timeout; wake name required again.')
                 dialog_until = 0.0
                 last_camera_question = None
-            heard = listen_complete(
-                wait_seconds=max(0.0, dialog_until - time.monotonic()) if active else None
-            ).strip()
+            interrupted = pop_pending_interrupt()
+            if interrupted:
+                print('Processing interrupted request.')
+                heard = interrupted
+            else:
+                heard = listen_complete(
+                    wait_seconds=max(0.0, dialog_until - time.monotonic()) if active else None
+                ).strip()
             if not heard:
                 if active:
                     dialog_until = 0.0
@@ -1005,6 +1011,14 @@ def main():
                 last_answer = reply
                 dialog_until = time.monotonic() + DIALOG_TIMEOUT
                 continue
+            # A wake-word interruption with "stop" cancels only this reply.
+            if re.fullmatch(
+                r'(?:стоп|перестань|хватит|stop|quiet|سكوت|اسكت|тоқта)[!?.\\s]*',
+                question.casefold()
+            ):
+                dialog_until = time.monotonic() + DIALOG_TIMEOUT
+                print('Speech stopped; dialogue remains open.')
+                continue
             if re.search(
                 r'^(?:спи|отбой|хватит слушать|закрой диалог|'
                 r'go to sleep|end conversation|stop talking|'
@@ -1020,13 +1034,52 @@ def main():
             )):
                 speak('До встречи!')
                 break
-            camera_required = needs_camera(question, previous_camera_question=last_camera_question)
-            print('Camera required:', 'Yes' if camera_required else 'No')
+            language = response_language(question)
             answer_started = time.monotonic()
-            answer = see(question) if camera_required else chat(question)
+            if weather_intent(question):
+                print('Tool: live weather')
+                try:
+                    if not WEATHER_ENABLED:
+                        raise RuntimeError('Weather is disabled')
+                    answer = get_weather(question, language=language)
+                except Exception as error:
+                    print('Weather request failed:', error)
+                    answer = {
+                        'Russian': 'Не удалось получить свежую погоду, попробуй ещё раз.',
+                        'Kazakh': 'Қазіргі ауа райын ала алмадым, кейін қайталап көр.',
+                        'Egyptian Arabic': 'مش قادر أجيب حالة الجو دلوقتي، جرّب كمان مرة.',
+                        'English': 'I could not load the live weather. Please try again.'
+                    }.get(language, 'Live weather unavailable.')
+                last_online_request = False
+                last_camera_question = None
+            elif online_search_intent(question, recent_context=last_online_request):
+                print('Tool: live web search')
+                try:
+                    answer = search_web(question, language, conversation_history, HEADERS)
+                except Exception as error:
+                    print('Web search failed:', error)
+                    answer = {
+                        'Russian': 'Поиск в интернете сейчас не сработал. Попробуй ещё раз.',
+                        'Kazakh': 'Интернеттен іздеу қазір істемеді, қайталап көр.',
+                        'Egyptian Arabic': 'البحث على الإنترنت مش شغال دلوقتي، جرّب تاني.',
+                        'English': 'Live search failed this time. Please try again.'
+                    }.get(language, 'Live search unavailable.')
+                last_online_request = True
+                last_camera_question = None
+            else:
+                camera_required = needs_camera(question, previous_camera_question=last_camera_question)
+                print('Camera required:', 'Yes' if camera_required else 'No')
+                answer = see(question) if camera_required else chat(question)
+                last_camera_question = question if camera_required else None
+                last_online_request = False
             if DEBUG_TIMING:
                 print('Answer generation time: {:.2f}s'.format(time.monotonic() - answer_started))
-            last_camera_question = question if camera_required else None
+            if weather_intent(question) or last_online_request:
+                conversation_history.extend([
+                    {'role': 'user', 'content': question},
+                    {'role': 'assistant', 'content': answer}
+                ])
+                conversation_history = conversation_history[-12:]
             # Open the follow-up window only after talking, not while TTS plays.
             last_answer = answer
             speak(answer)
