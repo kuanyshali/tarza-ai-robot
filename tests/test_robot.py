@@ -120,44 +120,66 @@ class RobotTests(unittest.TestCase):
         self.assertEqual(captured[1]['files']['file'][0], 'wake_prefix.wav')
         self.assertEqual(captured[1]['files']['file'][1], b'WAVE')
 
-    def test_alsa_scan_prefers_usb_speaker_even_if_card_number_changes(self):
+    def test_xiaomi_device_follows_alsa_card_changes_and_ignores_kt(self):
         listing = (
-            'card 0: tegrahda [tegra-hda], device 3: HDMI 0 [HDMI 0]\n'
-            'card 2: Adapter [USB Audio Adapter], device 0: USB Audio [USB Audio]\n'
-            'card 4: Speaker [USB Speaker], device 0: USB Audio [USB Audio]\n'
+            'card 0: tegrahda [tegra-hda], device 3: HDMI 0 [HDMI 0]\\n'
+            'card 2: Audio [KT USB Audio], device 0: USB Audio [USB Audio]\\n'
+            'card 5: Device [USB Composite Device], device 0: USB Audio [USB Audio]\\n'
         )
         def run(*args, **kwargs):
             return SimpleNamespace(returncode=0, stdout=listing, stderr='')
-        candidates = isolated(
-            'audio_output_candidates',
-            os=SimpleNamespace(environ={}), re=re,
+        finder = isolated(
+            'xiaomi_speaker_device', re=re,
+            XIAOMI_ALSA_LABEL='USB Composite Device',
             subprocess=SimpleNamespace(run=run, PIPE=-1, TimeoutExpired=TimeoutError),
+            AudioPlaybackError=RuntimeError
         )
-        self.assertEqual(candidates(), ['plughw:4,0', 'plughw:2,0'])
+        self.assertEqual(finder(), 'plughw:5,0')
 
-    def test_alsa_device_override(self):
-        candidates = isolated(
-            'audio_output_candidates',
-            os=SimpleNamespace(environ={'SADAM_SPEAKER_DEVICE': 'plughw:CARD=Speaker,DEV=0'}),
+    def test_xiaomi_absent_never_falls_back_to_kt(self):
+        def run(*args, **kwargs):
+            return SimpleNamespace(returncode=0,
+                stdout='card 2: Audio [KT USB Audio], device 0: USB Audio [USB Audio]\\n',
+                stderr='')
+        finder = isolated(
+            'xiaomi_speaker_device', re=re,
+            XIAOMI_ALSA_LABEL='USB Composite Device',
+            subprocess=SimpleNamespace(run=run, PIPE=-1, TimeoutExpired=TimeoutError),
+            AudioPlaybackError=RuntimeError
         )
-        self.assertEqual(candidates(), ['plughw:CARD=Speaker,DEV=0'])
+        with self.assertRaisesRegex(RuntimeError, 'not detected'):
+            finder()
 
-    def test_audio_playback_falls_back_on_alsa_error(self):
+    def test_xiaomi_multiple_matching_devices_refused(self):
+        def run(*args, **kwargs):
+            return SimpleNamespace(returncode=0,
+                stdout=('card 3: Device [USB Composite Device], device 0: USB Audio [USB Audio]\\n'
+                        'card 4: Device [USB Composite Device], device 0: USB Audio [USB Audio]\\n'),
+                stderr='')
+        finder = isolated(
+            'xiaomi_speaker_device', re=re,
+            XIAOMI_ALSA_LABEL='USB Composite Device',
+            subprocess=SimpleNamespace(run=run, PIPE=-1, TimeoutExpired=TimeoutError),
+            AudioPlaybackError=RuntimeError
+        )
+        with self.assertRaisesRegex(RuntimeError, 'Multiple'):
+            finder()
+
+    def test_audio_playback_only_uses_xiaomi(self):
         calls = []
         def run(args, **kwargs):
             calls.append((args, kwargs))
-            if len(calls) == 1:
-                return SimpleNamespace(returncode=1, stderr=b'Invalid value for card')
             return SimpleNamespace(returncode=0, stderr=b'')
         playback = isolated(
             'play_pcm',
-            audio_output_candidates=lambda: ['plughw:3,0', 'plughw:4,0'],
+            xiaomi_speaker_device=lambda: 'plughw:7,0',
             subprocess=SimpleNamespace(run=run, PIPE=-1, DEVNULL=-3, TimeoutExpired=TimeoutError),
             AudioPlaybackError=RuntimeError,
         )
-        self.assertEqual(playback(b'PCM', 24000, quiet=True), 'plughw:4,0')
+        self.assertEqual(playback(b'PCM', 24000, quiet=True), 'plughw:7,0')
         self.assertEqual(calls[0][1]['input'], b'PCM')
-        self.assertEqual(calls[1][0][3], 'plughw:4,0')
+        self.assertEqual(calls[0][0][3], 'plughw:7,0')
+        self.assertEqual(len(calls), 1)
 
     def test_tts_buffers_pcm_before_playback(self):
         pcm = b'\\x01\\x02' * 24000
@@ -174,33 +196,33 @@ class RobotTests(unittest.TestCase):
 
         def play(data, rate):
             calls.append((data, rate))
-            return 'plughw:4,0'
+            return 'plughw:5,0'
 
         speaker = isolated(
             'speak',
             requests=SimpleNamespace(post=post),
-            HEADERS={},
-            ROBOT_NAME='Садам',
-            DEBUG_TIMING=False,
-            time=time,
-            audio_output_candidates=lambda: ['plughw:4,0'],
+            HEADERS={}, ROBOT_NAME='Садам',
+            DEBUG_TIMING=False, time=time,
+            xiaomi_speaker_device=lambda: 'plughw:5,0',
             play_pcm=play,
             AudioPlaybackError=RuntimeError,
         )
         speaker('Hello!')
         self.assertEqual(calls, [(pcm, 24000)])
 
-    def test_tts_no_speaker_does_not_request_audio(self):
+    def test_tts_no_xiaomi_does_not_request_audio(self):
         def no_request(*args, **kwargs):
-            self.fail('TTS should not be called if there is no output')
+            self.fail('TTS should not be called if Xiaomi is missing')
+        def no_xiaomi():
+            raise RuntimeError('Xiaomi missing')
         speaker = isolated(
             'speak',
             requests=SimpleNamespace(post=no_request),
             HEADERS={}, ROBOT_NAME='Садам', DEBUG_TIMING=False,
-            time=time, audio_output_candidates=lambda: [],
+            time=time, xiaomi_speaker_device=no_xiaomi,
             AudioPlaybackError=RuntimeError,
         )
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(RuntimeError, 'Xiaomi missing'):
             speaker('Hello!')
 
     def test_new_model_payload(self):
