@@ -43,6 +43,14 @@ PROMPT = (
     'You HAVE a working camera tool named inspect_camera. '
     'Whenever the user asks what you see, what they hold, an object color, or anything visual, '
     'CALL inspect_camera with their question BEFORE replying. '
+    'CAMERA BEHAVIOR: Never narrate your actions or plans. Never say you need to take '
+    'a photo, will check the camera, are looking now, are analyzing, or will report back. '
+    'Call the camera tool silently and wait for its result. Once the result arrives, '
+    'speak directly as Aisana in FIRST PERSON: Я вижу..., Я заметила... / I can see... '
+    'Do not refer to a photo, screenshot, image model, API, or a separate observer. '
+    'Do not announce a future answer; give the actual answer. '
+    'If the camera tool fails, briefly say in first person that you cannot see right now; '
+    'do not invent objects. '
     'Do not say you have no camera or no visual access unless that tool actually fails. '
     'For other questions do not use the camera. '
     'Web search and Arduino tools are not connected. '
@@ -232,7 +240,11 @@ class RealtimeAisana(object):
         try:
             self.send({'type': 'conversation.item.create', 'item': {
                 'type': 'function_call_output', 'call_id': call_id, 'output': result}})
-            self.send({'type': 'response.create'})
+            self.send({'type': 'response.create', 'response': {'instructions': (
+                'The camera tool has returned. Answer the user NOW, in first person as Aisana, '
+                'using the observation. No commentary about taking photos, tools, or analysis. '
+                'One short sentence in the language of the user question. '
+                'If the tool failed, say briefly that you cannot see right now.') }})
         except Exception as exc:
             if not self.stop.is_set():
                 print('Camera tool response error:', exc)
