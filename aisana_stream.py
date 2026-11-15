@@ -1,8 +1,8 @@
 """Optional streaming transcription from Jetson's ALSA microphone.
 
 Uses OpenAI Realtime transcription sessions over WebSocket, with server-side VAD.
-The microphone sends 16-kHz mono PCM continuously in 30-ms chunks; no WAV upload.
-Python 3.6 compatible with websocket-client==1.6.4.
+The microphone sends 24-kHz mono PCM continuously in 30-ms chunks; no WAV upload.
+Python 3.6 compatible with websocket-client==1.3.1.
 """
 import base64
 import json
@@ -16,32 +16,37 @@ def stream_transcribe(mic_device, api_key, wait_seconds=None, stop_event=None):
     try:
         import websocket
     except ImportError:
-        raise RuntimeError('Streaming mode needs websocket-client: .venv/bin/pip install websocket-client==1.6.4')
+        raise RuntimeError('Streaming mode needs websocket-client: .venv/bin/pip install websocket-client==1.3.1')
     url = 'wss://api.openai.com/v1/realtime?intent=transcription'
     ws = websocket.create_connection(
         url, timeout=10,
-        header=['Authorization: Bearer ' + api_key, 'OpenAI-Beta: realtime=v1']
+        header=['Authorization: Bearer ' + api_key]
     )
-    rate = 16000
-    chunk_size = 960
+    rate = 24000
+    chunk_size = 1440
     silence_ms = int(float(os.environ.get('AISANA_STREAM_SILENCE_MS', '2000')))
     silence_ms = max(500, min(5000, silence_ms))
     ws.send(json.dumps({
         'type': 'transcription_session.update',
         'session': {
-            'input_audio_format': 'pcm16',
-            'input_audio_transcription': {
-                'model': os.environ.get('AISANA_STREAM_STT_MODEL', 'gpt-4o-mini-transcribe'),
-                'prompt': 'Aisana, Aysana, Айсана, Эйсана. Multilingual Russian, Kazakh, English and Arabic.'
-            },
-            'turn_detection': {
-                'type': 'server_vad',
-                'threshold': 0.5,
-                'prefix_padding_ms': 500,
-                'silence_duration_ms': silence_ms
+            'audio': {
+                'input': {
+                    'format': {'type': 'audio/pcm', 'rate': 24000},
+                    'transcription': {
+                        'model': os.environ.get('AISANA_STREAM_STT_MODEL', 'gpt-4o-mini-transcribe'),
+                        'prompt': 'Aisana, Aysana, Айсана, Эйсана. Multilingual Russian, Kazakh, English and Arabic.'
+                    },
+                    'turn_detection': {
+                        'type': 'server_vad',
+                        'threshold': 0.5,
+                        'prefix_padding_ms': 500,
+                        'silence_duration_ms': silence_ms
+                    }
+                }
             }
         }
     }))
+
     done = threading.Event()
     errors = []
     started = threading.Event()
