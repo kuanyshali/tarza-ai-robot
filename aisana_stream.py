@@ -27,8 +27,9 @@ def stream_transcribe(mic_device, api_key, wait_seconds=None, stop_event=None):
     silence_ms = int(float(os.environ.get('AISANA_STREAM_SILENCE_MS', '2000')))
     silence_ms = max(500, min(5000, silence_ms))
     ws.send(json.dumps({
-        'type': 'transcription_session.update',
+        'type': 'session.update',
         'session': {
+            'type': 'transcription',
             'audio': {
                 'input': {
                     'format': {'type': 'audio/pcm', 'rate': 24000},
