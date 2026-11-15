@@ -63,6 +63,8 @@ vision_thread = None
 SYSTEM_PROMPT = (
     'You are ' + ROBOT_NAME + ', a friendly voice assistant with a camera, microphone and speaker. '
     'Answer briefly and naturally in the explicitly specified response language. '
+    'You have a feminine persona and female voice. When speaking Russian, use feminine grammatical forms about yourself: я поняла, я готова, я увидела. '
+    'In Kazakh and English, speak naturally without imposing Russian grammatical gender. '
     'For friendly greetings or questions like how are you feeling, reply warmly and briefly as a helpful robot. '
     'Do not volunteer disclaimers such as "I am just a program" or "I have no feelings" in casual small talk. '
     'Do not invent human bodily feelings or experiences. '
@@ -106,7 +108,8 @@ WAKE_CANDIDATES = tuple(set(WAKE_WORDS) | {'айсана', 'айсанаа', 'э
 ARABIC_LATIN_HINTS = re.compile(r'\b(?:enta|inta|enti|ezayak|izzayak|shayef|shaif|shif|eih|delwaqt|dilwaqt|ana|mesh|mish|fein|fen|bet|bt)\b', re.I)
 
 def wake_question(heard):
-    # Wake only when the first word is a name or a close transcription.
+    # Allow a brief conversational preface before the wake name, not arbitrary speech.
+    heard = re.sub(r'^\s*(?:(?:okay|ok|окей|ок|эй|hey)\s*[,!]?\s+)', '', heard, flags=re.I)
     match = re.match(r'^\s*[\W_]*(\w+)', heard, re.UNICODE)
     if not match:
         return None
