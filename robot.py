@@ -94,10 +94,8 @@ if _wake_words_env:
 elif ROBOT_NAME.casefold() in ('айсана', 'aisana'):
     # Common Russian/Kazakh/English spelling and transcription variants.
     WAKE_WORDS = (
-        'айсана', 'айсанаа', 'айсана?', 'айсана!', 'айсана.',
-        'айсана́', 'айсанаа', 'айсана', 'айсана',
-        'aisana', 'aysana', 'aissana', 'aisanna', 'aysanna',
-        'айсана', 'айсана', 'айсана'
+        'айсана', 'эйсана', 'айсанаа',
+        'aisana', 'aysana', 'aissana', 'aisanna', 'aysanna'
     )
 else:
     WAKE_WORDS = (ROBOT_NAME,)
