@@ -40,8 +40,12 @@ PROMPT = (
     'Do not repeat yourself or continue talking after answering. '
     'When addressed as Aisana, wait for the complete question. '
     'In Russian use feminine grammatical forms when referring to yourself. '
-    'Camera, web search and Arduino tools are not connected in this mode. '
-    'Do not pretend to see objects, know current events, or operate motors. '
+    'You HAVE a working camera tool named inspect_camera. '
+    'Whenever the user asks what you see, what they hold, an object color, or anything visual, '
+    'CALL inspect_camera with their question BEFORE replying. '
+    'Do not say you have no camera or no visual access unless that tool actually fails. '
+    'For other questions do not use the camera. '
+    'Web search and Arduino tools are not connected. '
 )
 
 
@@ -188,7 +192,10 @@ class RealtimeAisana(object):
         """Capture one fresh IMX219 frame and analyze it with the vision API."""
         with self.camera_lock:
             # camera.py uses the Jetson GStreamer camera pipeline and writes photo.jpg.
-            subprocess.check_call(['python3', 'camera.py'], timeout=20)
+            # Fail closed rather than analyzing a stale image if capture fails.
+            if os.path.exists('photo.jpg'):
+                os.remove('photo.jpg')
+            subprocess.check_call(['/usr/bin/python3', 'camera.py'], timeout=20)
             with open('photo.jpg', 'rb') as photo:
                 encoded = base64.b64encode(photo.read()).decode('ascii')
         response = requests.post(
