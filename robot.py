@@ -151,6 +151,41 @@ def show_usage(data):
 
 
 
+# The KT USB microphone can change card numbers after a USB reconnect.
+# Resolve its card/device from arecord -l every time recording starts.
+KT_MIC_ALSA_LABEL = 'KT USB Audio'
+
+
+def kt_microphone_device():
+    """Find exactly one KT capture endpoint; never guess an ALSA card number."""
+    try:
+        result = subprocess.run(
+            ['arecord', '-l'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError('Cannot list ALSA microphones: {}'.format(error))
+    if result.returncode != 0:
+        raise RuntimeError('Cannot list ALSA microphones: {}'.format(
+            result.stderr.strip()))
+    matches = re.findall(
+        r'^card\s+(\d+):\s*[^\[]+\[([^\]]+)\],\s*device\s+(\d+):',
+        result.stdout, re.MULTILINE
+    )
+    devices = [
+        'plughw:{},{}'.format(card, dev)
+        for card, name, dev in matches
+        if name.strip() == KT_MIC_ALSA_LABEL
+    ]
+    if len(devices) != 1:
+        raise RuntimeError(
+            'Expected one KT USB Audio capture device in arecord -l, found {}. '
+            'Check USB microphone; refusing to record from another device.'.format(
+                len(devices))
+        )
+    return devices[0]
+
+
 # The Xiaomi USB speaker currently reports itself to ALSA as
 # "USB Composite Device". KT USB Audio is the microphone adapter, NOT a speaker.
 # Match the hardware label, never a hard-coded ALSA card index or generic USB output.
@@ -253,17 +288,21 @@ def record_until_silence(filename='speech.wav', wait_seconds=None, stop_event=No
     print('Listening... Speak naturally; recording ends after a pause.')
     if beep:
         play_beep(frequency=880)
+    mic_device = kt_microphone_device()
+    print('Audio input (KT):', mic_device)
     process = subprocess.Popen([
-        'arecord', '-q', '-D', 'plughw:2,0', '-t', 'raw',
+        'arecord', '-q', '-D', mic_device, '-t', 'raw',
         '-f', 'S16_LE', '-r', str(rate), '-c', '1'
-    ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
                 return False
             chunk = process.stdout.read(chunk_bytes)
             if len(chunk) != chunk_bytes:
-                raise RuntimeError('Microphone recording stopped unexpectedly')
+                reason = process.stderr.read().decode('utf-8', errors='replace').strip()
+                raise RuntimeError('KT microphone {} recording stopped: {}'.format(
+                    mic_device, reason or 'arecord ended unexpectedly'))
             rms = audioop.rms(chunk, 2)
             now = time.monotonic()
             if not speaking:
@@ -1021,7 +1060,7 @@ def main():
                 print('Processing interrupted request.')
                 heard = interrupted
             elif not active and offline_model is not None:
-                if not record_wake_phrase(offline_model):
+                if not record_wake_phrase(offline_model, mic_device=kt_microphone_device()):
                     continue
                 # Confirm activation through the Xiaomi speaker once, not on
                 # arbitrary ambient speech. Then transcribe full wake+question.
