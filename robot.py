@@ -12,6 +12,7 @@ import threading
 import cv2
 from wake_listener import load_vosk_model, record_wake_phrase
 from aisana_memory import load_history, remember_turn, CONTEXT_MESSAGES
+from aisana_stream import stream_transcribe
 from sadam_features import (weather_intent, WEATHER_ENABLED, get_weather,
                             online_search_intent, search_web, semantic_turn_incomplete)
 
@@ -431,6 +432,8 @@ def recover_wake_question(full_transcription, filename='speech.wav'):
 
 
 def listen(wait_seconds=None, beep=False):
+    if os.environ.get('AISANA_AUDIO_MODE', 'legacy').lower() == 'stream':
+        return stream_transcribe(kt_microphone_device(), API_KEY, wait_seconds=wait_seconds)
     if not record_until_silence(wait_seconds=wait_seconds, beep=beep):
         return ''
     return transcribe_audio()
