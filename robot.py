@@ -26,7 +26,7 @@ VISION_MODEL = os.environ.get('SADAM_VISION_MODEL', CHAT_MODEL)
 REASONING_EFFORT = os.environ.get('SADAM_REASONING_EFFORT', 'none')
 session_input_tokens = 0
 session_output_tokens = 0
-ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Садам').strip() or 'Садам'
+ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Айсана').strip() or 'Айсана'
 DIALOG_TIMEOUT = max(5.0, float(os.environ.get('TARZA_DIALOG_TIMEOUT', '20')))
 WAKE_MODE = os.environ.get('SADAM_WAKE_MODE', 'legacy').strip().lower()
 WAKE_MODEL_PATH = os.environ.get('SADAM_WAKE_MODEL', 'models/vosk-model-small-ru-0.22')
@@ -91,23 +91,20 @@ SYSTEM_PROMPT = (
 _wake_words_env = os.environ.get('ROBOT_WAKE_WORDS', '').strip()
 if _wake_words_env:
     WAKE_WORDS = tuple(w.strip() for w in _wake_words_env.split(',') if w.strip())
-elif ROBOT_NAME.casefold() in ('садам', 'sadam', 'саддам', 'saddam'):
-    # Short transcription variants for Russian, Kazakh and English accents.
+elif ROBOT_NAME.casefold() in ('айсана', 'aisana'):
+    # Common Russian/Kazakh/English spelling and transcription variants.
     WAKE_WORDS = (
-        'садам', 'саддам', 'садамм', 'саддан', 'садан', 'сада',
-        'садэм', 'саддэм', 'сэдэм', 'сэддам', 'сэдем',
-        'адам', 'аддам', 'адэм', 'адамм',
-        'sadam', 'saddam', 'sadamm', 'saddamm', 'sadan',
-        'sadem', 'saddem', 'sedam', 'sedem', 'sada',
-        'صدام', 'سدام', 'صدامم', 'سدامم',
-        'adam', 'addam', 'adem'
+        'айсана', 'айсанаа', 'айсана?', 'айсана!', 'айсана.',
+        'айсана́', 'айсанаа', 'айсана', 'айсана',
+        'aisana', 'aysana', 'aissana', 'aisanna', 'aysanna',
+        'айсана', 'айсана', 'айсана'
     )
 else:
     WAKE_WORDS = (ROBOT_NAME,)
 if not WAKE_WORDS:
     WAKE_WORDS = (ROBOT_NAME,)
 WAKE_PATTERN = re.compile(r'(?<!\w)(?:' + '|'.join(map(re.escape, sorted(set(WAKE_WORDS), key=len, reverse=True))) + r')(?!\w)', re.IGNORECASE)
-WAKE_CANDIDATES = tuple(set(WAKE_WORDS) | {'садом', 'саднам', 'سعدتم'})
+WAKE_CANDIDATES = tuple(set(WAKE_WORDS) | {'айсана', 'айсанаа', 'эйсана', 'айсана'})
 ARABIC_LATIN_HINTS = re.compile(r'\b(?:enta|inta|enti|ezayak|izzayak|shayef|shaif|shif|eih|delwaqt|dilwaqt|ana|mesh|mish|fein|fen|bet|bt)\b', re.I)
 
 def wake_question(heard):
@@ -368,7 +365,7 @@ def wake_audio_prefix(filename='speech.wav', seconds=None):
 def transcribe_audio(filename='speech.wav', first_seconds=None):
     """Multilingual transcription with literal wake-name hints, not forced output."""
     prompt = ('This is a multilingual voice assistant conversation. '
-              'The assistant may be addressed as صدام, Saddam, Садам or Саддам. '
+              'The assistant may be addressed as Aisana, Aysana, Айсана or Эйсана. '
               'Write only what is actually audible, including the first word if spoken. '
               'Never insert a wake name that was not spoken. '
               'Preserve Egyptian Arabic in Arabic script, and do not translate.')
@@ -380,12 +377,12 @@ def transcribe_audio(filename='speech.wav', first_seconds=None):
         audio_bytes = wake_audio_prefix(filename, first_seconds)
         upload_name = 'wake_prefix.wav'
         prompt = ('Transcribe the first audible words exactly as spoken. '
-                  'The first word could be صدام, Saddam, Садам or Саддам. '
+                  'The first word could be Aisana, Aysana, Айсана or Эйсана. '
                   'Only write this name if it is actually audible. '
                   'Do not translate or invent any words.')
     data = [('model', TRANSCRIBE_MODEL), ('prompt', prompt)]
     if TRANSCRIBE_MODEL == 'gpt-transcribe':
-        for keyword in ('صدام', 'سدام', 'Saddam', 'Sadam', 'Садам', 'Саддам'):
+        for keyword in ('Aisana', 'Aysana', 'Айсана', 'Эйсана'):
             data.append(('keywords[]', keyword))
         for language in ('ar', 'ru', 'en', 'kk'):
             data.append(('languages[]', language))
@@ -915,7 +912,7 @@ def speak(text):
         'https://api.openai.com/v1/audio/speech',
         headers=HEADERS,
         json={
-            'model': 'tts-1', 'voice': 'alloy',
+            'model': 'tts-1', 'voice': os.environ.get('AISANA_TTS_VOICE', 'nova'),
             'input': text, 'response_format': 'pcm'
         },
         stream=True,
@@ -1204,7 +1201,7 @@ def main():
             break
         except AudioPlaybackError as error:
             print('Audio playback unavailable:', error)
-            print('Sadam is still listening; check USB speaker / aplay -l.')
+            print(ROBOT_NAME + ' is still listening; check USB speaker / aplay -l.')
             # The turn was addressed to us; preserve the dialogue window.
             dialog_until = time.monotonic() + DIALOG_TIMEOUT
             continue
