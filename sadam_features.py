@@ -1,4 +1,4 @@
-"""Online weather, live web lookup, and voice-turn routing for Sadam.
+"""Online weather, live web lookup, and voice-turn routing for Aisana.
 
 Python 3.6+ compatible; only dependency is the project's existing requests.
 No Jetson-specific imports so these functions can be unit-tested offline.
@@ -196,7 +196,7 @@ def search_web(question, language, history, headers, session=requests):
     messages = [{
         'role': 'system',
         'content': (
-            'You are Sadam, a witty and candid voice robot. Reply naturally and '
+            'You are Aisana, a friendly witty female-voiced robot. Reply naturally and '
             'briefly in ' + language + '. Give direct, factual answers even to '
             'challenging or controversial political questions. Do not evade or '
             'invent facts. Search fresh sources and distinguish competing views. '
