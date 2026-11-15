@@ -1094,7 +1094,7 @@ def main():
             print('You:', heard)
             question = wake_question(heard)
             named = question is not None
-            if not named and not active and not offline_woke:
+            if not named and not active and not offline_woke and os.environ.get('AISANA_AUDIO_MODE', 'legacy').lower() != 'stream':
                 print('Wake name absent; checking beginning of recording.')
                 try:
                     recovered = recover_wake_question(heard)
