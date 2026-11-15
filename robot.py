@@ -40,6 +40,8 @@ conversation_history = load_history()
 # A single open microphone next to the speaker hears TTS as its own speech.
 # Disable experimental barge-in by default until proper echo cancellation exists.
 BARGE_IN_ENABLED = os.environ.get('SADAM_BARGE_IN', '0') == '1'
+BEEP_ENABLED = os.environ.get('AISANA_BEEP', '0') == '1'
+WAKE_FOLLOWUP_WAIT = max(1.0, min(8.0, float(os.environ.get('AISANA_WAKE_FOLLOWUP_WAIT', '3.5'))))
 SEMANTIC_END_ENABLED = os.environ.get('SADAM_SEMANTIC_END', '1') == '1'
 interrupt_lock = threading.Lock()
 pending_interrupt = None
@@ -273,7 +275,7 @@ def record_until_silence(filename='speech.wav', wait_seconds=None, stop_event=No
     rate = 16000
     chunk_bytes = 960  # 30 ms, 16-bit mono
     silence_seconds = (silence_override if silence_override is not None else
-                       float(os.environ.get('TARZA_SILENCE_SECONDS', '1.15')))
+                       float(os.environ.get('TARZA_SILENCE_SECONDS', '2.0')))
     min_rms = int(os.environ.get('TARZA_VOICE_RMS', '350'))
     preroll_seconds = max(0.6, min(3.0, float(os.environ.get('TARZA_PREROLL_SECONDS', '1.5'))))
     preroll = collections.deque(maxlen=int(preroll_seconds / 0.03))
@@ -428,7 +430,7 @@ def recover_wake_question(full_transcription, filename='speech.wav'):
     return full_transcription.strip()
 
 
-def listen(wait_seconds=None, beep=True):
+def listen(wait_seconds=None, beep=False):
     if not record_until_silence(wait_seconds=wait_seconds, beep=beep):
         return ''
     return transcribe_audio()
@@ -452,12 +454,20 @@ def utterance_may_continue(transcript):
     ))
 
 
-def listen_complete(wait_seconds=None, beep=True):
+def listen_complete(wait_seconds=None, beep=False):
     """Capture one spoken turn; if it sounds unfinished, collect brief add-ons."""
     first = listen(wait_seconds=wait_seconds, beep=beep)
     if not first:
         return ''
     parts = [first.strip()]
+    # A wake name spoken alone is not the end of the request: keep listening.
+    if wake_question(parts[0]) == '':
+        print('Wake name heard; waiting for the rest of the request...')
+        more = listen(wait_seconds=WAKE_FOLLOWUP_WAIT, beep=False)
+        if more:
+            parts.append(more.strip())
+        else:
+            return parts[0]
     for _ in range(MAX_CONTINUATION_SEGMENTS):
         incomplete = utterance_may_continue(parts[-1])
         if not incomplete and SEMANTIC_END_ENABLED:
@@ -1070,7 +1080,7 @@ def main():
             else:
                 heard = listen_complete(
                     wait_seconds=max(0.0, dialog_until - time.monotonic()) if active else None,
-                    beep=not active
+                    beep=BEEP_ENABLED and not active
                 ).strip()
             if not heard:
                 if active:
