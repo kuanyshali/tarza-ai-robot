@@ -2,7 +2,7 @@
 
 Runs no transcription or OpenAI calls until the local recognizer spots the
 wake word. A single uninterrupted audio segment is saved, so the subsequent
-cloud transcription still sees "Sadam, <question>" as one utterance.
+cloud transcription still sees "Aisana, <question>" as one utterance.
 """
 import audioop
 import collections
@@ -16,7 +16,7 @@ import wave
 RATE = 16000
 CHUNK = 3200  # 100 ms of PCM16 mono
 WAKE_WORDS = (
-    'садам', 'саддам', 'садом', 'садан', 'sadam', 'saddam',
+    'айсана', 'эйсана', 'айсанаа', 'aisana', 'aysana',
     'صدام', 'سدام'
 )
 # Strict, word-boundary-matched local activation. No fuzzy matching:
@@ -25,7 +25,7 @@ WORDS = set(WAKE_WORDS)
 
 
 def has_wake_word(transcript):
-    """Only the first spoken word activates Sadam."""
+    """Only the first spoken word activates Aisana."""
     text = (transcript or '').strip().casefold()
     tokens = re.findall(r'[^\W_]+', text, flags=re.UNICODE)
     return bool(tokens and tokens[0] in WORDS)
