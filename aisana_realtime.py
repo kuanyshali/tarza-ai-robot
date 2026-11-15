@@ -22,7 +22,7 @@ VOICE = os.environ.get('AISANA_REALTIME_VOICE', 'marin')
 BARGE_IN = os.environ.get('AISANA_REALTIME_BARGE_IN', '0') == '1'
 SILENCE_MS = int(os.environ.get('AISANA_REALTIME_SILENCE_MS', '850'))
 ECHO_GUARD = os.environ.get('AISANA_ECHO_GUARD', '1') == '1'
-ECHO_TAIL_SECONDS = float(os.environ.get('AISANA_ECHO_TAIL_SECONDS', '0.8'))
+ECHO_TAIL_SECONDS = float(os.environ.get('AISANA_ECHO_TAIL_SECONDS', '1.5'))
 KEY = os.environ.get('OPENAI_API_KEY')
 PROMPT = (
     'You are Aisana (Айсана), a warm, witty, helpful female-voiced robot. '
@@ -67,6 +67,9 @@ class RealtimeAisana(object):
         self.audio_queue = queue.Queue(maxsize=256)
         self.audio_generation = 0
         self.mute_until = 0.0
+        # True from response.created through the very last ALSA playback byte.
+        # Covers the race between response.done and the playback worker.
+        self.echo_guard_active = False
 
     def send(self, payload):
         with self.send_lock:
@@ -119,7 +122,9 @@ class RealtimeAisana(object):
                     if item_gen == self.audio_generation:
                         self.playback = None
                         self.playing = False
+                # Keep capture gated until the acoustic tail has dissipated.
                 self.mute_until = time.monotonic() + ECHO_TAIL_SECONDS
+                self.echo_guard_active = False
                 continue
             if kind != 'audio':
                 continue
@@ -159,7 +164,7 @@ class RealtimeAisana(object):
                 pcm = self.mic.stdout.read(CHUNK)
                 if len(pcm) != CHUNK:
                     raise RuntimeError('Microphone capture ended unexpectedly')
-                if ECHO_GUARD and (self.responding or self.playing or time.monotonic() < self.mute_until):
+                if ECHO_GUARD and (self.echo_guard_active or self.responding or self.playing or time.monotonic() < self.mute_until):
                     continue
                 self.send({'type': 'input_audio_buffer.append',
                            'audio': base64.b64encode(pcm).decode('ascii')})
@@ -182,9 +187,11 @@ class RealtimeAisana(object):
                 # cancels the active generation. A second response.cancel races
                 # with response.done and triggers response_cancel_not_active.
         elif typ == 'response.created':
+            self.echo_guard_active = True
             self.responding = True
             self.playback_interrupted = False
         elif typ == 'response.output_audio.delta':
+            self.echo_guard_active = True
             if not self.playback_interrupted:
                 self.queue_audio('audio', base64.b64decode(e.get('delta', '')))
         elif typ == 'response.output_audio_transcript.delta':
@@ -193,6 +200,7 @@ class RealtimeAisana(object):
             print('')
         elif typ == 'response.done':
             self.responding = False
+            # Do NOT lift echo guard here: playback can lag behind generation.
             self.queue_audio('done')
         elif typ == 'error':
             print('Realtime API error:', e.get('error', {}))
