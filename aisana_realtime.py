@@ -60,6 +60,7 @@ class RealtimeAisana(object):
         self.responding = False
         self.playing = False
         self.speech_started_at = 0
+        self.playback_interrupted = False
 
     def send(self, payload):
         with self.send_lock:
@@ -115,17 +116,17 @@ class RealtimeAisana(object):
             self.speech_started_at = time.monotonic()
             print('You: speaking...')
             if BARGE_IN and (self.responding or self.playing):
+                self.playback_interrupted = True
                 self.stop_playback()
-                if self.responding:
-                    try:
-                        self.send({'type': 'response.cancel'})
-                    except Exception as exc:
-                        print('Cancel warning:', exc)
-                # Audio already heard by the user may differ from server state;
-                # a full production implementation should truncate the played item.
+                # Realtime server_vad with interrupt_response=True already
+                # cancels the active generation. A second response.cancel races
+                # with response.done and triggers response_cancel_not_active.
         elif typ == 'response.created':
             self.responding = True
+            self.playback_interrupted = False
         elif typ == 'response.output_audio.delta':
+            if self.playback_interrupted:
+                return
             if self.playback is None:
                 self.start_playback()
                 print('Aisana: speaking...')
@@ -143,7 +144,26 @@ class RealtimeAisana(object):
             print('')
         elif typ == 'response.done':
             self.responding = False
-            self.stop_playback()
+            # Drain already-buffered audio rather than cutting off the voice.
+            # Never block the websocket receive loop while waiting for playback.
+            with self.play_lock:
+                p = self.playback
+                self.playback = None
+                self.playing = False
+            if p:
+                try:
+                    p.stdin.close()
+                except Exception:
+                    pass
+                def finish_playback(proc):
+                    try:
+                        proc.wait(timeout=20)
+                    except Exception:
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                threading.Thread(target=finish_playback, args=(p,), daemon=True).start()
         elif typ == 'error':
             print('Realtime API error:', e.get('error', {}))
 
