@@ -11,6 +11,7 @@ import io
 import threading
 import cv2
 from wake_listener import load_vosk_model, record_wake_phrase
+from aisana_memory import load_history, remember_turn, CONTEXT_MESSAGES
 from sadam_features import (weather_intent, WEATHER_ENABLED, get_weather,
                             online_search_intent, search_web, semantic_turn_incomplete)
 
@@ -27,7 +28,7 @@ REASONING_EFFORT = os.environ.get('SADAM_REASONING_EFFORT', 'none')
 session_input_tokens = 0
 session_output_tokens = 0
 ROBOT_NAME = os.environ.get('ROBOT_NAME', 'Айсана').strip() or 'Айсана'
-DIALOG_TIMEOUT = max(5.0, float(os.environ.get('TARZA_DIALOG_TIMEOUT', '20')))
+DIALOG_TIMEOUT = max(5.0, float(os.environ.get('TARZA_DIALOG_TIMEOUT', '35')))
 WAKE_MODE = os.environ.get('SADAM_WAKE_MODE', 'legacy').strip().lower()
 WAKE_MODEL_PATH = os.environ.get('SADAM_WAKE_MODEL', 'models/vosk-model-small-ru-0.22')
 CONTINUATION_WAIT = max(1.0, float(os.environ.get('TARZA_CONTINUATION_WAIT', '2.5')))
@@ -35,7 +36,7 @@ MAX_CONTINUATION_SEGMENTS = max(0, min(3, int(os.environ.get('TARZA_MAX_CONTINUA
 DEBUG_TIMING = os.environ.get('SADAM_DEBUG_TIMING', '1') == '1'
 TTS_PREBUFFER_SECONDS = max(0.7, min(5.0, float(os.environ.get('SADAM_TTS_PREBUFFER_SECONDS', '1.8'))))
 TRANSCRIBE_MODEL = os.environ.get('TARZA_TRANSCRIBE_MODEL', 'gpt-transcribe')
-conversation_history = []
+conversation_history = load_history()
 # A single open microphone next to the speaker hears TTS as its own speech.
 # Disable experimental barge-in by default until proper echo cancellation exists.
 BARGE_IN_ENABLED = os.environ.get('SADAM_BARGE_IN', '0') == '1'
@@ -607,7 +608,8 @@ def ask_ai(question, image_base64=None):
         {'role': 'user', 'content': question + (' [A camera photo was provided.]' if image_base64 is not None else '')},
         {'role': 'assistant', 'content': answer}
     ])
-    conversation_history = conversation_history[-12:]
+    conversation_history = conversation_history[-CONTEXT_MESSAGES:]
+    remember_turn(question + (' [Camera view supplied]' if image_base64 is not None else ''), answer)
     return answer
 
 
@@ -1191,7 +1193,8 @@ def main():
                     {'role': 'user', 'content': question},
                     {'role': 'assistant', 'content': answer}
                 ])
-                conversation_history = conversation_history[-12:]
+                conversation_history = conversation_history[-CONTEXT_MESSAGES:]
+                remember_turn(question, answer)
             # Open the follow-up window only after talking, not while TTS plays.
             last_answer = answer
             speak(answer)
