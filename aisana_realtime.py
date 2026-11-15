@@ -21,6 +21,8 @@ MODEL = os.environ.get('AISANA_REALTIME_MODEL', 'gpt-realtime-2.1-mini')
 VOICE = os.environ.get('AISANA_REALTIME_VOICE', 'marin')
 BARGE_IN = os.environ.get('AISANA_REALTIME_BARGE_IN', '0') == '1'
 SILENCE_MS = int(os.environ.get('AISANA_REALTIME_SILENCE_MS', '850'))
+ECHO_GUARD = os.environ.get('AISANA_ECHO_GUARD', '1') == '1'
+ECHO_TAIL_SECONDS = float(os.environ.get('AISANA_ECHO_TAIL_SECONDS', '0.8'))
 KEY = os.environ.get('OPENAI_API_KEY')
 PROMPT = (
     'You are Aisana (Айсана), a warm, witty, helpful female-voiced robot. '
@@ -64,6 +66,7 @@ class RealtimeAisana(object):
         self.playback_interrupted = False
         self.audio_queue = queue.Queue(maxsize=256)
         self.audio_generation = 0
+        self.mute_until = 0.0
 
     def send(self, payload):
         with self.send_lock:
@@ -116,6 +119,7 @@ class RealtimeAisana(object):
                     if item_gen == self.audio_generation:
                         self.playback = None
                         self.playing = False
+                self.mute_until = time.monotonic() + ECHO_TAIL_SECONDS
                 continue
             if kind != 'audio':
                 continue
@@ -155,6 +159,8 @@ class RealtimeAisana(object):
                 pcm = self.mic.stdout.read(CHUNK)
                 if len(pcm) != CHUNK:
                     raise RuntimeError('Microphone capture ended unexpectedly')
+                if ECHO_GUARD and (self.responding or self.playing or time.monotonic() < self.mute_until):
+                    continue
                 self.send({'type': 'input_audio_buffer.append',
                            'audio': base64.b64encode(pcm).decode('ascii')})
         except Exception as exc:
@@ -198,7 +204,8 @@ class RealtimeAisana(object):
         self.speaker = alsa_device('aplay', 'USB Composite Device', 'Xiaomi speaker')
         print('Input:', self.mic_device, 'Output:', self.speaker)
         print('Model:', MODEL, 'Voice:', VOICE,
-              'Barge-in:', 'ON (experimental)' if BARGE_IN else 'OFF')
+              'Barge-in:', 'ON (experimental)' if BARGE_IN else 'OFF',
+              'Echo guard:', 'ON (no interruptions during playback)' if ECHO_GUARD else 'OFF')
         self.ws = websocket.create_connection(
             'wss://api.openai.com/v1/realtime?model=' + MODEL,
             timeout=10, header=['Authorization: Bearer ' + KEY])
