@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import queue
+import requests
 import re
 import subprocess
 import threading
@@ -79,6 +80,7 @@ class RealtimeAisana(object):
         # True from response.created through the very last ALSA playback byte.
         # Covers the race between response.done and the playback worker.
         self.echo_guard_active = False
+        self.camera_lock = threading.Lock()
 
     def send(self, payload):
         with self.send_lock:
@@ -182,6 +184,52 @@ class RealtimeAisana(object):
                 print('Microphone/connection error:', exc)
                 self.stop.set()
 
+    def inspect_camera(self, question):
+        """Capture one fresh IMX219 frame and analyze it with the vision API."""
+        with self.camera_lock:
+            # camera.py uses the Jetson GStreamer camera pipeline and writes photo.jpg.
+            subprocess.check_call(['python3', 'camera.py'], timeout=20)
+            with open('photo.jpg', 'rb') as photo:
+                encoded = base64.b64encode(photo.read()).decode('ascii')
+        response = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers={'Authorization': 'Bearer ' + KEY},
+            json={'model': os.environ.get('AISANA_VISION_MODEL', 'gpt-4o-mini'),
+                  'messages': [{'role': 'user', 'content': [
+                      {'type': 'text', 'text': (
+                          'Describe ONLY what is actually visible in this fresh camera photo. '
+                          'Answer this question if possible: ' + question +
+                          '. Be concise, factual, and avoid guessing unseen details. '
+                          'Use the same language as the question.')},
+                      {'type': 'image_url', 'image_url': {
+                          'url': 'data:image/jpeg;base64,' + encoded, 'detail': 'low'}}
+                  ]}], 'max_tokens': 220},
+            timeout=(10, 45))
+        response.raise_for_status()
+        return response.json()['choices'][0]['message']['content']
+
+    def handle_camera_call(self, event):
+        """Run camera I/O off the websocket receiver; return result as a tool turn."""
+        call_id = event.get('call_id')
+        try:
+            args = json.loads(event.get('arguments') or '{}')
+            question = str(args.get('question', 'What is visible?'))[:500]
+            print('Camera: capturing fresh frame for', question)
+            result = self.inspect_camera(question)
+            print('Camera observation:', result)
+        except Exception as exc:
+            result = 'Camera unavailable: {}. Do not claim to see anything.'.format(exc)
+            print(result)
+        if self.stop.is_set() or not call_id:
+            return
+        try:
+            self.send({'type': 'conversation.item.create', 'item': {
+                'type': 'function_call_output', 'call_id': call_id, 'output': result}})
+            self.send({'type': 'response.create'})
+        except Exception as exc:
+            if not self.stop.is_set():
+                print('Camera tool response error:', exc)
+
     def handle(self, e):
         typ = e.get('type', '')
         if typ == 'session.updated':
@@ -207,6 +255,8 @@ class RealtimeAisana(object):
             print(e.get('delta', ''), end='', flush=True)
         elif typ == 'response.output_audio_transcript.done':
             print('')
+        elif typ == 'response.function_call_arguments.done' and e.get('name') == 'inspect_camera':
+            threading.Thread(target=self.handle_camera_call, args=(e,), daemon=True).start()
         elif typ == 'response.done':
             self.responding = False
             # Do NOT lift echo guard here: playback can lag behind generation.
@@ -233,6 +283,12 @@ class RealtimeAisana(object):
                     'type': 'realtime',
                     'model': MODEL,
                     'instructions': PROMPT,
+                    'tools': [{'type': 'function', 'name': 'inspect_camera',
+                               'description': 'Capture a fresh Jetson camera image and report visible details. Call for any question requiring vision.',
+                               'parameters': {'type': 'object', 'properties': {
+                                   'question': {'type': 'string', 'description': 'User visual question in their original language'}},
+                                   'required': ['question'], 'additionalProperties': False}}],
+                    'tool_choice': 'auto',
                     'output_modalities': ['audio'],
                     'audio': {
                         'input': {
