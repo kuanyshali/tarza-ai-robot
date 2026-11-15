@@ -19,7 +19,10 @@ if not camera.isOpened():
 ret, frame = camera.read()
 
 if ret:
-    # Small JPEG keeps vision uploads reliable on slow university Wi-Fi.\n    frame = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_AREA)\n    cv2.imwrite("photo.jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 55])
+    # Small JPEG keeps vision uploads reliable on slow university Wi-Fi.
+    frame = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_AREA)
+    if not cv2.imwrite("photo.jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 55]):
+        raise RuntimeError("Failed to save photo.jpg")
     print("Photo saved: photo.jpg")
 else:
     print("Failed to capture frame")
