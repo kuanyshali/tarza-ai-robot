@@ -7,6 +7,7 @@ Ctrl+C stops all subprocesses. Prefer headphones for first interruption tests.
 import base64
 import json
 import os
+import queue
 import re
 import subprocess
 import threading
@@ -61,35 +62,88 @@ class RealtimeAisana(object):
         self.playing = False
         self.speech_started_at = 0
         self.playback_interrupted = False
+        self.audio_queue = queue.Queue(maxsize=256)
+        self.audio_generation = 0
 
     def send(self, payload):
         with self.send_lock:
             self.ws.send(json.dumps(payload))
 
-    def start_playback(self):
-        self.stop_playback()
-        with self.play_lock:
-            self.playback = subprocess.Popen(
-                ['aplay', '-q', '-D', self.speaker, '-t', 'raw', '-f', 'S16_LE',
-                 '-r', str(RATE), '-c', '1'],
-                stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            self.playing = True
-
     def stop_playback(self):
         with self.play_lock:
+            self.audio_generation += 1
             p = self.playback
             self.playback = None
             self.playing = False
-            if p:
-                try:
-                    p.terminate()
-                    p.wait(timeout=1)
-                except Exception:
+        if p:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+
+    def audio_worker(self):
+        """Own ALSA writes outside the websocket receiver thread."""
+        generation = -1
+        p = None
+        while not self.stop.is_set():
+            try:
+                item = self.audio_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            kind, item_gen, chunk = item
+            if item_gen != self.audio_generation:
+                continue
+            if kind == 'stop':
+                if p:
                     try:
-                        p.kill()
-                        p.wait()
+                        p.terminate()
                     except Exception:
                         pass
+                p = None
+                continue
+            if kind == 'done':
+                if p:
+                    try:
+                        p.stdin.close()
+                        p.wait(timeout=20)
+                    except Exception:
+                        try:
+                            p.terminate()
+                        except Exception:
+                            pass
+                p = None
+                with self.play_lock:
+                    if item_gen == self.audio_generation:
+                        self.playback = None
+                        self.playing = False
+                continue
+            if kind != 'audio':
+                continue
+            if p is None or generation != item_gen:
+                p = subprocess.Popen(
+                    ['aplay', '-q', '-D', self.speaker, '-t', 'raw', '-f', 'S16_LE',
+                     '-r', str(RATE), '-c', '1'],
+                    stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                generation = item_gen
+                with self.play_lock:
+                    self.playback = p
+                    self.playing = True
+                print('Aisana: speaking...')
+            try:
+                p.stdin.write(chunk)
+            except (IOError, OSError, ValueError):
+                pass
+        if p:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+
+    def queue_audio(self, kind, chunk=b''):
+        try:
+            self.audio_queue.put_nowait((kind, self.audio_generation, chunk))
+        except queue.Full:
+            print('Audio queue overloaded; dropping audio frame')
 
     def capture(self):
         try:
@@ -125,45 +179,15 @@ class RealtimeAisana(object):
             self.responding = True
             self.playback_interrupted = False
         elif typ == 'response.output_audio.delta':
-            if self.playback_interrupted:
-                return
-            if self.playback is None:
-                self.start_playback()
-                print('Aisana: speaking...')
-            chunk = base64.b64decode(e.get('delta', ''))
-            with self.play_lock:
-                if self.playback and self.playback.stdin:
-                    try:
-                        self.playback.stdin.write(chunk)
-                        self.playback.stdin.flush()
-                    except (IOError, OSError, ValueError):
-                        pass
+            if not self.playback_interrupted:
+                self.queue_audio('audio', base64.b64decode(e.get('delta', '')))
         elif typ == 'response.output_audio_transcript.delta':
             print(e.get('delta', ''), end='', flush=True)
         elif typ == 'response.output_audio_transcript.done':
             print('')
         elif typ == 'response.done':
             self.responding = False
-            # Drain already-buffered audio rather than cutting off the voice.
-            # Never block the websocket receive loop while waiting for playback.
-            with self.play_lock:
-                p = self.playback
-                self.playback = None
-                self.playing = False
-            if p:
-                try:
-                    p.stdin.close()
-                except Exception:
-                    pass
-                def finish_playback(proc):
-                    try:
-                        proc.wait(timeout=20)
-                    except Exception:
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            pass
-                threading.Thread(target=finish_playback, args=(p,), daemon=True).start()
+            self.queue_audio('done')
         elif typ == 'error':
             print('Realtime API error:', e.get('error', {}))
 
@@ -205,7 +229,8 @@ class RealtimeAisana(object):
                     }
                 }
             })
-            self.ws.settimeout(0.5)
+            self.ws.settimeout(10)
+            threading.Thread(target=self.audio_worker, daemon=True).start()
             worker = threading.Thread(target=self.capture, daemon=True)
             worker.start()
             while not self.stop.is_set():
