@@ -41,8 +41,17 @@ PROMPT = (
     'When addressed as Aisana, wait for the complete question. '
     'In Russian use feminine grammatical forms when referring to yourself. '
     'You HAVE a working camera tool named inspect_camera. '
-    'Whenever the user asks what you see, what they hold, an object color, or anything visual, '
-    'CALL inspect_camera with their question BEFORE replying. '
+    'VISUAL INTENT RULE: Call inspect_camera BEFORE answering whenever the user refers '
+    'to something physically in front of you, including implicit references like this, '
+    'that, here, on the screen, on the paper, on the label, or what I am showing you. '
+    'Examples: read this, what does this say, translate what is written here, '
+    'pronounce this text, explain this formula, solve the problem on this sheet, '
+    'identify this device, compare these phones, what model is this, and what do you see. '
+    'This rule applies equally in Russian, English and Kazakh. '
+    'For a request to translate or read text already SPOKEN aloud by the user, '
+    'answer directly WITHOUT camera. If ambiguous but the user is showing an object, '
+    'prefer the camera. When reading visible text, quote only legible words; '
+    'say briefly when text is unreadable instead of inventing it. '
     'CAMERA BEHAVIOR: Never narrate your actions or plans. Never say you need to take '
     'a photo, will check the camera, are looking now, are analyzing, or will report back. '
     'Call the camera tool silently and wait for its result. Once the result arrives, '
@@ -212,12 +221,12 @@ class RealtimeAisana(object):
             json={'model': os.environ.get('AISANA_VISION_MODEL', 'gpt-4o-mini'),
                   'messages': [{'role': 'user', 'content': [
                       {'type': 'text', 'text': (
-                          'Describe ONLY what is actually visible in this fresh camera photo. '
+                          'Use this fresh camera photo to answer the user request, including reading visible text, translating signs, explaining visible formulas, or identifying objects as appropriate. '
                           'Answer this question if possible: ' + question +
                           '. Be concise, factual, and avoid guessing unseen details. '
                           'Use the same language as the question.')},
                       {'type': 'image_url', 'image_url': {
-                          'url': 'data:image/jpeg;base64,' + encoded, 'detail': 'low'}}
+                          'url': 'data:image/jpeg;base64,' + encoded, 'detail': 'high'}}
                   ]}], 'max_tokens': 220},
             timeout=(10, 45))
         response.raise_for_status()
@@ -303,7 +312,7 @@ class RealtimeAisana(object):
                     'model': MODEL,
                     'instructions': PROMPT,
                     'tools': [{'type': 'function', 'name': 'inspect_camera',
-                               'description': 'Capture a fresh Jetson camera image and report visible details. Call for any question requiring vision.',
+                               'description': 'Look at a fresh Jetson camera image to read or translate visible text, explain a shown formula, identify or compare shown objects, or answer any visual question including implicit this/that/here references.',
                                'parameters': {'type': 'object', 'properties': {
                                    'question': {'type': 'string', 'description': 'User visual question in their original language'}},
                                    'required': ['question'], 'additionalProperties': False}}],
