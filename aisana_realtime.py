@@ -215,11 +215,19 @@ class RealtimeAisana(object):
             subprocess.check_call(['/usr/bin/python3', 'camera.py'], timeout=20)
             with open('photo.jpg', 'rb') as photo:
                 encoded = base64.b64encode(photo.read()).decode('ascii')
+        print('Vision: sending JPEG ({} KB)'.format(len(encoded) * 3 // 4 // 1024))
         response = requests.post(
             'https://api.openai.com/v1/chat/completions',
             headers={'Authorization': 'Bearer ' + KEY},
             json={'model': os.environ.get('AISANA_VISION_MODEL', 'gpt-4o-mini'),
-                  'messages': [{'role': 'user', 'content': [
+                  'messages': [
+                      {'role': 'system', 'content': (
+                          'You are a visual observer. The user message includes a real camera image. '
+                          'Inspect the attached image and describe only what is visible. '
+                          'Do not claim you cannot access images or ask the user to describe it. '
+                          'If the image is dark, blurry or unclear, describe what you can see and note the limitation. '
+                          'Answer in the language of the user question.')},
+                      {'role': 'user', 'content': [
                       {'type': 'text', 'text': (
                           'Use this fresh camera photo to answer the user request, including reading visible text, translating signs, explaining visible formulas, or identifying objects as appropriate. '
                           'Answer this question if possible: ' + question +
@@ -227,10 +235,18 @@ class RealtimeAisana(object):
                           'Use the same language as the question.')},
                       {'type': 'image_url', 'image_url': {
                           'url': 'data:image/jpeg;base64,' + encoded, 'detail': 'high'}}
-                  ]}], 'max_tokens': 220},
+                  ]}], 'max_tokens': 300},
             timeout=(10, 45))
         response.raise_for_status()
-        return response.json()['choices'][0]['message']['content']
+        data = response.json()
+        choice = data['choices'][0]
+        print('Vision: finish_reason={}, usage={}'.format(
+            choice.get('finish_reason'), data.get('usage', {})))
+        content = choice.get('message', {}).get('content')
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError('Vision returned empty content (finish_reason={})'.format(
+                choice.get('finish_reason')))
+        return content.strip()
 
     def handle_camera_call(self, event):
         """Run camera I/O off the websocket receiver; return result as a tool turn."""
