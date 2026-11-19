@@ -22,7 +22,7 @@ Safety built on the Pi's own interlocks:
 
 Python 3.6 compatible. Environment:
     AISANA_LEGS_URL=http://192.168.1.50:5000   the Pi (unset = legs disabled)
-    AISANA_LEGS_SPIN_90_SECONDS=1.5            spin time for a 90 degree turn
+    AISANA_LEGS_SPIN_90_SECONDS=0.6            spin time for a 90 degree turn (360 = 2x)
 """
 import os
 import re
@@ -46,23 +46,30 @@ class LegsError(RuntimeError):
 def spin_90_seconds(environ=None):
     environ = os.environ if environ is None else environ
     try:
-        return max(0.2, min(5.0, float(environ.get('AISANA_LEGS_SPIN_90_SECONDS', '1.5'))))
+        return max(0.2, min(5.0, float(environ.get('AISANA_LEGS_SPIN_90_SECONDS', '0.6'))))
     except ValueError:
-        return 1.5
+        return 0.6
 
 
 def _intent(action, seconds=None, meters=None, degrees=None):
     return {'action': action, 'seconds': seconds, 'meters': meters, 'degrees': degrees}
 
 
-def plan_seconds(intent, speed_kmh=2.0, spin_90=1.5):
+def plan_seconds(intent, speed_kmh=2.0, spin_90=0.6):
     """How long to drive for an intent; always within (0, MAX_SECONDS]."""
     if intent.get('seconds'):
         seconds = float(intent['seconds'])
     elif intent.get('meters'):
         seconds = float(intent['meters']) / max(0.1, float(speed_kmh) / 3.6)
     elif intent['action'] in ('spin_left', 'spin_right'):
-        seconds = spin_90 * float(intent.get('degrees') or 90) / 90.0
+        # The ODrive is still ramping up during short turns, so the angle grows
+        # with the square of the time: 90 deg = spin_90, 360 deg = 2 x spin_90.
+        # (Robot, Nov 19: 1.5 s gave about one and a half turns.)
+        degrees = float(intent.get('degrees') or 90)
+        if degrees <= 360:
+            seconds = spin_90 * (degrees / 90.0) ** 0.5
+        else:
+            seconds = 2 * spin_90 * degrees / 360.0
     else:
         seconds = DEFAULT_SECONDS
     return max(0.3, min(MAX_SECONDS, seconds))
@@ -71,7 +78,7 @@ def plan_seconds(intent, speed_kmh=2.0, spin_90=1.5):
 class LegsController(object):
     """HTTP client for the Pi plus one background drive at a time."""
 
-    def __init__(self, base_url, http=None, log=print, spin_90=1.5):
+    def __init__(self, base_url, http=None, log=print, spin_90=0.6):
         if http is None:
             import requests
             http = requests.Session()        # keep-alive: no new TCP connection per heartbeat
@@ -118,7 +125,7 @@ class LegsController(object):
 
     # --- drives ------------------------------------------------------------
     def obstacle(self):
-        """Describe an obstacle the Pi's ultrasonic sensors see, or '' if none."""
+        """'obstacle 29 cm' style text if the Pi's ultrasonic sensors see one, else ''."""
         try:
             data = self.http.get(self.base_url + '/sensor-data', timeout=0.5).json()
         except Exception:
@@ -126,8 +133,7 @@ class LegsController(object):
         if not data.get('obstacle_stop'):
             return ''
         distances = [d for d in (data.get('distance_1'), data.get('distance_2')) if d is not None]
-        return '{} cm away ({})'.format(int(min(distances)), data.get('obstacle_status', '')) if distances \
-            else str(data.get('obstacle_status', 'obstacle'))
+        return '{} cm away'.format(int(min(distances))) if distances else 'distance unknown'
 
     def stop(self):
         """Stop now. Safe to call any time; never raises."""

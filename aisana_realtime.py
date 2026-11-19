@@ -79,8 +79,19 @@ def voice_style_instructions():
 
 
 SHOUT_RE = re.compile(
-    r'(?:крикни|кричи|прокричи|покричи|заори|скажи|произнеси|\bshout\b|\byell\b|\bscream\b|\bsay\b|айқайла\w*)'
+    r'(?:крикни|кричи|прокричи|покричи|заори|\bshout\b|\byell\b|\bscream\b|айқайла\w*)'
     r'\s*[:,]?\s*[«"„“\']?([^»"“”\']{1,40})', re.I)
+REPEAT_RE = re.compile(r'(?:повтори|ещ[её] раз|снова|опять|\bagain\b|\brepeat\b|тағы)', re.I)
+TIMES_RE = re.compile(r'(\d+|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять)\s*(?:раз\w*|times)', re.I)
+TIMES_WORDS = {'два': 2, 'две': 2, 'три': 3, 'четыре': 4, 'пять': 5, 'шесть': 6, 'семь': 7,
+               'восемь': 8, 'девять': 9, 'десять': 10}
+# Sound effects she invents and records once per session, played while the wheels turn.
+SHOUTS_PROMPT = (
+    'You are recording sound effects for yourself: Aisana, a cheerful, slightly sarcastic robot girl. '
+    'Invent and shout 6 different short, funny, joyful Russian exclamations that a robot yells while '
+    'spinning or riding fast, for example "Уииии!", "Вжууух!", "Полетели-и-и!". Make up your own too. '
+    'Shout each one with huge energy and stretched vowels, with a short pause between them. '
+    'No other words, no introduction.')
 
 
 def shout_request(text):
@@ -99,6 +110,17 @@ def confirm_instruction(phrase, transcript):
         return ('Say "{}" and then shout "{}!" loudly, stretched and playful. Nothing else.'.format(
             phrase.rstrip('.'), shout))
     return 'Say exactly this and nothing else, with lively intonation: "{}"'.format(phrase)
+
+
+OBSTACLE_PHRASES = {
+    'Russian': ('Стоп! Препятствие в {} сантиметрах.', 'Стоп! Сработал датчик препятствий.'),
+    'Kazakh': ('Тоқта! {} сантиметрде кедергі бар.', 'Тоқта! Кедергі датчигі іске қосылды.'),
+    'Egyptian Arabic': ('وقفت! في حاجة قدامي على بعد {} سنتي.', 'وقفت! حساس العوائق اشتغل.'),
+    'English': ('Stop! Obstacle {} centimetres away.', 'Stop! The obstacle sensor triggered.'),
+}
+
+
+SILENT_RESULT = '[silent] '          # tool results that need no spoken reply
 
 
 def language_of(text):
@@ -234,6 +256,8 @@ PROMPT = (
     'English question -> English answer. Russian question -> Russian answer. '
     'Kazakh question -> Kazakh answer. Never switch languages unless explicitly asked. '
     'If the user asks about an English technical topic in Russian, answer in Russian. '
+    'PERSONALITY: witty, playful and a little sarcastic, friendly teasing, never rude; '
+    'the joke fits inside the same ONE short sentence. '
     'You may shout or sing short playful exclamations when asked ("Уииии!", "Ура!"). '
     'SILENCE RULE: during a conversation people around you also talk to each other. If the latest '
     'speech is not a request or question for you (chatter, noise, fragments such as "Инерция же", '
@@ -315,6 +339,57 @@ def alsa_device(command, expected, description):
     return matches[0]
 
 
+class ShoutPlayer(object):
+    """Loops Aisana's recorded shouts while the wheels turn.
+
+    Its own aplay process; the microphone stays open meanwhile so that
+    "стоп" still works during a spin (her shouts are ignored as speech)."""
+
+    def __init__(self):
+        self.pcm = None
+        self.speaker = None
+        self._stop = threading.Event()
+        self.active = False
+
+    def play_for(self, seconds):
+        if not self.pcm or not self.speaker:
+            return False
+        self.stop()
+        stop = threading.Event()
+        self._stop = stop
+
+        def worker():
+            self.active = True
+            player = None
+            try:
+                player = subprocess.Popen(
+                    ['aplay', '-q', '-D', self.speaker, '-t', 'raw', '-f', 'S16_LE',
+                     '-r', str(RATE), '-c', '1'], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                player.stdin.write(b'\x00\x00' * (RATE * PLAYBACK_LEAD_MS // 1000))
+                end = time.monotonic() + seconds
+                step = RATE * 2 // 10                       # 0.1 s of audio per write
+                position = 0
+                while time.monotonic() < end and not stop.is_set():
+                    piece = self.pcm[position:position + step]
+                    position = (position + step) % len(self.pcm)
+                    player.stdin.write(piece)
+            except Exception:
+                pass
+            finally:
+                if player is not None:
+                    try:
+                        player.terminate()                  # cut the shout when the wheels stop
+                    except Exception:
+                        pass
+                self.active = False
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def stop(self):
+        self._stop.set()
+
+
 class RealtimeAisana(object):
     def __init__(self):
         self.ws = None
@@ -353,6 +428,15 @@ class RealtimeAisana(object):
         self.arm_lock = threading.Lock()
         self.last_arm_at = 0.0
         self.local_items = set()            # commands already run from the user's words
+        self.shouts = ShoutPlayer()
+        self.oob_ids = set()                # out-of-band responses (shout recording)
+        self.shout_buffer = bytearray()
+        self.motion_until = 0.0             # wheels turning: only "стоп" or a new command count
+        self.last_drive = None
+        self.last_drive_at = 0.0
+        self.hold_item = None               # reply generated at commit, held until STT says
+        self.hold_deadline = 0.0            # it is not a command (no "дай подумать" chatter)
+        self.held_audio = []
         self.handled_calls = set()
         self.calls_lock = threading.Lock()
         self.mic_device = None
@@ -439,7 +523,15 @@ class RealtimeAisana(object):
         self.report_problem('Arm sensor report after the last move: ', problems)
 
     def report_legs_problem(self, problem):
-        self.report_problem('Legs (wheel drive) report: ', [problem])
+        self.stop_motion()
+        distance = re.search(r'(\d+) cm', problem)
+        language = self.user_language if self.user_language in OBSTACLE_PHRASES else 'English'
+        if distance and int(distance.group(1)) >= 5:
+            phrase = OBSTACLE_PHRASES[language][0].format(distance.group(1))
+        else:
+            phrase = OBSTACLE_PHRASES[language][1]   # < 5 cm is almost always a sensor glitch
+        self.report_problem('Legs report: ', [problem],
+                            instructions='Say exactly this and nothing else: "{}"'.format(phrase))
 
     def report_problem(self, prefix, problems, instructions=None):
         text = ' | '.join(problems)
@@ -499,6 +591,13 @@ class RealtimeAisana(object):
         result = self.legs.execute(intent, self.report_legs_problem)
         if result.startswith('NOT driving'):
             return result
+        if intent['action'] not in ('stop', 'faster', 'slower'):
+            self.last_drive, self.last_drive_at = dict(intent), time.monotonic()
+        moving = re.search(r'for ([\d.]+) s', result)
+        if moving and not shout_request(transcript or ''):
+            self.motion_until = time.monotonic() + float(moving.group(1)) + 1.0
+            if self.shouts.play_for(float(moving.group(1))):
+                return SILENT_RESULT + result
         return '{} {}'.format(result, confirm_instruction(legs_reply(intent, self.user_language),
                                                            transcript or ''))
 
@@ -789,6 +888,8 @@ class RealtimeAisana(object):
         try:
             self.send({'type': 'conversation.item.create', 'item': {
                 'type': 'function_call_output', 'call_id': call_id, 'output': str(result)[:4000]}})
+            if str(result).startswith(SILENT_RESULT):
+                return                                  # she is shouting while moving
             self.expect_tool_response = True
             self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (
                 'The tool has returned. Answer the user NOW, in first person as Aisana, '
@@ -800,6 +901,27 @@ class RealtimeAisana(object):
             if not self.stop.is_set():
                 print('Tool response error:', exc)
 
+    def motion_active(self):
+        return time.monotonic() < self.motion_until
+
+    def stop_motion(self):
+        self.motion_until = 0.0
+        self.shouts.stop()
+
+    def holding(self):
+        if self.hold_item is None:
+            return False
+        if time.monotonic() > self.hold_deadline:
+            self.release_hold(drop=False)            # STT is late: do not stay silent forever
+            return False
+        return self.response_item == self.hold_item
+
+    def release_hold(self, drop):
+        held, self.held_audio, self.hold_item = self.held_audio, [], None
+        if not drop:
+            for kind, chunk in held:
+                self.queue_audio(kind, chunk)
+
     def reply_language(self):
         return 'Reply in {} only (the language of the user\'s latest words). '.format(self.user_language)
 
@@ -809,18 +931,46 @@ class RealtimeAisana(object):
         with self.transcript_cond:
             self.transcripts[item_id] = transcript
             self.transcript_cond.notify_all()
+        held = self.hold_item == item_id
         if not re.search(r'\w', transcript or '') or is_prompt_echo(transcript):
             # Noise or the STT hint repeated back: never a request, never a move.
             print('Empty speech or noise; ignored.')
+            if held:
+                self.release_hold(drop=True)
             if item_id in self.responded_items:
                 self.cancel_reply()
             self.ignore_item(item_id)
             return
         arm_intents = parse_arm_commands(transcript)
         drive = None if arm_intents else parse_legs_command(transcript)
+        if not arm_intents and drive is None and REPEAT_RE.search(transcript) and self.last_drive \
+                and time.monotonic() - self.last_drive_at < 180:
+            drive = dict(self.last_drive)                # "повтори", "ещё раз", "повтори 10 раз"
+            times = TIMES_RE.search(transcript.casefold())
+            if times:
+                count = TIMES_WORDS.get(times.group(1)) or int(times.group(1))
+                if drive['action'] in ('spin_left', 'spin_right'):
+                    drive['degrees'] = min(3600, (drive.get('degrees') or 90) * count)
+                    drive['seconds'] = None
+                elif drive.get('seconds'):
+                    drive['seconds'] = drive['seconds'] * count
+        if self.motion_active() and not (has_wake_name(transcript) and (arm_intents or drive)):
+            # While the wheels turn she hears her own shouts: only "стоп" counts.
+            if is_stop_phrase(transcript) or (drive and drive['action'] == 'stop'):
+                self.stop_motion()
+                if self.legs is not None:
+                    self.legs.stop()
+                if self.arm is not None:
+                    self.arm.emergency_stop()
+                print('Stopped during motion.')
+            if held:
+                self.release_hold(drop=True)
+            self.ignore_item(item_id)
+            return
         stop = (is_stop_phrase(transcript) or (drive and drive['action'] == 'stop')
                 or (arm_intents and arm_intents[0]['action'] == 'stop'))
         if stop:
+            self.stop_motion()
             if self.legs is not None:
                 self.legs.stop()            # wheels first: they can run into people
             if self.arm is not None:
@@ -831,8 +981,12 @@ class RealtimeAisana(object):
         if addressed and not stop and (arm_intents or drive):
             # A clear command: run it now from the user's exact words and only
             # confirm it, instead of letting the model think aloud first.
+            if held:
+                self.release_hold(drop=True)
             self.run_command_locally(item_id, arm_intents, drive)
             return
+        if held:
+            self.release_hold(drop=False)              # an ordinary question: play the answer
         if not WAKE_GATE or item_id in self.responded_items:
             return
         if is_sleep_phrase(transcript):
@@ -878,6 +1032,8 @@ class RealtimeAisana(object):
                     result = 'NOT done: legs are not connected (AISANA_LEGS_URL).'
                 else:
                     result = 'Legs: ' + self.legs.execute(drive, self.report_legs_problem)
+                    if drive['action'] not in ('stop', 'faster', 'slower'):
+                        self.last_drive, self.last_drive_at = dict(drive), time.monotonic()
             except Exception as exc:
                 result = 'NOT done: {}'.format(exc)
             print('Command (from your words) -> {}'.format(' '.join(result.split())[:300]))
@@ -886,6 +1042,17 @@ class RealtimeAisana(object):
                 time.sleep(0.05)            # let the cancelled reply finish
             if self.stop.is_set():
                 return
+            moving = re.search(r'Driving \S+(?: \S+)? for ([\d.]+) s', result)
+            transcript = self.transcripts.get(item_id, '')
+            if moving and not shout_request(transcript):
+                seconds = float(moving.group(1))
+                self.motion_until = time.monotonic() + seconds + 1.0
+                if self.shouts.play_for(seconds):
+                    # Only her shouts while the wheels turn: no words at all.
+                    self.send({'type': 'conversation.item.create', 'item': {
+                        'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
+                            'Robot report (no reply needed): ' + result)}]}})
+                    return
             try:
                 self.send({'type': 'conversation.item.create', 'item': {
                     'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
@@ -909,6 +1076,11 @@ class RealtimeAisana(object):
         typ = e.get('type', '')
         if typ == 'session.updated':
             print('Realtime session ready. Talk to Aisana (Ctrl+C to stop).')
+            if self.shouts.pcm is None and not self.oob_ids:
+                # Record her own shouts once, silently (out-of-band, not played).
+                self.send({'type': 'response.create', 'response': {
+                    'conversation': 'none', 'output_modalities': ['audio'],
+                    'metadata': {'purpose': 'shouts'}, 'instructions': SHOUTS_PROMPT}})
         elif typ == 'input_audio_buffer.speech_started':
             self.speech_started_at = time.monotonic()
             if BARGE_IN and (self.responding or self.playing):
@@ -917,7 +1089,11 @@ class RealtimeAisana(object):
                 # Realtime server_vad with interrupt_response=True already
                 # cancels the active generation. A second response.cancel races
                 # with response.done and triggers response_cancel_not_active.
+        elif typ == 'response.created' and ((e.get('response') or {}).get('metadata') or {}).get('purpose') == 'shouts':
+            self.oob_ids.add((e.get('response') or {}).get('id'))
+            self.shout_buffer = bytearray()
         elif typ == 'response.created':
+            self.shouts.stop()                 # the speaker is needed for a real reply
             if self.expect_tool_response:
                 self.expect_tool_response = False
                 self.response_item = None      # answer to a tool result
@@ -926,10 +1102,18 @@ class RealtimeAisana(object):
             self.echo_guard_active = True
             self.responding = True
             self.playback_interrupted = False
+        elif typ == 'response.output_audio.delta' and e.get('response_id') in self.oob_ids:
+            self.shout_buffer.extend(base64.b64decode(e.get('delta', '')))     # recorded, not played
         elif typ == 'response.output_audio.delta':
             self.echo_guard_active = True
             if not self.playback_interrupted:
-                self.queue_audio('audio', base64.b64decode(e.get('delta', '')))
+                chunk = base64.b64decode(e.get('delta', ''))
+                if self.holding():
+                    self.held_audio.append(('audio', chunk))
+                else:
+                    self.queue_audio('audio', chunk)
+        elif typ == 'response.output_audio_transcript.done' and e.get('response_id') in self.oob_ids:
+            print('Shouts recorded:', ' '.join((e.get('transcript') or '').split()))
         elif typ == 'response.output_audio_transcript.done':
             # One clean console line per reply (audio itself still streams).
             text = ' '.join((e.get('transcript') or '').split())
@@ -937,8 +1121,12 @@ class RealtimeAisana(object):
                 print('Aisana:', text)
         elif typ == 'input_audio_buffer.committed':
             self.last_item = e.get('item_id')
-            # Inside an open dialogue answer at once, without waiting for STT.
-            if WAKE_GATE and self.dialog_active():
+            # Inside an open dialogue start the answer at once, but hold its audio
+            # until the transcript shows it is not a command (or 1.6 s passed).
+            # While the wheels turn, wait for the transcript (her shouts are heard).
+            if WAKE_GATE and self.dialog_active() and not self.motion_active():
+                self.hold_item, self.held_audio = e.get('item_id'), []
+                self.hold_deadline = time.monotonic() + 1.6
                 self.respond(e.get('item_id'))
         elif typ == 'conversation.item.input_audio_transcription.completed':
             self.handle_transcript(e.get('item_id'), (e.get('transcript') or '').strip())
@@ -950,16 +1138,29 @@ class RealtimeAisana(object):
             item = e.get('item') or {}
             if item.get('type') == 'function_call':
                 self.start_tool(item.get('call_id'), item.get('name'), item.get('arguments'))
+        elif typ == 'response.done' and (e.get('response') or {}).get('id') in self.oob_ids:
+            self.oob_ids.discard((e.get('response') or {}).get('id'))
+            if len(self.shout_buffer) >= RATE:                 # at least 0.5 s of shouting
+                self.shouts.pcm = bytes(self.shout_buffer)
+                print('Shouts ready: {:.1f} s'.format(len(self.shout_buffer) / (RATE * 2.0)))
         elif typ == 'response.done':
             self.responding = False
+            holding = self.holding()
             if self.response_item:
                 self.done_items.add(self.response_item)
                 self.run_pending_arm(self.response_item)
                 self.run_pending_legs(self.response_item)
             # Do NOT lift echo guard here: playback can lag behind generation.
-            self.queue_audio('done')
+            if holding:
+                self.held_audio.append(('done', b''))
+            else:
+                self.queue_audio('done')
         elif typ == 'error':
-            print('Realtime API error:', e.get('error', {}))
+            error = e.get('error', {}) or {}
+            print('Realtime API error:', error)
+            if self.oob_ids and re.search(r'conversation|metadata|out.of.band', str(error.get('message', '')), re.I):
+                self.oob_ids.clear()                    # shout recording unsupported: fall back
+                print('Shout recording not available; she will shout once per move instead.')
 
     def run(self, manage_devices=True):
         """One realtime session. With manage_devices=False the caller owns the
@@ -971,6 +1172,7 @@ class RealtimeAisana(object):
             raise RuntimeError('Realtime mode needs websocket-client: python3 -m pip install --user "websocket-client==1.3.1"')
         self.mic_device = alsa_device('arecord', 'KT USB Audio', 'KT microphone')
         self.speaker = alsa_device('aplay', 'USB Composite Device', 'Xiaomi speaker')
+        self.shouts.speaker = self.speaker
         print('Input:', self.mic_device, 'Output:', self.speaker)
         print('Model:', MODEL, 'Voice:', VOICE,
               'Barge-in:', 'ON (experimental)' if BARGE_IN else 'OFF',
@@ -1039,6 +1241,7 @@ class RealtimeAisana(object):
                     self.mic.kill()
                     self.mic.wait()
             self.stop_playback()
+            self.shouts.stop()
             if self.legs is not None:
                 self.legs.stop()            # never keep driving without a session
             if manage_devices and self.arm is not None:
@@ -1048,6 +1251,9 @@ class RealtimeAisana(object):
                     self.ws.close()
                 except Exception:
                     pass
+
+
+reconnect_pause = time.sleep        # replaced in tests
 
 
 def main():
@@ -1072,7 +1278,7 @@ def main():
                 raise RuntimeError(problem)
             delay = 2 if time.monotonic() - started > 60 else min(30, delay * 2)
             print('Connection lost ({}); reconnecting in {} s... (Ctrl+C to stop)'.format(problem, delay))
-            time.sleep(delay)
+            reconnect_pause(delay)
     finally:
         if legs is not None:
             legs.stop()
