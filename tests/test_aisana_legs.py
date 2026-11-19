@@ -1,0 +1,170 @@
+"""Offline tests for voice driving; a fake Raspberry Pi stands in for app.py."""
+import threading
+import time
+import unittest
+
+import aisana_legs as legs
+
+
+class FakeResponse(object):
+    def __init__(self, code, data):
+        self.status_code = code
+        self._data = data
+
+    def json(self):
+        return self._data
+
+
+class FakePi(object):
+    """Mimics the legs team's Flask API (app.py) and its safety monitor."""
+
+    def __init__(self, needs_calibration=False, obstacle_after=None):
+        self.enabled = False
+        self.command = 'stop'
+        self.commands = []
+        self.heartbeats = 0
+        self.speed = 2.0
+        self.needs_calibration = needs_calibration
+        self.obstacle_after = obstacle_after
+        self.started = None
+        self.lock = threading.Lock()
+
+    def status(self):
+        state = 'ENABLED' if self.enabled else ('NEEDS CALIBRATION' if self.needs_calibration else 'DISABLED')
+        return {'enabled': self.enabled, 'state': state, 'command': self.command,
+                'speed_kmh': self.speed, 'error': None}
+
+    def get(self, url, timeout=None):
+        return FakeResponse(200, self.status())
+
+    def post(self, url, json=None, timeout=None):
+        path = url.split(':5000', 1)[1]
+        with self.lock:
+            if path == '/motor/enable':
+                self.enabled = not self.needs_calibration and not json.get('calibrate')
+                return FakeResponse(200, self.status())
+            if path == '/motor/heartbeat':
+                self.heartbeats += 1
+                if (self.obstacle_after is not None and self.started
+                        and time.monotonic() - self.started > self.obstacle_after):
+                    self.command = 'stop'              # ultrasonic interlock in app.py
+                return FakeResponse(200, self.status())
+            if path == '/motor/speed':
+                self.speed = max(0.5, min(5.5, self.speed + json.get('delta', 0)))
+                return FakeResponse(200, self.status())
+            if path == '/motor/command':
+                if not self.enabled:
+                    return FakeResponse(400, {'error': 'Motors are not enabled.'})
+                self.command = json['command']
+                self.commands.append(json['command'])
+                if json['command'] != 'stop':
+                    self.started = time.monotonic()
+                return FakeResponse(200, self.status())
+        return FakeResponse(404, {})
+
+
+def controller(pi, problems=None):
+    return legs.LegsController('http://10.0.0.2:5000', http=pi, log=lambda *a: None)
+
+
+class ParserTests(unittest.TestCase):
+    def check(self, text, action, seconds=None, meters=None, degrees=None):
+        self.assertEqual(legs.parse_legs_command(text),
+                         {'action': action, 'seconds': seconds, 'meters': meters, 'degrees': degrees}, text)
+
+    def test_drive_commands(self):
+        self.check('Айсана, езжай вперёд', 'forward')
+        self.check('Айсана, вперёд!', 'forward')
+        self.check('проедь вперёд 3 секунды', 'forward', seconds=3.0)
+        self.check('проедь вперёд на метр', 'forward', meters=1.0)
+        self.check('подъедь вперёд на 50 сантиметров', 'forward', meters=0.5)
+        self.check('отъедь назад немного', 'backward', seconds=1.0)
+        self.check('повернись налево', 'spin_left', degrees=90)
+        self.check('повернись направо на 45 градусов', 'spin_right', degrees=45)
+        self.check('Айсана, развернись', 'spin_right', degrees=180)
+        self.check('езжай налево', 'arc_left')
+        self.check('drive forward 2 seconds', 'forward', seconds=2.0)
+        self.check('go forward one meter', 'forward', meters=1.0)
+        self.check('turn left', 'spin_left', degrees=90)
+        self.check('Айсана, стоп', 'stop')
+        self.check('стой', 'stop')
+        self.check('едь быстрее', 'faster')
+
+    def test_not_drive_commands(self):
+        for text in ('что у тебя впереди?', 'Айсана, смотри вперёд и скажи что видишь',
+                     'вернись назад к теме разговора', 'поверни голову направо?',
+                     'какая погода', 'правую руку в позицию 2', 'назад в будущее это фильм', ''):
+            with self.subTest(text=text):
+                self.assertIsNone(legs.parse_legs_command(text))
+
+    def test_time_is_always_limited(self):
+        self.assertEqual(legs.plan_seconds(legs.make_intent('forward', seconds=60)), legs.MAX_SECONDS)
+        self.assertEqual(legs.plan_seconds(legs.make_intent('forward')), legs.DEFAULT_SECONDS)
+        self.assertAlmostEqual(legs.plan_seconds(legs.make_intent('forward', meters=1.0), 3.6), 1.0)
+        self.assertAlmostEqual(legs.plan_seconds(legs.make_intent('spin_left', degrees=180), spin_90=1.5), 3.0)
+
+
+class ControllerTests(unittest.TestCase):
+    def test_drive_enables_heartbeats_and_stops_by_itself(self):
+        pi = FakePi()
+        legs_ctrl = controller(pi)
+        seconds = legs_ctrl.drive(legs.make_intent('forward', seconds=0.6))
+        self.assertAlmostEqual(seconds, 0.6)
+        legs_ctrl._drive.join(3)
+        self.assertEqual(pi.commands, ['forward', 'stop'])
+        self.assertGreaterEqual(pi.heartbeats, 3)          # every ~0.12 s, Pi needs < 0.35 s
+
+    def test_voice_stop_cuts_the_drive_short(self):
+        pi = FakePi()
+        legs_ctrl = controller(pi)
+        legs_ctrl.drive(legs.make_intent('forward', seconds=5))
+        time.sleep(0.3)
+        started = time.monotonic()
+        legs_ctrl.stop()
+        legs_ctrl._drive.join(2)
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(pi.command, 'stop')
+
+    def test_never_calibrates_by_voice(self):
+        pi = FakePi(needs_calibration=True)
+        problems = []
+        legs_ctrl = controller(pi)
+        legs_ctrl.drive(legs.make_intent('forward'), problems.append)
+        legs_ctrl._drive.join(3)
+        self.assertEqual(pi.commands, [])
+        self.assertIn('calibration', problems[0])
+
+    def test_obstacle_stop_is_reported(self):
+        pi = FakePi(obstacle_after=0.2)
+        problems = []
+        legs_ctrl = controller(pi)
+        legs_ctrl.drive(legs.make_intent('forward', seconds=3), problems.append)
+        legs_ctrl._drive.join(3)
+        self.assertIn('obstacle', problems[0])
+
+    def test_unreachable_pi_does_not_crash(self):
+        class DeadPi(object):
+            def get(self, *a, **k):
+                raise IOError('connection refused')
+            post = get
+        problems = []
+        legs_ctrl = legs.LegsController('http://10.0.0.2:5000', http=DeadPi(), log=lambda *a: None)
+        legs_ctrl.drive(legs.make_intent('forward'), problems.append)
+        legs_ctrl._drive.join(3)
+        self.assertIn('connection refused', problems[0])
+        legs_ctrl.stop()                                    # never raises
+
+    def test_speed_and_unconfigured(self):
+        pi = FakePi()
+        self.assertIn('2.5 km/h', controller(pi).execute(legs.make_intent('faster')))
+        logs = []
+        self.assertIsNone(legs.connect_from_environment(log=logs.append, environ={}))
+        self.assertIn('AISANA_LEGS_URL', logs[0])
+
+    def test_replies(self):
+        self.assertEqual(legs.legs_reply(legs.make_intent('forward'), 'Russian'), 'Еду вперёд.')
+        self.assertEqual(legs.legs_reply(legs.make_intent('spin_left'), 'English'), 'Turning left.')
+
+
+if __name__ == '__main__':
+    unittest.main()

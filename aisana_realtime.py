@@ -27,6 +27,8 @@ from aisana_arm import (connect_from_environment, parse_arm_commands, make_inten
                         ARM_WORDS, UP_WORDS, DOWN_WORDS, CONTINUE_WORDS, NUMBER_ANY,
                         MOVE_WORDS, OPEN_WORDS, CLOSE_WORDS)
 from sadam_features import WEB_ENABLED, get_weather, search_web
+import aisana_legs
+from aisana_legs import parse_legs_command, LEGS_ACTIONS
 
 RATE = 24000
 CHUNK = 1440  # 30 ms of mono S16_LE PCM
@@ -135,6 +137,20 @@ def tool_definitions():
              'language': {'type': 'string', 'enum': ['Russian', 'Kazakh', 'English', 'Egyptian Arabic']}},
              'required': ['city', 'day', 'language'], 'additionalProperties': False}},
     ]
+    tools.append(
+        {'type': 'function', 'name': 'move_legs',
+         'description': ('Drive your wheeled legs (Raspberry Pi). Use ONLY when the user explicitly asks you to '
+                         'drive, go, come, move forward/back, turn, spin, stop driving, or drive faster/slower. '
+                         'Every drive is short and stops by itself.'),
+         'parameters': {'type': 'object', 'properties': {
+             'action': {'type': 'string', 'enum': list(LEGS_ACTIONS)},
+             'seconds': {'type': 'number', 'minimum': 0.3, 'maximum': 10,
+                         'description': 'Only if the user said a time; немного/a bit = 1'},
+             'meters': {'type': 'number', 'minimum': 0.05, 'maximum': 5,
+                        'description': 'Only if the user said a distance'},
+             'degrees': {'type': 'integer', 'minimum': 10, 'maximum': 360,
+                         'description': 'For spin_left/spin_right; default 90, развернись = 180'}},
+             'required': ['action'], 'additionalProperties': False}})
     if WEB_ENABLED:
         tools.append(
             {'type': 'function', 'name': 'web_search',
@@ -201,6 +217,11 @@ PROMPT = (
     'or the number the user said (max 45). "Ещё" / "more" repeats the previous nudge. '
     'When asked to stop the arms, call move_arm with action stop at once. '
     'After move_arm returns, confirm in a few words; if it failed, say so briefly. '
+    'LEGS: you can drive on wheels with move_legs: forward, backward, arc_left/arc_right (drive while '
+    'turning), spin_left/spin_right (turn on the spot), stop, faster, slower. Call it only when the user '
+    'explicitly asks you to drive or turn; "повернись налево" = spin_left, "езжай налево" = arc_left, '
+    '"развернись" = spin 180. Never invent a time or distance. After move_legs say only a few words '
+    '("Еду вперёд."). Problems such as an obstacle or motors needing calibration are reported to you. '
     'WEATHER: always call get_weather for weather; never guess. '
     'LIVE FACTS: call web_search for news, elections, results, prices and other changing facts. '
 )
@@ -243,6 +264,9 @@ class RealtimeAisana(object):
         self.echo_guard_active = False
         self.camera_lock = threading.Lock()
         self.arm = None
+        self.legs = None
+        self.pending_legs = {}
+        self.legs_done_items = set()
         self.dialog_until = 0.0
         self.responded_items = set()
         self.transcripts = {}
@@ -263,15 +287,15 @@ class RealtimeAisana(object):
     def dialog_active(self):
         return time.monotonic() < self.dialog_until
 
-    def respond(self, item_id=None, force_arm=False):
+    def respond(self, item_id=None, force_arm=False, force_tool=None):
         """Answer the latest user turn and keep the follow-up window open."""
         if item_id:
             self.responded_items.add(item_id)
         self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
-        if force_arm:
-            # The words are a clear arm command: the model must call move_arm.
+        if force_arm or force_tool:
+            # The words are a clear arm/legs command: the model must call the tool.
             self.send({'type': 'response.create', 'response': {
-                'tool_choice': {'type': 'function', 'name': 'move_arm'}}})
+                'tool_choice': {'type': 'function', 'name': force_tool or 'move_arm'}}})
         else:
             self.send({'type': 'response.create'})
 
@@ -335,8 +359,14 @@ class RealtimeAisana(object):
 
     def report_arm_problem(self, problems):
         """Speak up only when the sensors show a real problem after a move."""
+        self.report_problem('Arm sensor report after the last move: ', problems)
+
+    def report_legs_problem(self, problem):
+        self.report_problem('Legs (wheel drive) report: ', [problem])
+
+    def report_problem(self, prefix, problems, instructions=None):
         text = ' | '.join(problems)
-        print('Arm problem:', text)
+        print('Problem:', prefix + text)
 
         def worker():
             deadline = time.monotonic() + 12
@@ -347,15 +377,60 @@ class RealtimeAisana(object):
             try:
                 self.send({'type': 'conversation.item.create', 'item': {
                     'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
-                        'Arm sensor report after the last move: ' + text)}]}})
+                        prefix + text)}]}})
                 self.expect_tool_response = True
-                self.send({'type': 'response.create', 'response': {'instructions': (
-                    'Tell the user in ONE short sentence (max 12 words), in their language, which joint '
-                    'has a problem and the likely reason: motor power off, wrong direction setting, '
-                    'limit or too much load. Nothing else.')}})
+                self.send({'type': 'response.create', 'response': {'instructions': instructions or (
+                    'Tell the user in ONE short sentence (max 12 words), in their language, what went '
+                    'wrong and the likely reason (for arms: motor power off, wrong direction setting, '
+                    'limit or load; for legs: obstacle, calibration needed, Pi not reachable). Nothing else.')}})
             except Exception as exc:
                 if not self.stop.is_set():
                     print('Arm report error:', exc)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def legs_tool(self, args):
+        """move_legs, checked against the user's words like move_arm."""
+        item_id = self.last_item
+        transcript = self.wait_transcript(item_id, timeout=1.5)
+        intent = parse_legs_command(transcript) if transcript else None
+        action = args.get('action')
+        if intent is None:
+            if action not in LEGS_ACTIONS:
+                return 'Unknown drive action; nothing moved.'
+            if transcript is not None and action != 'stop' and not aisana_legs.mentions_driving(transcript):
+                return ('The user did not ask you to drive (they said: "{}"). Nothing moved. '
+                        'Answer what they actually said.'.format(transcript))
+            intent = aisana_legs.make_intent(action, args.get('seconds'), args.get('meters'), args.get('degrees'))
+            if transcript is not None and not aisana_legs.mentions_amount(transcript):
+                # Never an invented time, distance or angle: defaults apply.
+                intent['seconds'] = intent['meters'] = intent['degrees'] = None
+        if self.legs is None:
+            return ('Legs are not connected (AISANA_LEGS_URL is not set or the Pi is off); nothing moved. '
+                    'Say so in a few words.')
+        result = self.legs.execute(intent, self.report_legs_problem)
+        return '{} Say ONLY a few words that you are doing it, e.g. "Еду вперёд."'.format(result)
+
+    def run_pending_legs(self, item_id):
+        """Safety net: a clear drive command the model ignored."""
+        with self.arm_lock:
+            intent = self.pending_legs.get(item_id)
+            if not intent or item_id in self.legs_done_items:
+                return
+            self.legs_done_items.add(item_id)
+
+        def worker():
+            if self.legs is None:
+                result = 'Legs are not connected; nothing moved.'
+            else:
+                try:
+                    result = self.legs.execute(intent, self.report_legs_problem)
+                except Exception as exc:
+                    result = 'Drive failed: {}'.format(exc)
+            print('Legs (from your words) {} -> {}'.format(intent, result))
+            self.report_problem('Robot report: the user\'s drive command was executed by the robot itself. ',
+                                [result], instructions=(
+                                    'In a few words, in the user\'s language, say what you are doing now '
+                                    '(e.g. "Еду вперёд."). If you said something different, correct yourself.'))
         threading.Thread(target=worker, daemon=True).start()
 
     def run_pending_arm(self, item_id):
@@ -562,6 +637,8 @@ class RealtimeAisana(object):
             return self.inspect_camera(question)
         if name == 'move_arm':
             return self.arm_tool(args)
+        if name == 'move_legs':
+            return self.legs_tool(args)
         if name == 'get_weather':
             city = str(args.get('city') or '').strip()[:60]
             phrase = 'weather' + (' in ' + city if city else '')
@@ -581,11 +658,11 @@ class RealtimeAisana(object):
             if call_id in self.handled_calls:
                 return
             self.handled_calls.add(call_id)
-        if name == 'move_arm':
+        if name in ('move_arm', 'move_legs'):
             # Claimed synchronously, before response.done can trigger the safety net.
             with self.arm_lock:
                 if self.last_item:
-                    self.arm_done_items.add(self.last_item)
+                    (self.arm_done_items if name == 'move_arm' else self.legs_done_items).add(self.last_item)
         threading.Thread(target=self.handle_tool_call,
                          args=(call_id, name, arguments), daemon=True).start()
 
@@ -624,12 +701,19 @@ class RealtimeAisana(object):
             self.pending_arm[item_id] = intents
             if item_id in self.done_items:      # reply already finished without move_arm
                 self.run_pending_arm(item_id)
+        drive = None if intents or is_prompt_echo(transcript) else parse_legs_command(transcript)
+        if drive and drive['action'] != 'stop':
+            self.pending_legs[item_id] = drive
+            if item_id in self.done_items:
+                self.run_pending_legs(item_id)
         if is_prompt_echo(transcript):
             print('Transcript looks like noise (repeated names); ignored.')
             if WAKE_GATE and item_id not in self.responded_items:
                 self.ignore_item(item_id)
             return
-        if is_stop_phrase(transcript):
+        if is_stop_phrase(transcript) or (drive and drive['action'] == 'stop'):
+            if self.legs is not None:
+                self.legs.stop()            # wheels first: they can run into people
             if self.arm is not None:
                 self.arm.emergency_stop()
             self.stop_playback()
@@ -640,7 +724,8 @@ class RealtimeAisana(object):
             print('Dialogue closed; say Aisana to begin again.')
             self.ignore_item(item_id)
         elif self.dialog_active() or has_wake_name(transcript):
-            self.respond(item_id, force_arm=bool(self.pending_arm.get(item_id)))
+            self.respond(item_id, force_arm=bool(self.pending_arm.get(item_id)),
+                         force_tool='move_legs' if self.pending_legs.get(item_id) else None)
         else:
             print('Not addressed to Aisana; ignored.')
             self.ignore_item(item_id)
@@ -695,6 +780,7 @@ class RealtimeAisana(object):
             if self.response_item:
                 self.done_items.add(self.response_item)
                 self.run_pending_arm(self.response_item)
+                self.run_pending_legs(self.response_item)
             # Do NOT lift echo guard here: playback can lag behind generation.
             self.queue_audio('done')
         elif typ == 'error':
@@ -713,6 +799,7 @@ class RealtimeAisana(object):
               'Echo guard:', 'ON (no interruptions during playback)' if ECHO_GUARD else 'OFF',
               'Wake name:', 'required to start' if WAKE_GATE else 'OFF (answers any speech)')
         self.arm = connect_from_environment()
+        self.legs = aisana_legs.connect_from_environment()
         self.ws = websocket.create_connection(
             'wss://api.openai.com/v1/realtime?model=' + MODEL,
             timeout=10, header=['Authorization: Bearer ' + KEY])
@@ -771,6 +858,8 @@ class RealtimeAisana(object):
                     self.mic.kill()
                     self.mic.wait()
             self.stop_playback()
+            if self.legs is not None:
+                self.legs.stop()
             if self.arm is not None:
                 self.arm.close()
             if self.ws:

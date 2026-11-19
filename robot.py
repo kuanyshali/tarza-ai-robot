@@ -16,6 +16,8 @@ from aisana_stream import stream_transcribe
 from sadam_features import (weather_intent, WEATHER_ENABLED, get_weather,
                             online_search_intent, search_web, semantic_turn_incomplete)
 from aisana_arm import connect_from_environment, parse_arm_commands, arm_reply
+import aisana_legs
+from aisana_legs import parse_legs_command, legs_reply
 
 API_KEY = os.environ.get('OPENAI_API_KEY')
 if not API_KEY:
@@ -1074,6 +1076,8 @@ def main():
     offline_model = None
     # Arm team's Arduino Mega over USB; the robot keeps working without it.
     arm = connect_from_environment()
+    # Legs team's wheel drive on the Raspberry Pi (AISANA_LEGS_URL).
+    legs = aisana_legs.connect_from_environment()
     if WAKE_MODE == 'vosk':
         # Do not silently fall back to costly cloud wake checks.
         offline_model = load_vosk_model(WAKE_MODEL_PATH)
@@ -1163,8 +1167,10 @@ def main():
                 r'(?:стоп|перестань|хватит|stop|quiet|سكوت|اسكت|тоқта)[!?.\s]*',
                 question.casefold()
             ):
+                if legs is not None:
+                    legs.stop()              # "Айсана, стоп" stops the wheels first
                 if arm is not None:
-                    arm.emergency_stop()     # "Айсана, стоп" also freezes the arms
+                    arm.emergency_stop()     # ...and freezes the arms
                 dialog_until = time.monotonic() + DIALOG_TIMEOUT
                 print('Speech stopped; dialogue remains open.')
                 continue
@@ -1187,7 +1193,20 @@ def main():
             answer_started = time.monotonic()
             arm_intents = parse_arm_commands(question)
             arm_intent = arm_intents[-1] if arm_intents else None
-            if arm_intent is not None:
+            drive_intent = None if arm_intent is not None else parse_legs_command(question)
+            if drive_intent is not None:
+                # Explicit drive command: parsed locally, time-limited on the Pi.
+                try:
+                    if legs is None:
+                        raise RuntimeError('legs are not connected (AISANA_LEGS_URL)')
+                    print('Tool: legs', drive_intent, '->', legs.execute(drive_intent))
+                    answer = legs_reply(drive_intent, language)
+                except Exception as error:
+                    print('Legs command failed:', error)
+                    answer = legs_reply(drive_intent, language, error=error)
+                last_online_request = False
+                last_camera_question = None
+            elif arm_intent is not None:
                 # Explicit arm commands: parsed locally, no model call, fast.
                 try:
                     if arm is None:
@@ -1244,7 +1263,8 @@ def main():
                 last_online_request = False
             if DEBUG_TIMING:
                 print('Answer generation time: {:.2f}s'.format(time.monotonic() - answer_started))
-            if arm_intent is not None or weather_intent(question) or last_online_request:
+            if (arm_intent is not None or drive_intent is not None
+                    or weather_intent(question) or last_online_request):
                 conversation_history.extend([
                     {'role': 'user', 'content': question},
                     {'role': 'assistant', 'content': answer}

@@ -242,10 +242,69 @@ class ArmVerificationTests(unittest.TestCase):
             rt.WAKE_GATE = original
 
 
+class FakeLegs(object):
+    def __init__(self):
+        self.intents = []
+        self.stops = 0
+
+    def execute(self, intent, report=None):
+        self.intents.append(intent)
+        return 'Driving {} for 2.0 s (stops by itself).'.format(intent['action'])
+
+    def stop(self):
+        self.stops += 1
+
+
+class LegsToolTests(unittest.TestCase):
+    def test_users_words_decide_the_drive(self):
+        session, _ = make_session()
+        session.legs = FakeLegs()
+        say(session, 'l1', 'Айсана, проедь вперёд 3 секунды')
+        result = session.run_tool('move_legs', {'action': 'forward', 'seconds': 8})
+        self.assertEqual(session.legs.intents[0]['seconds'], 3.0)
+        self.assertIn('few words', result)
+
+    def test_model_cannot_drive_when_not_asked(self):
+        session, _ = make_session()
+        session.legs = FakeLegs()
+        say(session, 'l2', 'Айсана, что у тебя впереди?')
+        result = session.run_tool('move_legs', {'action': 'forward'})
+        self.assertEqual(session.legs.intents, [])
+        self.assertIn('Nothing moved', result)
+
+    def test_model_may_not_invent_duration(self):
+        session, _ = make_session()
+        session.legs = FakeLegs()
+        say(session, 'l3', 'Айсана, покатайся по комнате вперёд и обратно')
+        session.run_tool('move_legs', {'action': 'forward', 'seconds': 10})
+        self.assertIsNone(session.legs.intents[0]['seconds'])
+
+    def test_stop_stops_wheels_and_arms(self):
+        session, _ = make_session()
+        session.legs, session.arm = FakeLegs(), FakeArm()
+        say(session, 'l4', 'Айсана, стой!')
+        self.assertEqual((session.legs.stops, session.arm.stopped), (1, 1))
+
+    def test_first_turn_drive_forces_legs_tool(self):
+        original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+        try:
+            session, sent = make_session()
+            say(session, 'l5', 'Айсана, повернись налево')
+            self.assertEqual(sent[-1]['response']['tool_choice']['name'], 'move_legs')
+        finally:
+            rt.WAKE_GATE = original
+
+    def test_legs_not_configured(self):
+        session, _ = make_session()
+        say(session, 'l6', 'Айсана, вперёд')
+        self.assertIn('not connected', session.run_tool('move_legs', {'action': 'forward'}))
+
+
 class ToolTests(unittest.TestCase):
     def test_tools_offered_to_model(self):
         names = [tool['name'] for tool in rt.tool_definitions()]
-        for name in ('inspect_camera', 'move_arm', 'get_weather'):
+        for name in ('inspect_camera', 'move_arm', 'move_legs', 'get_weather'):
             self.assertIn(name, names)
         arm_tool = [tool for tool in rt.tool_definitions() if tool['name'] == 'move_arm'][0]
         properties = arm_tool['parameters']['properties']

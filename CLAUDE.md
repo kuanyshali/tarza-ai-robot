@@ -17,6 +17,10 @@ Aisana (Айсана): university voice robot on an NVIDIA Jetson Nano. The owne
   Arm moves are verified with "p" before/after; never let the model claim motion without feedback.
   In realtime mode explicit commands are re-parsed from the STT transcript (aisana_arm.parse_arm_commands);
   model arguments are used only for vague arm requests.
+- Legs: Raspberry Pi over LAN runs the legs team's Flask app (app.py + odrive_controller.py,
+  port 5000, NOT in this repo). aisana_legs.py uses its HTTP API only (/motor/enable without
+  calibration, /motor/command, /motor/heartbeat every 0.12 s; the Pi stops after 0.35 s without one).
+  Every drive is time-limited (<= 10 s); never auto-calibrate; respect the 409 obstacle block.
 - Repo lives at `~/ai_robot` on the Jetson; the owner updates with `git pull --ff-only origin main`.
 - On the Jetson, system `python3` has no pip. Realtime mode runs in `~/ai_robot/.venv`
   (`.venv/bin/python aisana_realtime.py`); `robot.py` runs with system `python3` (JetPack cv2).
