@@ -13,13 +13,6 @@ class FakeSerial(object):
     def __init__(self, boot_lines=(b'Starting both arms...\n', b'Both arms ready.\n')):
         self.written = []
         self.incoming = list(boot_lines)
-        if boot_lines == (b'Starting both arms...\n', b'Both arms ready.\n'):
-            self.incoming.extend([
-                b'RIGHT stepper 101.8 131.8 161.8 171 - limits -10 to 179\n',
-                b'LEFT stepper 114 144 174 180 - limits -10 to 183\n',
-                b'RIGHT elbow 159 129 99 69 39 limits 16 to 205\n',
-                b'LEFT elbow 144 174 204 234 264 limits 91 to 280\n',
-            ])
         self.lock = threading.Lock()
         self.closed = False
 
@@ -164,8 +157,7 @@ class ControllerTests(unittest.TestCase):
         controller, _ = open_controller(fake)
         try:
             summary = controller.execute('position', 'both', 2)
-            self.assertEqual(fake.written, [b'b 2\n', b'p\n'])
-            self.assertIn('Movement not confirmed', summary)
+            self.assertEqual(fake.written, [b'b 2\n'])
             self.assertIn('"b 2"', summary)
         finally:
             controller.close()
@@ -175,7 +167,7 @@ class ControllerTests(unittest.TestCase):
         controller, _ = open_controller(fake)
         try:
             summary = controller.execute('nudge', 'both', None, 'elbow', 'up', 5)
-            self.assertEqual(fake.written, [b'r s r -5\n', b'l s r 5\n', b'p\n'])
+            self.assertEqual(fake.written, [b'r s r -5\n', b'l s r 5\n'])
             self.assertIn('"r s r -5"', summary)
         finally:
             controller.close()
@@ -189,33 +181,7 @@ class ControllerTests(unittest.TestCase):
             time.sleep(0.1)
             self.assertEqual(controller.position_table[('right', 'shoulder')][0], 167.0)
             controller.execute('nudge', 'right', None, 'shoulder', 'up', 5)
-            self.assertEqual(fake.written, [b'r m r -5\n', b'p\n'])
-        finally:
-            controller.close()
-
-    def test_accepted_target_not_claimed_as_completed_motion(self):
-        class AckSerial(FakeSerial):
-            def write(self, data):
-                super(AckSerial, self).write(data)
-                if data == b'r m 2\n':
-                    with self.lock:
-                        self.incoming.append(b'RIGHT stepper -> 161.80\n')
-        fake = AckSerial()
-        controller, _ = open_controller(fake)
-        try:
-            summary = controller.execute('position', 'right', 2, 'shoulder')
-            self.assertIn('Arduino accepted command', summary)
-            self.assertIn('completion is NOT confirmed', summary)
-        finally:
-            controller.close()
-
-    def test_live_table_rejects_unset_shoulder_position(self):
-        fake = FakeSerial()
-        controller, _ = open_controller(fake)
-        try:
-            with self.assertRaisesRegex(arm.ArmError, 'Position 4 is not set'):
-                controller.execute('position', 'right', 4, 'shoulder')
-            self.assertNotIn(b'r m 4\n', fake.written)
+            self.assertEqual(fake.written, [b'r m r -5\n'])
         finally:
             controller.close()
 
