@@ -88,8 +88,8 @@ _RIGHT = re.compile(r'\b(?:прав(?:ый|ая|ое|ую|ого|ой|ым|ом|
 _LEFT = re.compile(r'\b(?:лев(?:ый|ая|ое|ую|ого|ой|ым|ом|ые|ых)|left|сол)\b', re.I)
 _BOTH = re.compile(r'\b(?:оба|обе|обоих|both|екеуін)\b|\b(?:две|два|екі)\s+(?:руки|плеча|локтя|қол|иық|шынтақ)\b', re.I)
 _WHOLE = re.compile(r'\b(?:рук[аиуеой]\w*|руками|arms?|hands?|қол\w*)\b', re.I)
-_PLURAL = re.compile(r'\b(?:руки|плечи|локти|arms|shoulders|elbows)\b', re.I)
-_NEGATED = re.compile(r'\b(?:не\s+(?:двигай|поднимай|опускай|переводи|ставь|надо|нужно|в)|не\s+трогай|don.t|do not|never)\b', re.I)
+_PLURAL = re.compile(r'\b(?:руки|плечи|локти|захваты|клешни|arms|hands|grippers|shoulders|elbows)\b', re.I)
+_NEGATED = re.compile(r'\b(?:не\s+(?:двигай|поднимай|опускай|переводи|ставь|надо|нужно|в)|не\s+(?:трогай|закрывай|открывай|сжимай|разжимай|поднимай|опускай)|don.t|do not|never)\b', re.I)
 _QUESTION = re.compile(r'\b(?:какая|какой|какие|почему|зачем|что значит|расскажи|объясни|what is|which position|why|explain)\b', re.I)
 
 
@@ -320,6 +320,7 @@ class RealtimeAisana(object):
         self.response_idle.set()
         self.fast_turn = None
         self.arm_reply_pending = threading.Event()
+        self.last_nudge_intent = None
 
     def dialog_active(self):
         return time.monotonic() < self.dialog_until
@@ -437,6 +438,7 @@ class RealtimeAisana(object):
                     raise RuntimeError('Microphone capture ended unexpectedly')
                 fast = self.fast_turn
                 if ECHO_GUARD and (self.echo_guard_active or self.responding or self.playing
+                                   or not self.response_idle.is_set()
                                    or self.arm_reply_pending.is_set()
                                    or (fast is not None and not fast['checked'])
                                    or time.monotonic() < self.mute_until):
@@ -511,13 +513,17 @@ class RealtimeAisana(object):
                 self.position_used = True
                 # The local parser, not model inference, owns explicit numbered requests.
                 args = dict(self.pending_position)
-                print('Arm preset enforced:', args)
+                print('Arm command enforced:', args)
             if self.arm is None:
                 return ('The arm controller (Arduino Mega) is not connected over USB. '
                         'Tell the user briefly; do not pretend the arm moved.')
-            return self.arm.execute(args.get('action'), args.get('arm') or 'both',
-                                    args.get('position'), args.get('joint') or 'whole',
-                                    args.get('direction'), args.get('degrees'))
+            result = self.arm.execute(args.get('action'), args.get('arm') or 'both',
+                                      args.get('position'), args.get('joint') or 'whole',
+                                      args.get('direction'), args.get('degrees'))
+            if args.get('action') != 'status':
+                self.last_nudge_intent = (dict(args) if args.get('action') == 'nudge'
+                                          and 'Arduino accepted command' in str(result) else None)
+            return result
         if name == 'get_weather':
             city = str(args.get('city') or '').strip()[:60]
             phrase = 'weather' + (' in ' + city if city else '')
@@ -544,12 +550,18 @@ class RealtimeAisana(object):
                 fast['deferred'][call_id] = arguments
                 self.arm_reply_pending.set()
                 return
+            if fast['dispatched']:
+                # Close extra function-call items, without starting another move.
+                with self.calls_lock:
+                    self.handled_calls.add(call_id)
+                self.send({'type': 'conversation.item.create', 'item': {
+                    'type': 'function_call_output', 'call_id': call_id,
+                    'output': 'Additional movement not sent: one physical command per turn.'}})
+                return
+            fast['dispatched'] = True
             if not fast['allowed']:
                 blocked = fast['reason']
-            elif fast['dispatched']:
-                return  # at most one physical tool invocation per verified turn
-            else:
-                fast['dispatched'] = True
+        if name == 'move_arm':
             self.arm_reply_pending.set()
         with self.calls_lock:
             if call_id in self.handled_calls:
@@ -606,7 +618,7 @@ class RealtimeAisana(object):
         self.position_used = False
         self.fast_turn = {'item_id': item_id, 'checked': False, 'allowed': False,
                           'done': False, 'arm_requested': False, 'dispatched': False,
-                          'retry_sent': False, 'deferred': {}, 'intent': None,
+                          'retry_sent': False, 'force_position': False, 'deferred': {}, 'intent': None,
                           'reason': 'Movement not verified; no Arduino motion sent.'}
         self.respond(item_id)
 
@@ -614,7 +626,7 @@ class RealtimeAisana(object):
         fast = self.fast_turn
         if not fast or not fast['checked'] or not fast['done']:
             return
-        if fast['intent'] is not None and fast['allowed'] and not fast['arm_requested'] and not fast['retry_sent']:
+        if fast['force_position'] and fast['allowed'] and not fast['arm_requested'] and not fast['retry_sent']:
             # The speculative model may have answered without invoking a tool.
             # Retry only once, after the original response has ended.
             fast['retry_sent'] = True
@@ -638,18 +650,26 @@ class RealtimeAisana(object):
             confirmed = bool(lines and any('EMERGENCY STOP' in line.upper() for line in lines))
             fast['reason'] = ('Arduino confirmed the stop command.' if confirmed else
                               'Stop command not confirmed; do not claim that the arms stopped.')
+            self.last_nudge_intent = None
             self.stop_playback()
         elif is_sleep_phrase(transcript):
             self.dialog_until = 0.0
             self.last_position_target = None
+            self.last_nudge_intent = None
             fast['reason'] = 'Conversation closed; no movement sent.'
         else:
             matched, intent = numbered_position_intent(transcript, self.last_position_target)
+            fast['force_position'] = matched and intent is not None
             if not matched and not (_NEGATED.search(transcript) or _QUESTION.search(transcript)):
                 intent = parse_arm_command(transcript)
+                repeat = WAKE_PATTERN.sub('', transcript.casefold(), count=1).strip(' ,.!?;:')
+                if intent is None and self.last_nudge_intent is not None and re.fullmatch(
+                        r'(?:ещ[её](?:\s+чуть[- ]чуть)?|more|a bit more|again)', repeat):
+                    intent = dict(self.last_nudge_intent)
                 # A vague singular arm/joint cannot silently become both arms.
                 if intent is not None and intent['action'] not in ('stop', 'status'):
-                    if intent['arm'] == 'both' and not (_BOTH.search(transcript) or _PLURAL.search(transcript)):
+                    if (intent['arm'] == 'both' and not (_BOTH.search(transcript) or _PLURAL.search(transcript))
+                            and intent != self.last_nudge_intent):
                         intent = None
                 if intent is None and ARM_WORDS.search(transcript) and re.search(
                         r'статус|состояни|status|қалпы', transcript, re.I):
@@ -686,7 +706,10 @@ class RealtimeAisana(object):
         active = self.dialog_active()
         if not active:
             self.last_position_target = None
+            self.last_nudge_intent = None
         if is_stop_phrase(transcript):
+            self.fast_turn = None
+            self.last_nudge_intent = None
             # Stop remains available even outside the conversation window.
             stop_result = self.arm.emergency_stop() if self.arm is not None else []
             self.pending_position = None
@@ -701,7 +724,9 @@ class RealtimeAisana(object):
             return
         if is_sleep_phrase(transcript):
             self.dialog_until = 0.0
+            self.fast_turn = None
             self.last_position_target = None
+            self.last_nudge_intent = None
             self.pending_position = None
             print('Dialogue closed; say Aisana to begin again.')
             self.ignore_item(item_id)
@@ -758,7 +783,8 @@ class RealtimeAisana(object):
             item_id = e.get('item_id')
             if (FAST_FOLLOWUP and item_id and item_id not in self.responded_items
                     and (not WAKE_GATE or self.dialog_active())
-                    and self.response_idle.is_set() and not self.arm_reply_pending.is_set()):
+                    and self.response_idle.is_set() and not self.arm_reply_pending.is_set()
+                    and (self.fast_turn is None or self.fast_turn['checked'])):
                 self.begin_fast_turn(item_id)
         elif typ == 'conversation.item.input_audio_transcription.completed':
             self.handle_transcript(e.get('item_id'), (e.get('transcript') or '').strip())
@@ -781,6 +807,8 @@ class RealtimeAisana(object):
             if fast is not None and not fast['done']:
                 fast['done'] = True
                 self.finish_fast_turn_if_needed()
+            elif fast is not None and fast['retry_sent'] and not fast['arm_requested']:
+                self.arm_reply_pending.clear()
         elif typ == 'error':
             print('Realtime API error:', e.get('error', {}))
 
