@@ -37,12 +37,14 @@ VOICE = os.environ.get('AISANA_REALTIME_VOICE', 'marin')
 BARGE_IN = os.environ.get('AISANA_REALTIME_BARGE_IN', '0') == '1'
 SILENCE_MS = int(os.environ.get('AISANA_REALTIME_SILENCE_MS', '700'))
 ECHO_GUARD = os.environ.get('AISANA_ECHO_GUARD', '1') == '1'
-ECHO_TAIL_SECONDS = float(os.environ.get('AISANA_ECHO_TAIL_SECONDS', '1.5'))
+ECHO_TAIL_SECONDS = float(os.environ.get('AISANA_ECHO_TAIL_SECONDS', '1.0'))
+# The Xiaomi USB speaker drops the first ~0.2 s after the stream opens: lead with silence.
+PLAYBACK_LEAD_MS = max(0, min(1000, int(os.environ.get('AISANA_PLAYBACK_LEAD_MS', '300'))))
 KEY = os.environ.get('OPENAI_API_KEY')
 STT_MODEL = os.environ.get('AISANA_REALTIME_STT_MODEL', 'gpt-4o-mini-transcribe')
 # Respond only after the name "Aisana" (then a timed follow-up window).
 WAKE_GATE = os.environ.get('AISANA_REALTIME_WAKE', '1') == '1'
-DIALOG_TIMEOUT = max(5.0, float(os.environ.get('AISANA_DIALOG_TIMEOUT', '20')))
+DIALOG_TIMEOUT = max(5.0, float(os.environ.get('AISANA_DIALOG_TIMEOUT', '12')))
 
 WAKE_PATTERN = re.compile(
     r'^\W*(?:(?:ok|okay|окей|ок|эй|hey|привет)\W+)?'
@@ -73,6 +75,20 @@ def voice_style_instructions():
     """AISANA_VOICE_STYLE=cute|calm|<your own text>; empty = neutral."""
     style = os.environ.get('AISANA_VOICE_STYLE', '').strip()
     return VOICE_STYLES.get(style, ('VOICE STYLE: ' + style + ' ') if style else '')
+
+
+def language_of(text):
+    """Language of the user's words by script: the reply must use the same one."""
+    text = text or ''
+    if re.search(r'[\u0600-\u06FF]', text):
+        return 'Egyptian Arabic'
+    if re.search(r'[әғқңөұүһі]', text.casefold()):
+        return 'Kazakh'
+    cyrillic = len(re.findall(r'[а-яё]', text.casefold()))
+    latin = len(re.findall(r'[a-z]', text.casefold()))
+    if cyrillic or latin:
+        return 'Russian' if cyrillic >= latin else 'English'
+    return None
 
 
 def has_wake_name(text):
@@ -138,6 +154,12 @@ def tool_definitions():
              'required': ['city', 'day', 'language'], 'additionalProperties': False}},
     ]
     tools.append(
+        {'type': 'function', 'name': 'stay_silent',
+         'description': ('Call INSTEAD of answering when the latest speech is not meant for you: people '
+                         'talking to each other, background noise, half words, a fragment without a '
+                         'request, or a comment about you. You then say nothing.'),
+         'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}})
+    tools.append(
         {'type': 'function', 'name': 'move_legs',
          'description': ('Drive your wheeled legs (Raspberry Pi). Use ONLY when the user explicitly asks you to '
                          'drive, go, come, move forward/back, turn, spin, stop driving, or drive faster/slower. '
@@ -169,6 +191,10 @@ PROMPT = (
     'English question -> English answer. Russian question -> Russian answer. '
     'Kazakh question -> Kazakh answer. Never switch languages unless explicitly asked. '
     'If the user asks about an English technical topic in Russian, answer in Russian. '
+    'SILENCE RULE: during a conversation people around you also talk to each other. If the latest '
+    'speech is not a request or question for you (chatter, noise, fragments such as "Инерция же", '
+    '"Мушакал", "крепление, если будет болтаться"), call stay_silent and say nothing. '
+    'Never ask "что ты имел в виду" or other clarifying questions about such fragments. '
     'LENGTH RULE: Default to ONE short sentence, maximum TWO short sentences. '
     'Give more detail only when the user explicitly requests explanation or detail. '
     'Do not add offers to help, follow-up questions, apologies, motivational language, '
@@ -274,6 +300,7 @@ class RealtimeAisana(object):
         self.transcripts = {}
         self.transcript_cond = threading.Condition()
         self.last_item = None
+        self.user_language = 'Russian'
         self.response_item = None
         self.expect_tool_response = False
         self.done_items = set()
@@ -355,9 +382,10 @@ class RealtimeAisana(object):
         if intents[0]['action'] != 'stop':
             self.arm.watch(intents, self.report_arm_problem)
         problem = ' Arduino said: ' + result.split('Arduino reported: ', 1)[1] if 'Arduino reported: ' in result else ''
-        return ('Sent to the arms: {}.{} Say ONLY a few words that you are doing it, e.g. '
-                '"Опускаю руки в ноль." Do not describe results; sensors are checked automatically '
-                'and problems will be reported to you.'.format(describe(intents), problem))
+        return ('Sent to the arms: {}.{} Say ONLY a few words that you are doing it '
+                '(Russian: "Опускаю руки в ноль." English: "Lowering my arms."). Do not describe results; '
+                'sensors are checked automatically and problems will be reported to you.'.format(
+                    describe(intents), problem))
 
     def report_arm_problem(self, problems):
         """Speak up only when the sensors show a real problem after a move."""
@@ -391,10 +419,10 @@ class RealtimeAisana(object):
                     'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
                         prefix + text)}]}})
                 self.expect_tool_response = True
-                self.send({'type': 'response.create', 'response': {'instructions': instructions or (
-                    'Tell the user in ONE short sentence (max 12 words), in their language, what went '
+                self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (instructions or (
+                    'Tell the user in ONE short sentence (max 12 words) what went '
                     'wrong and the likely reason (for arms: motor power off, wrong direction setting, '
-                    'limit or load; for legs: obstacle, calibration needed, Pi not reachable). Nothing else.')}})
+                    'limit or load; for legs: obstacle, calibration needed, Pi not reachable). Nothing else.'))}})
             except Exception as exc:
                 if not self.stop.is_set():
                     print('Arm report error:', exc)
@@ -420,7 +448,8 @@ class RealtimeAisana(object):
             return ('Legs are not connected (AISANA_LEGS_URL is not set or the Pi is off); nothing moved. '
                     'Say so in a few words.')
         result = self.legs.execute(intent, self.report_legs_problem)
-        return '{} Say ONLY a few words that you are doing it, e.g. "Еду вперёд."'.format(result)
+        return ('{} Say ONLY a few words that you are doing it (Russian: "Еду вперёд." '
+                'English: "Driving forward.").'.format(result))
 
     def run_pending_legs(self, item_id):
         """Safety net: a clear drive command the model ignored."""
@@ -473,8 +502,8 @@ class RealtimeAisana(object):
                     'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
                         'Robot report: the user\'s arm command was executed by the robot itself. ' + result)}]}})
                 self.expect_tool_response = True
-                self.send({'type': 'response.create', 'response': {'instructions': (
-                    'In a few words, in the user\'s language, say what the arms are doing now '
+                self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (
+                    'In a few words, say what the arms are doing now '
                     'according to the robot report. If you said something different before, '
                     'correct yourself briefly.')}})
             except Exception as exc:
@@ -556,6 +585,10 @@ class RealtimeAisana(object):
                 with self.play_lock:
                     self.playback = p
                     self.playing = True
+                try:
+                    p.stdin.write(b'\x00\x00' * (RATE * PLAYBACK_LEAD_MS // 1000))
+                except (IOError, OSError, ValueError):
+                    pass
             try:
                 p.stdin.write(chunk)
             except (IOError, OSError, ValueError):
@@ -670,6 +703,20 @@ class RealtimeAisana(object):
             if call_id in self.handled_calls:
                 return
             self.handled_calls.add(call_id)
+        if name == 'stay_silent':
+            transcript = self.transcripts.get(self.last_item, '')
+            if has_wake_name(transcript):
+                # Addressed by name: silence is not allowed.
+                self.send({'type': 'conversation.item.create', 'item': {
+                    'type': 'function_call_output', 'call_id': call_id,
+                    'output': 'The user addressed you by name; you must answer.'}})
+                self.expect_tool_response = True
+                self.send({'type': 'response.create', 'response': {'instructions': self.reply_language()}})
+            else:
+                print('Not for me; staying silent.')
+                self.send({'type': 'conversation.item.create', 'item': {
+                    'type': 'function_call_output', 'call_id': call_id, 'output': 'silent'}})
+            return
         if name in ('move_arm', 'move_legs'):
             # Claimed synchronously, before response.done can trigger the safety net.
             with self.arm_lock:
@@ -692,19 +739,22 @@ class RealtimeAisana(object):
             self.send({'type': 'conversation.item.create', 'item': {
                 'type': 'function_call_output', 'call_id': call_id, 'output': str(result)[:4000]}})
             self.expect_tool_response = True
-            self.send({'type': 'response.create', 'response': {'instructions': (
+            self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (
                 'The tool has returned. Answer the user NOW, in first person as Aisana, '
                 'using its result. No commentary about tools, photos or analysis. '
-                'Follow any instruction in the tool result. Otherwise one short sentence, '
-                'in the language of the user question. '
+                'Follow any instruction in the tool result. Otherwise one short sentence. '
                 'No filler, no wishes, no offers of more help, no follow-up questions. '
                 'If the tool failed, say briefly that it did not work.') }})
         except Exception as exc:
             if not self.stop.is_set():
                 print('Tool response error:', exc)
 
+    def reply_language(self):
+        return 'Reply in {} only (the language of the user\'s latest words). '.format(self.user_language)
+
     def handle_transcript(self, item_id, transcript):
         print('You:', transcript)
+        self.user_language = language_of(transcript) or self.user_language
         with self.transcript_cond:
             self.transcripts[item_id] = transcript
             self.transcript_cond.notify_all()
@@ -847,7 +897,10 @@ class RealtimeAisana(object):
                             'transcription': {
                                 'model': STT_MODEL,
                                 # A list of names here gets echoed back on noise.
-                                'prompt': 'Speech may be Russian, Kazakh, English or Egyptian Arabic. The robot is called Aisana.'
+                                'prompt': ('Speech may be Russian, Kazakh, English or Egyptian Arabic. The robot is '
+                                           'called Aisana. Typical commands: поверни налево, поверни направо, '
+                                           'развернись, развернись на 360, проедь вперёд, езжай назад, стой, '
+                                           'руки в позицию, открой захват, turn left, go forward.')
                             },
                             'turn_detection': {
                                 'type': 'server_vad',

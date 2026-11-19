@@ -96,9 +96,15 @@ class ParserTests(unittest.TestCase):
         self.check('отъедь назад на полметра', 'backward', meters=0.5)
         self.check('Айсана, вперед 4 секунды', 'forward', seconds=4.0)
         self.check('Айсана, проейдь пять секунд', 'forward', seconds=5.0)
+        # From the Jetson log: "поведи" heard instead of "поверни"; 360 was ignored.
+        self.check('Айсана, поведи налево', 'spin_left', degrees=90)
+        self.check('повели направо', 'spin_right', degrees=90)
+        self.check('развернись на 360', 'spin_right', degrees=360)
+        self.check('крутись на 270', 'spin_right', degrees=270)
+        self.check('поверни налево на 360 градусов', 'spin_left', degrees=360)
 
     def test_not_drive_commands(self):
-        for text in ('что у тебя впереди?', 'Айсана, смотри вперёд и скажи что видишь',
+        for text in ('повели меня в магазин', 'что у тебя впереди?', 'Айсана, смотри вперёд и скажи что видишь',
                      'вернись назад к теме разговора', 'поверни голову направо?',
                      'какая погода', 'правую руку в позицию 2', 'назад в будущее это фильм', ''):
             with self.subTest(text=text):

@@ -227,7 +227,9 @@ FORWARD = re.compile(r'(?:вп[её]р[её]д\b|\bforward\b|\bahead\b|алға|
 BACKWARD = re.compile(r'(?:назад|\bback(?:wards?)?\b|артқа|لورا|ورا)', re.I)
 LEFT = re.compile(r'(?:налево|влево|лево|левее|\bleft\b|солға|شمال|يسار)', re.I)
 RIGHT = re.compile(r'(?:направо|вправо|право|правее|\bright\b|оңға|يمين)', re.I)
-SPIN = re.compile(r'(?:поверн\w*|разверн\w*|крут\w*|разворот\w*|\bturn\b|\bspin\b|бұрыл\w*|لف)', re.I)
+# "поведи/повели" is how STT often hears "поверни" (Jetson log, Nov 19).
+SPIN = re.compile(r'(?:поверн\w*|повед[иь]\w*|повели\b|разверн\w*|крут\w*|разворот\w*|\bturn\b|\bspin\b|'
+                  r'бұрыл\w*|لف)', re.I)
 AROUND = re.compile(r'(?:разверн\w*|разворот\w*|turn around|кругом)', re.I)
 DRIVE = re.compile(
     r'(?:\bедь\b|езжай|поезжай|прое[дзхй]\w*|подъе[дзхй]\w*|отъе[дзхй]\w*|ехай|едем|поехали|двигайся|'
@@ -306,6 +308,9 @@ def parse_legs_command(text):
     meters = METERS_RE.search(q)
     cm = CM_RE.search(q)
     degrees = DEGREES_RE.search(q)
+    if not degrees and SPIN.search(q):
+        # "развернись на 360", "крутись на 270": a bare angle after a turn word
+        degrees = re.search(r'(?:на|by)\s+(\d{2,3})(?!\s*(?:\d|[.,]\d|секунд|сек|seconds?|метр|m\b|см|cm|сантиметр))', q)
     amount = {}
     if seconds:
         amount['seconds'] = min(MAX_SECONDS, _number(seconds.group(1)))
@@ -319,8 +324,10 @@ def parse_legs_command(text):
         amount['seconds'] = SHORT_SECONDS
     if SPIN.search(q) or (driving and (LEFT.search(q) or RIGHT.search(q)) and not FORWARD.search(q)
                           and not BACKWARD.search(q)):
-        if AROUND.search(q) and not (LEFT.search(q) or RIGHT.search(q)):
-            return _intent('spin_right', degrees=180)
+        if not (LEFT.search(q) or RIGHT.search(q)) and (AROUND.search(q) or degrees):
+            # "развернись", "развернись на 360", "крутись на 270": no side said -> right
+            turn = int(degrees.group(1)) if degrees else 180
+            return _intent('spin_right', degrees=max(10, min(360, turn)))
         if LEFT.search(q) or RIGHT.search(q):
             action = 'spin_left' if LEFT.search(q) and not RIGHT.search(q) else 'spin_right'
             if SPIN.search(q):

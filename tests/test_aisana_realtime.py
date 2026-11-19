@@ -100,6 +100,39 @@ class ReconnectTests(unittest.TestCase):
         self.assertEqual(legs.stops, 1)                     # wheels stopped on exit
 
 
+class LanguageAndSilenceTests(unittest.TestCase):
+    def test_reply_language_follows_user_words(self):
+        self.assertEqual(rt.language_of('Aisana, go forward for one second.'), 'English')
+        self.assertEqual(rt.language_of('Айсана, проедь вперёд'), 'Russian')
+        self.assertEqual(rt.language_of('Ана нәрсе автомат'), 'Kazakh')
+        self.assertEqual(rt.language_of('آيسانا، روحي قدام'), 'Egyptian Arabic')
+        session, sent = make_session()
+        session.legs = FakeLegs()
+        say(session, 'g1', 'Aisana, go forward for one second.')
+        session.handle_tool_call('c1', 'move_legs', json.dumps({'action': 'forward', 'seconds': 1}))
+        self.assertTrue(sent[-1]['response']['instructions'].startswith('Reply in English only'))
+        result = sent[-2]['item']['output']
+        self.assertIn('Driving forward.', result)          # English example, not only "Еду вперёд."
+
+    def test_stay_silent_for_chatter(self):
+        session, sent = make_session()
+        say(session, 's1', 'Инерция же.')
+        session.handle({'type': 'response.function_call_arguments.done', 'call_id': 'c2',
+                        'name': 'stay_silent', 'arguments': '{}'})
+        self.assertEqual(sent[-1]['item']['output'], 'silent')
+        self.assertNotEqual(sent[-1]['type'], 'response.create')
+
+    def test_cannot_stay_silent_when_called_by_name(self):
+        session, sent = make_session()
+        say(session, 's2', 'Айсана, привет')
+        session.handle({'type': 'response.function_call_arguments.done', 'call_id': 'c3',
+                        'name': 'stay_silent', 'arguments': '{}'})
+        self.assertEqual(sent[-1]['type'], 'response.create')
+
+    def test_tools_include_stay_silent(self):
+        self.assertIn('stay_silent', [tool['name'] for tool in rt.tool_definitions()])
+
+
 class VoiceStyleTests(unittest.TestCase):
     def test_voice_style_presets(self):
         import os
