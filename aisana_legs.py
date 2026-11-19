@@ -192,6 +192,12 @@ class LegsController(object):
         if action in ('faster', 'slower'):
             speed = self.change_speed(0.5 if action == 'faster' else -0.5)
             return 'Drive speed is now {} km/h.'.format(speed)
+        try:
+            # Enable first, synchronously, so Aisana never says "Еду" when the
+            # motors cannot move (e.g. they need calibration).
+            self.ensure_enabled()
+        except Exception as error:
+            return ('NOT driving: {}. Nothing moved. Tell the user this in one short sentence.'.format(error))
         seconds = self.drive(intent, report)
         return 'Driving {} for {:.1f} s (stops by itself).'.format(action.replace('_', ' '), seconds)
 

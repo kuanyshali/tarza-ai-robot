@@ -134,6 +134,13 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(pi.commands, [])
         self.assertIn('calibration', problems[0])
 
+    def test_execute_says_not_driving_when_calibration_needed(self):
+        pi = FakePi(needs_calibration=True)
+        result = controller(pi).execute(legs.make_intent('forward'))
+        self.assertTrue(result.startswith('NOT driving'))
+        self.assertIn('calibration', result)
+        self.assertEqual(pi.commands, [])
+
     def test_obstacle_stop_is_reported(self):
         pi = FakePi(obstacle_after=0.2)
         problems = []

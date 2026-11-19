@@ -1199,7 +1199,10 @@ def main():
                 try:
                     if legs is None:
                         raise RuntimeError('legs are not connected (AISANA_LEGS_URL)')
-                    print('Tool: legs', drive_intent, '->', legs.execute(drive_intent))
+                    result = legs.execute(drive_intent)
+                    print('Tool: legs', drive_intent, '->', result)
+                    if result.startswith('NOT driving'):
+                        raise RuntimeError(result.split(': ', 1)[1].split('. Nothing moved')[0])
                     answer = legs_reply(drive_intent, language)
                 except Exception as error:
                     print('Legs command failed:', error)
