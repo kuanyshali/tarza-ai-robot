@@ -75,11 +75,18 @@ def ensure_models(folder=MODELS_DIR, download=True):
             import requests
             print('Downloading face model {} ...'.format(name))
             part = path + '.part'
-            with requests.get(url, stream=True, timeout=(10, 120)) as response:
+            with requests.get(url, stream=True, timeout=(10, 30)) as response:
                 response.raise_for_status()
+                total = int(response.headers.get('content-length') or 0)
+                done, shown, started = 0, 0, time.monotonic()
                 with open(part, 'wb') as handle:
-                    for block in response.iter_content(1 << 20):
+                    for block in response.iter_content(1 << 16):
                         handle.write(block)
+                        done += len(block)
+                        if done - shown >= 4 << 20:     # progress every 4 MB
+                            shown = done
+                            print('  {} MB of {} MB ({:.0f} s)'.format(
+                                done >> 20, total >> 20 if total else '?', time.monotonic() - started))
             if _sha256(part) != sha:
                 os.remove(part)
                 raise RuntimeError('face model {} is corrupted (checksum)'.format(name))
@@ -215,6 +222,9 @@ class FaceMemory(object):
         self.nets = None
         self.lock = threading.RLock()
         self.learned_at = {}
+        self.ready = threading.Event()   # networks loaded (the download runs in the background)
+        if embedder is not None or detector is not None:
+            self.ready.set()
         self.people = []                  # [(name, vector)]
         self.things = []                  # [(id, label, owner, description)]
         folder = os.path.dirname(db_path)
@@ -246,6 +256,7 @@ class FaceMemory(object):
             detector = cv2.dnn.readNetFromONNX(paths['yunet'])
             embedder = cv2.dnn.readNetFromONNX(paths['face_recognition_sface_2021dec.onnx'])
             self.nets = (detector, embedder)
+            self.ready.set()
         return self.nets
 
     def _yunet(self, image, threshold):
@@ -327,6 +338,8 @@ class FaceMemory(object):
 
     def faces(self, frame):
         """Everyone in the frame: [{'box', 'vector', 'name', 'distance', 'where'}], biggest first."""
+        if not self.ready.is_set():
+            return []                       # models still downloading
         width = frame.shape[1]
         result = []
         for box in self.detect(frame):
@@ -489,12 +502,20 @@ def connect_from_environment(start_camera=True):
     camera = CameraStream().start() if start_camera else None
     try:
         memory = FaceMemory()
-        memory._load_nets()
-        print('Face memory ready: {} people, {} things.'.format(len(memory.names()), len(memory.things)))
-        old = os.path.join(DATA_DIR, 'faces.sqlite3')
-        if not memory.names() and os.path.exists(old):
-            print('Face memory: the face model changed; please introduce yourselves again ("запомни меня, я ...").')
     except Exception as exc:
         print('Face memory off: {}'.format(exc))
-        memory = None
+        return camera, None
+
+    def load():
+        # In the background: a slow download must not keep Aisana from starting
+        # (Jetson log, Nov 20: she sat silent while the model downloaded).
+        try:
+            memory._load_nets()
+            print('Face memory ready: {} people, {} things.'.format(len(memory.names()), len(memory.things)))
+            old = os.path.join(DATA_DIR, 'faces.sqlite3')
+            if not memory.names() and os.path.exists(old):
+                print('Face memory: the face model changed; please introduce yourselves again ("запомни меня, я ...").')
+        except Exception as exc:
+            print('Face memory off: {}'.format(exc))
+    threading.Thread(target=load, daemon=True).start()
     return camera, memory

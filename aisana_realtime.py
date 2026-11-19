@@ -1289,8 +1289,9 @@ class RealtimeAisana(object):
 
         def worker():
             action, name = command['action'], command.get('name')
-            if self.faces is None or self.camera_stream is None:
-                self.say_phrase('face memory is switched off or its models are missing.', 'off')
+            ready = getattr(self.faces, 'ready', None)
+            if self.faces is None or self.camera_stream is None or (ready is not None and not ready.is_set()):
+                self.say_phrase('face memory is switched off or its models are still loading.', 'off')
                 return
             sure = getattr(self.faces, 'threshold', 1.0) - 0.1   # renaming/deleting needs a sure match
             try:
