@@ -201,7 +201,12 @@ def spotter_from_environment():
     try:
         spotter = WakeSpotter(load_vosk_model(path))
     except Exception as exc:
-        print('Local wake word off ({}); all speech goes to the cloud as before.'.format(exc))
+        hint = ''
+        if 'undefined symbol' in str(exc):
+            # Jetson log, Nov 20: every Vosk ARM64 wheel needs a newer libstdc++
+            # than Ubuntu 18.04 (JetPack 4) ships.
+            hint = ' Vosk needs a newer libstdc++ than JetPack 4 has; see README.'
+        print('Local wake word off ({}); all speech goes to the cloud as before.{}'.format(exc, hint))
         return None
     print('Local wake word: ON (Vosk). Outside a conversation nothing is sent until "Айсана".')
     return spotter

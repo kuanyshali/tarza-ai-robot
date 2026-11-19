@@ -84,6 +84,8 @@ mkdir -p models && cd models
 wget -c https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip && unzip -n vosk-model-small-ru-0.22.zip
 ```
 
+На JetPack 4 (Ubuntu 18.04) Vosk может не запуститься с ошибкой `undefined symbol: _ZNSt7__cxx1119basic_ostringstream...`: всем его сборкам для ARM64 нужен более новый `libstdc++`. Это меняет системную библиотеку, делайте осознанно: `sudo add-apt-repository ppa:ubuntu-toolchain-r/test && sudo apt update && sudo apt install --only-upgrade libstdc++6`. Без этого Айсана просто работает как раньше (имя распознаёт облако).
+
 Если она стала плохо откликаться на имя, `AISANA_LOCAL_WAKE_CONFIDENCE=0.85` (мягче) или просто запускать без `AISANA_LOCAL_WAKE`.
 
 ### Лица и вещи (realtime-режим)
@@ -163,7 +165,7 @@ wget -c https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip && unzi
 | `AISANA_MIC_GAIN` | `1.0` | Программное усиление микрофона (например `2.0`) |
 | `AISANA_MIC_LEVEL` | `0` | `1` — раз в секунду печатать громкость микрофона |
 | `AISANA_VAD_THRESHOLD` | `0.5` | Ниже (0.3–0.4) — слышит тише, но и шум тоже |
-| `AISANA_NOISE_REDUCTION` | `far_field` | Шумоподавление OpenAI: `far_field` (говорят издалека), `near_field`, `off` |
+| `AISANA_NOISE_REDUCTION` | `off` | Шумоподавление OpenAI: `far_field` (говорят издалека), `near_field`, `off` |
 | `AISANA_HUMOR` | `45` | Уровень юмора и сарказма 0–100, как у TARS; голосом: «Айсана, юмор 60 процентов» |
 | `AISANA_VOICE_STYLE` | пусто | Манера речи: `cute` (мягко, мило, «аниме»), `calm` (спокойно) или свой текст |
 | `AISANA_REALTIME_BARGE_IN` | `0` | Перебивать голосом (только с наушниками) |

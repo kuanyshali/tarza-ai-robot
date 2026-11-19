@@ -56,7 +56,7 @@ MIC_GAIN = float(os.environ.get('AISANA_MIC_GAIN', '1.0'))          # software g
 MIC_LEVEL = os.environ.get('AISANA_MIC_LEVEL', '0') == '1'           # print loudness once a second
 VAD_THRESHOLD = float(os.environ.get('AISANA_VAD_THRESHOLD', '0.5'))  # lower = hears quieter speech
 # far_field: the speaker stands a metre or more from the robot's microphone.
-NOISE_REDUCTION = os.environ.get('AISANA_NOISE_REDUCTION', 'far_field')
+NOISE_REDUCTION = os.environ.get('AISANA_NOISE_REDUCTION', 'off')   # far_field made her hear worse
 # Respond only after the name "Aisana" (then a timed follow-up window).
 WAKE_GATE = os.environ.get('AISANA_REALTIME_WAKE', '1') == '1'
 DIALOG_TIMEOUT = max(5.0, float(os.environ.get('AISANA_DIALOG_TIMEOUT', '12')))
@@ -915,7 +915,7 @@ class RealtimeAisana(object):
             with open('photo.jpg', 'rb') as photo:
                 return photo.read(), None
 
-    def people_note(self, frame):
+    def people_note(self, frame, quiet=False):
         """Notes for the vision model; who is who goes to Aisana herself (self.last_people):
         the vision model ignored the names and said "Извините, я не знаю, кто передо мной"."""
         self.last_people = ([], 0)
@@ -926,8 +926,9 @@ class RealtimeAisana(object):
         except Exception as exc:
             print('Face memory error:', exc)
             return ''
-        print('Faces: ' + (', '.join('{} {:.2f} {}'.format(f['name'] or 'unknown', f['distance'], f['where'])
-                                    for f in found) or 'none'))
+        if not quiet:
+            print('Faces: ' + (', '.join('{} {:.2f} {}'.format(f['name'] or 'unknown', f['distance'], f['where'])
+                                        for f in found) or 'none'))
         now = time.monotonic()
         known = []
         for face in found:
@@ -955,13 +956,13 @@ class RealtimeAisana(object):
                          'never invent names.'.format(strangers))
         return ' '.join(parts)
 
-    def inspect_camera(self, question, detail=None, extra=None):
+    def inspect_camera(self, question, detail=None, extra=None, quiet=False):
         """Capture one fresh frame and analyze it with the vision API."""
         started = time.monotonic()
         picture, frame = self.take_photo()
         captured = time.monotonic() - started
         encoded = base64.b64encode(picture).decode('ascii')
-        note = extra if extra is not None else self.people_note(frame)
+        note = extra if extra is not None else self.people_note(frame, quiet)
         response = requests.post(
             'https://api.openai.com/v1/chat/completions',
             headers={'Authorization': 'Bearer ' + KEY},
@@ -993,9 +994,10 @@ class RealtimeAisana(object):
         response.raise_for_status()
         data = response.json()
         choice = data['choices'][0]
-        print('Camera: photo {} KB in {:.1f}s, answered in {:.1f}s ({} tokens)'.format(
-            len(encoded) * 3 // 4 // 1024, captured, time.monotonic() - started,
-            data.get('usage', {}).get('total_tokens', '?')))
+        if not quiet:
+            print('Camera: photo {} KB in {:.1f}s, answered in {:.1f}s ({} tokens)'.format(
+                len(encoded) * 3 // 4 // 1024, captured, time.monotonic() - started,
+                data.get('usage', {}).get('total_tokens', '?')))
         content = choice.get('message', {}).get('content')
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError('Vision returned empty content (finish_reason={})'.format(
@@ -1176,7 +1178,7 @@ class RealtimeAisana(object):
             try:
                 box['text'] = self.inspect_camera(
                     'Кто и что сейчас передо мной? Кратко: люди, их одежда и поза, что в руках, '
-                    'главные предметы.', detail='low')
+                    'главные предметы.', detail='low', quiet=True)   # logged only if used
             except Exception as exc:
                 print('Camera prefetch failed:', exc)
             finally:
@@ -1205,7 +1207,9 @@ class RealtimeAisana(object):
             try:
                 seen = self.prefetched(transcript)
                 if seen:
-                    print('Camera (looked while you spoke) -> {}'.format(' '.join(seen.split())[:300]))
+                    known = self.people_report()
+                    print('Camera (looked while you spoke) -> {}{}'.format(' '.join(seen.split())[:300],
+                                                                          ' | ' + known if known else ''))
                 else:
                     seen = self.inspect_camera(transcript[:500])
                     print('Camera (from your words) -> {}'.format(' '.join(seen.split())[:300]))

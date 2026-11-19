@@ -550,7 +550,7 @@ class FaceMemoryRealtimeTests(unittest.TestCase):
     def test_camera_looks_while_the_user_speaks(self):
         session, sent = self.session('Али')
         looks = []
-        session.inspect_camera = lambda question, detail=None: looks.append(question) or 'Вижу человека.'
+        session.inspect_camera = lambda question, detail=None, quiet=False: looks.append(question) or 'Вижу человека.'
         session.handle({'type': 'input_audio_buffer.speech_started'})
         time.sleep(0.1)
         self.assertEqual(len(looks), 1)                      # started before the words arrived
