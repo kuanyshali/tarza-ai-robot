@@ -64,6 +64,13 @@ def is_stop_phrase(text):
     return _short(text) and bool(STOP_PATTERN.search((text or '').casefold()))
 
 
+def is_prompt_echo(text):
+    """STT sometimes 'hears' its own hint on noise: 'Айсана, Айсана, Эйсана...'."""
+    words = re.findall(r'[^\W\d_]+', (text or '').casefold())
+    names = [w for w in words if WAKE_PATTERN.match(w)]
+    return len(names) >= 3 and len(names) >= len(words) - 1
+
+
 def is_sleep_phrase(text):
     return _short(text) and bool(SLEEP_PATTERN.search((text or '').casefold()))
 
@@ -145,6 +152,8 @@ PROMPT = (
     'Do not say you have no camera or no visual access unless that tool actually fails. '
     'For other questions do not use the camera. '
     'ARMS: you have two physical arms with grippers, controlled by move_arm. '
+    'Call move_arm FIRST and silently, without saying anything before the call; '
+    'never say the arm is moving before move_arm has returned. '
     'Call move_arm only when the user explicitly asks to move an arm, go to a numbered '
     'position, open or close a gripper, stop the arms or report their status. '
     'Positions are numbered 0 to 4; 0 is the zero (home) position. If the user does not '
@@ -198,6 +207,7 @@ class RealtimeAisana(object):
         self.handled_calls = set()
         self.calls_lock = threading.Lock()
         self.mic_device = None
+        self.transcript_open = False
 
     def dialog_active(self):
         return time.monotonic() < self.dialog_until
@@ -283,7 +293,6 @@ class RealtimeAisana(object):
                 with self.play_lock:
                     self.playback = p
                     self.playing = True
-                print('Aisana: speaking...')
             try:
                 p.stdin.write(chunk)
             except (IOError, OSError, ValueError):
@@ -421,6 +430,11 @@ class RealtimeAisana(object):
 
     def handle_transcript(self, item_id, transcript):
         print('You:', transcript)
+        if is_prompt_echo(transcript):
+            print('Transcript looks like noise (repeated names); ignored.')
+            if WAKE_GATE and item_id not in self.responded_items:
+                self.ignore_item(item_id)
+            return
         if is_stop_phrase(transcript):
             if self.arm is not None:
                 self.arm.emergency_stop()
@@ -459,8 +473,12 @@ class RealtimeAisana(object):
             if not self.playback_interrupted:
                 self.queue_audio('audio', base64.b64decode(e.get('delta', '')))
         elif typ == 'response.output_audio_transcript.delta':
+            if not self.transcript_open:
+                self.transcript_open = True
+                print('Aisana: ', end='', flush=True)
             print(e.get('delta', ''), end='', flush=True)
         elif typ == 'response.output_audio_transcript.done':
+            self.transcript_open = False
             print('')
         elif typ == 'input_audio_buffer.committed':
             # Inside an open dialogue answer at once, without waiting for STT.
@@ -515,7 +533,8 @@ class RealtimeAisana(object):
                             # Transcripts drive the wake-name gate and voice "stop".
                             'transcription': {
                                 'model': STT_MODEL,
-                                'prompt': 'Aisana, Aysana, Айсана, Эйсана, آيسانا. Russian, Kazakh, English, Egyptian Arabic.'
+                                # A list of names here gets echoed back on noise.
+                                'prompt': 'Speech may be Russian, Kazakh, English or Egyptian Arabic. The robot is called Aisana.'
                             },
                             'turn_detection': {
                                 'type': 'server_vad',

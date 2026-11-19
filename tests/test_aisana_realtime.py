@@ -43,6 +43,11 @@ class WakePhraseTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertFalse(rt.has_wake_name(text))
 
+    def test_stt_prompt_echo_is_not_a_request(self):
+        self.assertTrue(rt.is_prompt_echo('Айсана, Айсана, Айсана, Эйсана, آيسانا.'))
+        self.assertFalse(rt.is_prompt_echo('Айсана, правая рука, позиция один.'))
+        self.assertFalse(rt.is_prompt_echo('Айсана, привет'))
+
     def test_stop_and_sleep_only_for_short_phrases(self):
         self.assertTrue(rt.is_stop_phrase('Айсана, стоп!'))
         self.assertTrue(rt.is_stop_phrase('stop'))
@@ -78,6 +83,13 @@ class WakeGateTests(unittest.TestCase):
         session.handle({'type': 'conversation.item.input_audio_transcription.completed',
                         'item_id': 'i2', 'transcript': 'а как дела?'})
         self.assertEqual(len(sent), 2)            # not answered twice
+
+    def test_prompt_echo_dropped_even_with_names(self):
+        session, sent = make_session()
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'e1', 'transcript': 'Айсана, Айсана, Айсана, Эйсана, آيسانا.'})
+        self.assertEqual(sent, [{'type': 'conversation.item.delete', 'item_id': 'e1'}])
+        self.assertFalse(session.dialog_active())
 
     def test_window_expires(self):
         session, sent = make_session()

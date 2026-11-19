@@ -78,6 +78,17 @@ class PortDetectionTests(unittest.TestCase):
         ports = [SimpleNamespace(device='/dev/ttyUSB0', vid=0x1A86)]
         self.assertEqual(arm.find_arduino_port(ports, environ={}), '/dev/ttyUSB0')
 
+    def test_genuine_arduino_preferred_over_other_acm_device(self):
+        ports = [SimpleNamespace(device='/dev/ttyACM0', vid=0x1546, description='u-blox GPS'),
+                 SimpleNamespace(device='/dev/ttyACM1', vid=0x2341, description='Arduino Mega 2560')]
+        self.assertEqual(arm.find_arduino_port(ports, environ={}), '/dev/ttyACM1')
+
+    def test_two_unknown_acm_devices_listed_in_error(self):
+        ports = [SimpleNamespace(device='/dev/ttyACM0', vid=None, description='n/a'),
+                 SimpleNamespace(device='/dev/ttyACM1', vid=None, description='n/a')]
+        with self.assertRaisesRegex(arm.ArmError, 'by-id'):
+            arm.find_arduino_port(ports, environ={})
+
     def test_several_boards_refused(self):
         ports = [SimpleNamespace(device='/dev/ttyACM0', vid=0x2341),
                  SimpleNamespace(device='/dev/ttyACM1', vid=0x2341)]

@@ -25,8 +25,10 @@ READY_TEXT = 'Both arms ready'
 ARM_LETTERS = {'right': 'r', 'left': 'l', 'both': 'b'}
 JOINT_LETTERS = {'whole': '', 'shoulder': 'm', 'elbow': 's'}
 ACTIONS = ('position', 'gripper_open', 'gripper_close', 'stop', 'status')
-# USB vendor IDs of genuine Arduino boards and common clone USB-serial chips.
-ARDUINO_VIDS = (0x2341, 0x2A03, 0x1A86, 0x0403, 0x10C4)
+# USB vendor IDs: genuine Arduino boards, then common clone USB-serial chips.
+GENUINE_ARDUINO_VIDS = (0x2341, 0x2A03)
+CLONE_SERIAL_VIDS = (0x1A86, 0x0403, 0x10C4)
+ARDUINO_VIDS = GENUINE_ARDUINO_VIDS + CLONE_SERIAL_VIDS
 
 
 class ArmError(RuntimeError):
@@ -60,8 +62,19 @@ def build_command(action, arm='both', position=None, joint='whole'):
     raise ArmError('Unknown arm action: {!r}'.format(action))
 
 
+def _describe(port):
+    vid = getattr(port, 'vid', None)
+    return '{} ({}{})'.format(
+        port.device, getattr(port, 'description', None) or 'unknown device',
+        ', VID {:04x}'.format(vid) if vid is not None else '')
+
+
 def find_arduino_port(ports=None, environ=None):
-    """Return exactly one Arduino serial port; never guess between several."""
+    """Return exactly one Arduino serial port; never guess between equals.
+
+    Preference: genuine Arduino USB IDs, then common clone USB-serial chips,
+    then any /dev/ttyACM*. Several ports in the best tier is an error.
+    """
     environ = os.environ if environ is None else environ
     override = environ.get('AISANA_ARM_PORT', '').strip()
     if override:
@@ -69,17 +82,23 @@ def find_arduino_port(ports=None, environ=None):
     if ports is None:
         from serial.tools import list_ports
         ports = list_ports.comports()
-    matches = sorted(set(
-        port.device for port in ports
-        if getattr(port, 'vid', None) in ARDUINO_VIDS
-        or 'ttyACM' in (getattr(port, 'device', '') or '')
-    ))
-    if len(matches) != 1:
-        raise ArmError(
-            'Expected one Arduino serial port, found {}: {}. '
-            'Plug in the Arduino Mega or set AISANA_ARM_PORT=/dev/ttyACM0.'.format(
-                len(matches), ', '.join(matches) or 'none'))
-    return matches[0]
+    ports = list(ports)
+    tiers = (
+        [p for p in ports if getattr(p, 'vid', None) in GENUINE_ARDUINO_VIDS],
+        [p for p in ports if getattr(p, 'vid', None) in CLONE_SERIAL_VIDS],
+        [p for p in ports if 'ttyACM' in (getattr(p, 'device', '') or '')],
+    )
+    for tier in tiers:
+        devices = sorted(set(p.device for p in tier))
+        if len(devices) == 1:
+            return devices[0]
+        if len(devices) > 1:
+            raise ArmError(
+                'Expected one Arduino serial port, found {}: {}. '
+                'Set AISANA_ARM_PORT to the right one (see ls -l /dev/serial/by-id/).'.format(
+                    len(devices), '; '.join(_describe(p) for p in tier)))
+    raise ArmError('Expected one Arduino serial port, found 0. Plug in the Arduino Mega '
+                   'or set AISANA_ARM_PORT=/dev/ttyACM0.')
 
 
 class ArmController(object):
