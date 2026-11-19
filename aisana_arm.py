@@ -62,6 +62,12 @@ def build_command(action, arm='both', position=None, joint='whole'):
     raise ArmError('Unknown arm action: {!r}'.format(action))
 
 
+def _is_known_non_arduino(port):
+    text = ' '.join(str(getattr(port, name, '') or '') for name in
+                    ('description', 'manufacturer', 'product', 'hwid'))
+    return bool(re.search(r'xiaomi|composite device|KT USB Audio', text, re.I))
+
+
 def _describe(port):
     vid = getattr(port, 'vid', None)
     return '{} ({}{})'.format(
@@ -86,7 +92,10 @@ def find_arduino_port(ports=None, environ=None):
     tiers = (
         [p for p in ports if getattr(p, 'vid', None) in GENUINE_ARDUINO_VIDS],
         [p for p in ports if getattr(p, 'vid', None) in CLONE_SERIAL_VIDS],
-        [p for p in ports if 'ttyACM' in (getattr(p, 'device', '') or '')],
+        # Last resort: a ttyACM port that reports no USB IDs at all. Ports of
+        # other known devices (the Xiaomi speaker exposes /dev/ttyACM0!) never count.
+        [p for p in ports if 'ttyACM' in (getattr(p, 'device', '') or '')
+         and getattr(p, 'vid', None) is None and not _is_known_non_arduino(p)],
     )
     for tier in tiers:
         devices = sorted(set(p.device for p in tier))

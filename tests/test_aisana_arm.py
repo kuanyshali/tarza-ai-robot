@@ -83,6 +83,20 @@ class PortDetectionTests(unittest.TestCase):
                  SimpleNamespace(device='/dev/ttyACM1', vid=0x2341, description='Arduino Mega 2560')]
         self.assertEqual(arm.find_arduino_port(ports, environ={}), '/dev/ttyACM1')
 
+    def test_real_jetson_ports_arduino_next_to_xiaomi(self):
+        # From the Jetson: ls -l /dev/serial/by-id/ on 2026-11-19
+        xiaomi = SimpleNamespace(device='/dev/ttyACM0', vid=0x2717,
+                                 description='USB Composite Device', manufacturer='Xiaomi Communications Co., Ltd.')
+        arduino = SimpleNamespace(device='/dev/ttyACM1', vid=0x2341,
+                                  description='Arduino Mega 2560', manufacturer='Arduino (www.arduino.cc)')
+        self.assertEqual(arm.find_arduino_port([xiaomi, arduino], environ={}), '/dev/ttyACM1')
+        # Arduino unplugged: never fall back to the speaker's serial port.
+        with self.assertRaisesRegex(arm.ArmError, 'found 0'):
+            arm.find_arduino_port([xiaomi], environ={})
+        no_ids = SimpleNamespace(device='/dev/ttyACM0', vid=None, description='USB Composite Device')
+        with self.assertRaisesRegex(arm.ArmError, 'found 0'):
+            arm.find_arduino_port([no_ids], environ={})
+
     def test_two_unknown_acm_devices_listed_in_error(self):
         ports = [SimpleNamespace(device='/dev/ttyACM0', vid=None, description='n/a'),
                  SimpleNamespace(device='/dev/ttyACM1', vid=None, description='n/a')]
