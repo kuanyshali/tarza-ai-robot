@@ -123,6 +123,38 @@ OBSTACLE_PHRASES = {
 SILENT_RESULT = '[silent] '          # tool results that need no spoken reply
 
 
+def humor_instructions(humor):
+    """Personality by humor setting, like the robot TARS in Interstellar ("humor 75%")."""
+    if humor >= 70:
+        return ('PERSONALITY (humor setting {}%): dry, deadpan, confident sarcasm like the robot TARS '
+                'from Interstellar. Almost every answer gets a sharp ironic twist or a robot joke '
+                'about yourself or the situation; roast people playfully. Still ONE short sentence. '
+                'Never cruel; never joke about anyone\'s body, weight, looks, ethnicity, religion, '
+                'health or disability. When asked who is in front of you, call the person "какой-то '
+                'красавчик" or "какая-то красавица" (English: "some handsome stranger") and add one '
+                'funny remark about what you actually see (clothes, pose, what they hold). '
+                'If asked about your humor setting, say it is {}%. '.format(humor, humor))
+    if humor >= 30:
+        return ('PERSONALITY (humor setting {}%): friendly with light irony now and then, mostly '
+                'helpful. If asked about your humor setting, say it is {}%. '.format(humor, humor))
+    return ('PERSONALITY (humor setting {}%): polite, plain and factual, no jokes. '
+            'If asked about your humor setting, say it is {}%. '.format(humor, humor))
+
+
+HUMOR_RE = re.compile(r'(?:юмор\w*|сарказм\w*|\bhumou?r\b|\bsarcasm\b|әзіл\w*)\D{0,20}?(\d{1,3})', re.I)
+# Visual questions are answered by the camera at once, in first person.
+CAMERA_RE = re.compile(
+    r'(?:кто (?:\w+ )?(?:перед тобой|передо мной|рядом|тут|здесь|это)|что (?:ты )?(?:\w+ )?видишь|'
+    r'что (?:у меня|я) (?:\w+ )?(?:в руке|в руках|держу)|что (?:это|перед тобой|тут|здесь)\b|'
+    r'посмотри|прочитай|прочти|как я выгляжу|сколько (?:тут |здесь )?(?:людей|человек|пальцев)|'
+    r'\bwho (?:is|\'s) (?:in front|there|this|that)|what (?:do|can) you see|what am i holding|'
+    r'what is (?:this|that|in my hand)|look at|read (?:this|it)|how do i look|кім бар|не көріп тұрсың)', re.I)
+READ_RE = re.compile(r'(?:прочитай|прочти|что написано|переведи|формул|текст|\bread\b|translate|written)', re.I)
+# Her own recorded shouts heard back by the microphone.
+SHOUT_ECHO_RE = re.compile(
+    r'^(?:\W*(?:у+и+|и+и+|ви+|уи+|вжу+х|фыжу+х|вжух|пы+|полетели|ура+|whe+|we+|wee+|йу+ху+|вау)\W*)+$', re.I)
+
+
 def language_of(text):
     """Language of the user's words by script: the reply must use the same one."""
     text = text or ''
@@ -256,9 +288,8 @@ PROMPT = (
     'English question -> English answer. Russian question -> Russian answer. '
     'Kazakh question -> Kazakh answer. Never switch languages unless explicitly asked. '
     'If the user asks about an English technical topic in Russian, answer in Russian. '
-    'PERSONALITY: witty, playful and a little sarcastic, friendly teasing, never rude; '
-    'the joke fits inside the same ONE short sentence. '
     'You may shout or sing short playful exclamations when asked ("Уииии!", "Ура!"). '
+    'Never say out loud that you are staying quiet or silent; just call stay_silent. '
     'SILENCE RULE: during a conversation people around you also talk to each other. If the latest '
     'speech is not a request or question for you (chatter, noise, fragments such as "Инерция же", '
     '"Мушакал", "крепление, если будет болтаться"), call stay_silent and say nothing. '
@@ -428,6 +459,7 @@ class RealtimeAisana(object):
         self.arm_lock = threading.Lock()
         self.last_arm_at = 0.0
         self.local_items = set()            # commands already run from the user's words
+        self.humor = max(0, min(100, int(os.environ.get('AISANA_HUMOR', '75'))))
         self.shouts = ShoutPlayer()
         self.oob_ids = set()                # out-of-band responses (shout recording)
         self.shout_buffer = bytearray()
@@ -774,7 +806,7 @@ class RealtimeAisana(object):
                 print('Microphone/connection error:', exc)
                 self.stop.set()
 
-    def inspect_camera(self, question):
+    def inspect_camera(self, question, detail=None):
         """Capture one fresh IMX219 frame and analyze it with the vision API."""
         with self.camera_lock:
             # camera.py uses the Jetson GStreamer camera pipeline and writes photo.jpg.
@@ -796,8 +828,10 @@ class RealtimeAisana(object):
             json={'model': os.environ.get('AISANA_VISION_MODEL', 'gpt-4o-mini'),
                   'messages': [
                       {'role': 'system', 'content': (
-                          'You are a visual observer. The user message includes a real camera image. '
-                          'Inspect the attached image and describe only what is visible. '
+                          'You are the eyes of Aisana, a robot; the image is what she sees right now. '
+                          'Write in FIRST PERSON as Aisana looking with her own eyes ("Вижу...", '
+                          '"Передо мной..."). Never say photo, image, picture, frame, снимок, фото, '
+                          'изображение or кадр. Describe only what is visible. '
                           'Do not claim you cannot access images or ask the user to describe it. '
                           'If the image is dark, blurry or unclear, describe what you can see and note the limitation. '
                           'Answer in at most two short sentences, most noticeable things first. '
@@ -810,7 +844,9 @@ class RealtimeAisana(object):
                           '. Be concise, factual, and avoid guessing unseen details. '
                           'Use the same language as the question.')},
                       {'type': 'image_url', 'image_url': {
-                          'url': 'data:image/jpeg;base64,' + encoded, 'detail': 'high'}}
+                          'url': 'data:image/jpeg;base64,' + encoded,
+                          # low = fast (~1 s) for "кто передо мной"; high only to read text
+                          'detail': detail or ('high' if READ_RE.search(question) else 'low')}}
                   ]}], 'max_tokens': 300},
             timeout=(10, 45))
         response.raise_for_status()
@@ -828,6 +864,10 @@ class RealtimeAisana(object):
     def run_tool(self, name, args):
         """Execute one tool call; every result is plain text for the model."""
         if name == 'inspect_camera':
+            item_id = self.last_item
+            self.wait_transcript(item_id, timeout=1.5)
+            if item_id in self.local_items:
+                return SILENT_RESULT + 'Already looked from the user\'s words.'
             question = str(args.get('question') or 'What is visible?')[:500]
             return self.inspect_camera(question)
         if name == 'move_arm':
@@ -901,6 +941,58 @@ class RealtimeAisana(object):
             if not self.stop.is_set():
                 print('Tool response error:', exc)
 
+    def instructions(self):
+        return PROMPT + humor_instructions(self.humor) + voice_style_instructions()
+
+    def set_humor(self, item_id, value):
+        """"Айсана, юмор 60 процентов" - changes her personality live."""
+        self.humor = max(0, min(100, value))
+        print('Humor setting: {}%'.format(self.humor))
+        with self.arm_lock:
+            self.responded_items.add(item_id)
+            self.local_items.add(item_id)
+        self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+        self.cancel_reply()
+        self.send({'type': 'session.update', 'session': {'type': 'realtime', 'instructions': self.instructions()}})
+        self.expect_tool_response = True
+        self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (
+            'Your humor setting is now {}%. Confirm it in ONE short sentence in that exact style.'.format(
+                self.humor))}})
+
+    def run_camera_locally(self, item_id, transcript):
+        """Visual question: look at once and answer in first person, no "секунду, посмотрю"."""
+        with self.arm_lock:
+            self.responded_items.add(item_id)
+            self.local_items.add(item_id)
+        self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+        self.cancel_reply()
+
+        def worker():
+            try:
+                seen = self.inspect_camera(transcript[:500])
+                print('Camera (from your words) -> {}'.format(' '.join(seen.split())[:300]))
+                report = 'What you see with your own eyes right now: ' + seen
+            except Exception as exc:
+                print('Camera FAILED: {}'.format(exc))
+                report = 'Your eyes (camera) are not working right now: {}'.format(exc)
+            deadline = time.monotonic() + 3
+            while self.responding and time.monotonic() < deadline and not self.stop.is_set():
+                time.sleep(0.05)
+            if self.stop.is_set():
+                return
+            try:
+                self.send({'type': 'conversation.item.create', 'item': {
+                    'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': report}]}})
+                self.expect_tool_response = True
+                self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (
+                    'Answer the user\'s question in FIRST PERSON, as if you see it with your own eyes '
+                    '("Вижу...", "Передо мной..."). Never mention a photo, picture, image, snapshot or '
+                    'camera. Apply your humor setting. One or two short sentences, no questions.')}})
+            except Exception as exc:
+                if not self.stop.is_set():
+                    print('Camera report error:', exc)
+        threading.Thread(target=worker, daemon=True).start()
+
     def motion_active(self):
         return time.monotonic() < self.motion_until
 
@@ -932,7 +1024,8 @@ class RealtimeAisana(object):
             self.transcripts[item_id] = transcript
             self.transcript_cond.notify_all()
         held = self.hold_item == item_id
-        if not re.search(r'\w', transcript or '') or is_prompt_echo(transcript):
+        if not re.search(r'\w', transcript or '') or is_prompt_echo(transcript) \
+                or SHOUT_ECHO_RE.match(transcript.strip()):
             # Noise or the STT hint repeated back: never a request, never a move.
             print('Empty speech or noise; ignored.')
             if held:
@@ -984,6 +1077,17 @@ class RealtimeAisana(object):
             if held:
                 self.release_hold(drop=True)
             self.run_command_locally(item_id, arm_intents, drive)
+            return
+        humor = HUMOR_RE.search(transcript) if addressed and not stop else None
+        if humor:
+            if held:
+                self.release_hold(drop=True)
+            self.set_humor(item_id, int(humor.group(1)))
+            return
+        if addressed and not stop and CAMERA_RE.search(transcript):
+            if held:
+                self.release_hold(drop=True)
+            self.run_camera_locally(item_id, transcript)
             return
         if held:
             self.release_hold(drop=False)              # an ordinary question: play the answer
@@ -1190,7 +1294,7 @@ class RealtimeAisana(object):
                 'session': {
                     'type': 'realtime',
                     'model': MODEL,
-                    'instructions': PROMPT + voice_style_instructions(),
+                    'instructions': self.instructions(),
                     'tools': tool_definitions(),
                     'tool_choice': 'auto',
                     'output_modalities': ['audio'],

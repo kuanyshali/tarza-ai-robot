@@ -252,6 +252,65 @@ class MotionAndChatterTests(unittest.TestCase):
         self.assertEqual(rt.shout_request('крикни «Ура»'), 'Ура')
 
 
+class HumorAndCameraTests(unittest.TestCase):
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_tars_style_humor_setting(self):
+        text = rt.humor_instructions(75)
+        self.assertIn('TARS', text)
+        self.assertIn('красавчик', text)
+        self.assertIn('never joke about', text.replace("Never", 'never'))
+        self.assertIn('no jokes', rt.humor_instructions(10))
+
+    def test_voice_command_changes_humor(self):
+        session, sent = make_session()
+        say(session, 'u1', 'Айсана, юмор 60 процентов')
+        self.assertEqual(session.humor, 60)
+        update = [m for m in sent if m['type'] == 'session.update'][0]
+        self.assertIn('humor setting 60%', update['session']['instructions'])
+        self.assertEqual(sent[-1]['type'], 'response.create')
+
+    def test_who_is_in_front_answers_in_first_person_at_once(self):
+        # Jetson log: "Секунду, я посмотрю..." then "На снимке изображён человек..."
+        session, sent = make_session()
+        session.inspect_camera = lambda question, detail=None: 'Вижу человека в тёмной футболке.'
+        say(session, 'c1', 'Айсана, кто перед тобой?')
+        time.sleep(0.2)
+        self.assertIn('own eyes', sent[-2]['item']['content'][0]['text'])
+        self.assertIn('FIRST PERSON', sent[-1]['response']['instructions'])
+        self.assertIn('Never mention a photo', sent[-1]['response']['instructions'])
+        # The model's own camera call for the same words stays silent (no double answer).
+        self.assertTrue(session.run_tool('inspect_camera', {'question': 'кто?'}).startswith(rt.SILENT_RESULT))
+
+    def test_camera_phrases(self):
+        for text in ('Айсана, кто перед тобой?', 'что ты сейчас видишь?', 'что у меня в руке?',
+                     'прочитай что тут написано', 'what do you see?', 'who is in front of you?'):
+            with self.subTest(text=text):
+                self.assertTrue(rt.CAMERA_RE.search(text))
+        self.assertFalse(rt.CAMERA_RE.search('как дела?'))
+        self.assertTrue(rt.READ_RE.search('прочитай что тут написано'))
+        self.assertFalse(rt.READ_RE.search('кто перед тобой?'))
+
+    def test_her_own_shouts_are_ignored(self):
+        # Jetson log: "Уи" -> "I'm staying quiet."
+        for text in ('Уи', 'Уиииии!', 'Вжууух, уиии', 'Wheee!'):
+            with self.subTest(text=text):
+                self.assertTrue(rt.SHOUT_ECHO_RE.match(text))
+        self.assertFalse(rt.SHOUT_ECHO_RE.match('Ура, получилось'))
+        session, sent = make_session()
+        session.dialog_until = time.monotonic() + 20
+        say(session, 'w1', 'Уи')
+        # The reply started at commit was held; it is dropped and never played.
+        self.assertEqual(sent[-1], {'type': 'conversation.item.delete', 'item_id': 'w1'})
+        self.assertIsNone(session.hold_item)
+        self.assertTrue(session.audio_queue.empty())
+
+
 class VoiceStyleTests(unittest.TestCase):
     def test_voice_style_presets(self):
         import os
