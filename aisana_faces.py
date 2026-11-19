@@ -2,8 +2,8 @@
 
 - CameraStream keeps the Jetson camera open and always holds a fresh frame,
   so "кто перед тобой?" no longer waits 2-3 s for the camera to start.
-- FaceMemory finds faces with the OpenCV res10 SSD detector and turns each
-  face into 128 numbers with OpenFace (both run on cv2.dnn, no pip installs).
+- FaceMemory finds faces and 5 landmarks with YuNet, aligns them and turns
+  each face into 128 numbers with SFace (both run on cv2.dnn, no pip installs).
   Only those numbers and the name are stored, never photos of people, and
   only when the person asks ("Айсана, запомни меня, я Али"). Unknown faces
   are never stored. "Айсана, забудь меня" deletes them.
@@ -22,25 +22,31 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.expanduser(os.environ.get('AISANA_MODELS_DIR', os.path.join(HERE, 'models')))
 DATA_DIR = os.path.expanduser(os.environ.get('AISANA_DATA_DIR', '~/.local/share/aisana'))
-DB_PATH = os.path.expanduser(os.environ.get('AISANA_FACES_DB', os.path.join(DATA_DIR, 'faces.sqlite3')))
-# L2 distance between normalized OpenFace vectors: same person is usually < 0.7.
-THRESHOLD = float(os.environ.get('AISANA_FACE_THRESHOLD', '0.8'))
+# New file for SFace: the old OpenFace vectors cannot be compared with these.
+DB_PATH = os.path.expanduser(os.environ.get('AISANA_FACES_DB', os.path.join(DATA_DIR, 'faces_sface.sqlite3')))
+# L2 distance between normalized SFace vectors: same person ~0.2-0.6, others ~1.2+.
+THRESHOLD = float(os.environ.get('AISANA_FACE_THRESHOLD', '1.0'))
+MARGIN = 0.12                     # the best person must beat the second best by this much
 MIN_FACE_PX = int(os.environ.get('AISANA_FACE_MIN_PX', '40'))
 MAX_VIEWS = 40                    # stored views per person (it keeps learning new angles)
 ENABLED = os.environ.get('AISANA_FACES', '1') == '1'
 
+# YuNet (face + 5 landmarks, MIT) converted for JetPack OpenCV 4.1.1 by
+# tools/convert_yunet.py and kept in the repo; SFace (Apache-2.0) is downloaded.
+# Landmarks let the face be aligned before SFace: OpenFace on unaligned crops
+# could not tell Куаныш from Шынгыс (Jetson log, Nov 20).
+YUNET_PATH = os.path.join(HERE, 'face_models', 'yunet_320_opencv41.onnx')
 MODELS = {
-    'deploy.prototxt': (
-        'https://raw.githubusercontent.com/opencv/opencv/4.1.1/samples/dnn/face_detector/deploy.prototxt',
-        '1e5a51172abe1e4052c27a3488f99d86dfec9b962191bc999a98261990be5d64'),
-    'res10_300x300_ssd_iter_140000.caffemodel': (
-        'https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20170830/'
-        'res10_300x300_ssd_iter_140000.caffemodel',
-        '2a56a11a57a4a295956b0660b4a3d76bbdca2206c4961cea8efe7d95c7cb2f2d'),
-    'openface.nn4.small2.v1.t7': (
-        'https://raw.githubusercontent.com/pyannote/pyannote-data/master/openface.nn4.small2.v1.t7',
-        '9b72d54aeb24a64a8135dca8e792f7cc675c99a884a6940350a6cedcf7b7ba08'),
+    'face_recognition_sface_2021dec.onnx': (
+        'https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_recognition_sface/'
+        'face_recognition_sface_2021dec.onnx',
+        '0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79'),
 }
+YUNET_OUTPUTS = ['cls_8', 'cls_16', 'cls_32', 'obj_8', 'obj_16', 'obj_32',
+                 'bbox_8', 'bbox_16', 'bbox_32', 'kps_8', 'kps_16', 'kps_32']
+# Where SFace expects the eyes, nose and mouth corners in its 112x112 input.
+SFACE_TEMPLATE = ((38.2946, 51.6963), (73.5318, 51.5014), (56.0252, 71.7366),
+                  (41.5493, 92.3655), (70.7299, 92.2041))
 
 PIPELINE = (
     'nvarguscamerasrc ! video/x-raw(memory:NVMM), width=1280, height=720, framerate=30/1 ! '
@@ -57,7 +63,7 @@ def _sha256(path):
 
 
 def ensure_models(folder=MODELS_DIR, download=True):
-    """Paths of the three model files; downloads (about 42 MB, once) if missing."""
+    """Paths of the model files; downloads SFace (about 39 MB, once) if missing."""
     if not os.path.isdir(folder):
         os.makedirs(folder)
     paths = {}
@@ -79,6 +85,7 @@ def ensure_models(folder=MODELS_DIR, download=True):
                 raise RuntimeError('face model {} is corrupted (checksum)'.format(name))
             os.rename(part, path)
         paths[name] = path
+    paths['yunet'] = YUNET_PATH
     return paths
 
 
@@ -172,15 +179,28 @@ def jpeg(frame, quality=80):
     return data.tobytes()
 
 
-def square_crop(frame, box, margin=0.1):
-    """The face as a square with a little margin: the same framing every time
-    (the detector box changes shape from frame to frame)."""
-    height, width = frame.shape[:2]
-    x1, y1, x2, y2 = box[:4]
-    side = int(max(x2 - x1, y2 - y1) * (1 + margin))
-    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-    left, top = max(0, cx - side // 2), max(0, cy - side // 2)
-    return frame[top:min(height, top + side), left:min(width, left + side)]
+def decode_yunet(outputs, size=320, threshold=0.6):
+    """YuNet raw outputs -> [(x1, y1, x2, y2, score, landmarks)] in input pixels."""
+    import numpy as np
+    faces = []
+    for k, stride in enumerate((8, 16, 32)):
+        cls, obj = outputs[k][0][:, 0], outputs[3 + k][0][:, 0]
+        bbox, kps = outputs[6 + k][0], outputs[9 + k][0]
+        cols = size // stride
+        score = np.sqrt(np.clip(cls, 0, 1) * np.clip(obj, 0, 1))
+        for idx in np.where(score > threshold)[0]:
+            row, col = divmod(int(idx), cols)
+            cx, cy = (col + bbox[idx, 0]) * stride, (row + bbox[idx, 1]) * stride
+            w, h = np.exp(bbox[idx, 2]) * stride, np.exp(bbox[idx, 3]) * stride
+            points = [((kps[idx, 2 * p] + col) * stride, (kps[idx, 2 * p + 1] + row) * stride) for p in range(5)]
+            faces.append((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, float(score[idx]), points))
+    faces.sort(key=lambda f: -f[4])
+    kept = []
+    for face in faces:                 # drop overlapping duplicates
+        if all(face[2] < k[0] or face[0] > k[2] or face[3] < k[1] or face[1] > k[3]
+               or abs((face[0] + face[2]) - (k[0] + k[2])) > (k[2] - k[0]) * 0.5 for k in kept):
+            kept.append(face)
+    return kept
 
 
 class FaceMemory(object):
@@ -223,34 +243,50 @@ class FaceMemory(object):
         if self.nets is None:
             import cv2
             paths = self.models or ensure_models()
-            detector = cv2.dnn.readNetFromCaffe(paths['deploy.prototxt'],
-                                                paths['res10_300x300_ssd_iter_140000.caffemodel'])
-            embedder = cv2.dnn.readNetFromTorch(paths['openface.nn4.small2.v1.t7'])
+            detector = cv2.dnn.readNetFromONNX(paths['yunet'])
+            embedder = cv2.dnn.readNetFromONNX(paths['face_recognition_sface_2021dec.onnx'])
             self.nets = (detector, embedder)
         return self.nets
 
-    def detect(self, frame, min_confidence=0.5):
-        """Face boxes [(x1, y1, x2, y2, confidence)], biggest first."""
+    def _yunet(self, image, threshold):
+        """Faces in any image: padded to a square, run at 320x320, mapped back."""
+        import cv2
+        import numpy as np
+        height, width = image.shape[:2]
+        side = max(height, width)
+        square = np.zeros((side, side, 3), dtype=np.uint8)
+        square[:height, :width] = image
+        scale = side / 320.0
+        detector = self._load_nets()[0]
+        with self.lock:
+            detector.setInput(cv2.dnn.blobFromImage(cv2.resize(square, (320, 320))))
+            outputs = detector.forward(YUNET_OUTPUTS)
+        return [(x1 * scale, y1 * scale, x2 * scale, y2 * scale, score, [(x * scale, y * scale) for x, y in points])
+                for x1, y1, x2, y2, score, points in decode_yunet(outputs, 320, threshold)]
+
+    def detect(self, frame, min_confidence=0.6):
+        """Faces [(x1, y1, x2, y2, confidence, landmarks)], biggest first.
+
+        A second pass on a crop around each face gives precise landmarks:
+        at 320 px for the whole frame the same person drifted to distance 1.0."""
         if self.detector is not None:
             return self.detector(frame)
-        import cv2
-        detector = self._load_nets()[0]
         height, width = frame.shape[:2]
-        blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
-        with self.lock:
-            detector.setInput(blob)
-            found = detector.forward()
-        boxes = []
-        for i in range(found.shape[2]):
-            confidence = float(found[0, 0, i, 2])
-            if confidence < min_confidence:
+        found = []
+        for x1, y1, x2, y2, score, points in self._yunet(frame, min_confidence):
+            if x2 - x1 < MIN_FACE_PX:
                 continue
-            x1, y1, x2, y2 = (found[0, 0, i, 3:7] * [width, height, width, height]).astype(int)
-            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
-            if x2 - x1 >= MIN_FACE_PX and y2 - y1 >= MIN_FACE_PX:
-                boxes.append((x1, y1, x2, y2, confidence))
-        boxes.sort(key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
-        return boxes
+            side = int(max(x2 - x1, y2 - y1) * 1.8)
+            left = int(max(0, (x1 + x2) / 2 - side / 2))
+            top = int(max(0, (y1 + y2) / 2 - side / 2))
+            crop = frame[top:min(height, top + side), left:min(width, left + side)]
+            fine = self._yunet(crop, 0.5) if crop.size else []
+            if fine:
+                points = [(x + left, y + top) for x, y in fine[0][5]]
+            box = (max(0, int(x1)), max(0, int(y1)), min(width, int(x2)), min(height, int(y2)))
+            found.append(box + (score, points))
+        found.sort(key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
+        return found
 
     def embed(self, frame, box):
         import numpy as np
@@ -259,24 +295,35 @@ class FaceMemory(object):
         else:
             import cv2
             embedder = self._load_nets()[1]
-            face = square_crop(frame, box)
-            blob = cv2.dnn.blobFromImage(face, 1.0 / 255, (96, 96), (0, 0, 0), swapRB=True, crop=False)
+            matrix, _ = cv2.estimateAffinePartial2D(np.array(box[5], dtype=np.float32),
+                                                    np.array(SFACE_TEMPLATE, dtype=np.float32),
+                                                    method=cv2.LMEDS)
+            face = cv2.warpAffine(frame, matrix, (112, 112))
             with self.lock:
-                embedder.setInput(blob)
+                embedder.setInput(cv2.dnn.blobFromImage(face, 1.0, (112, 112), (0, 0, 0), True, False))
                 vector = embedder.forward().flatten().astype(np.float32)
         norm = float(np.linalg.norm(vector)) or 1.0
         return vector / norm
 
     def identify(self, vector):
-        """(name, distance) of the closest known face, name None if nobody is close."""
+        """(name, distance) of the closest known person; name None if nobody is
+        close enough or two people are almost equally close (unsure)."""
         import numpy as np
-        best, best_distance = None, 9.0
+        best = {}
         with self.lock:
             for name, known in self.people:
                 distance = float(np.linalg.norm(known - vector))
-                if distance < best_distance:
-                    best, best_distance = name, distance
-        return (best if best_distance <= self.threshold else None), best_distance
+                if distance < best.get(name, 9.0):
+                    best[name] = distance
+        if not best:
+            return None, 9.0
+        ranked = sorted(best.items(), key=lambda item: item[1])
+        name, distance = ranked[0]
+        if distance > self.threshold:
+            return None, distance
+        if len(ranked) > 1 and ranked[1][1] - distance < MARGIN:
+            return None, distance
+        return name, distance
 
     def faces(self, frame):
         """Everyone in the frame: [{'box', 'vector', 'name', 'distance', 'where'}], biggest first."""
@@ -302,7 +349,7 @@ class FaceMemory(object):
     def learn(self, name, vector, distance):
         """Recognized but from a new angle/light: keep this view too (few per minute)."""
         now = time.monotonic()
-        if not (0.4 < distance < self.threshold - 0.05):
+        if not (0.35 < distance < self.threshold - 0.25):
             return False
         if now - self.learned_at.get(name, 0) < 15:
             return False
@@ -444,6 +491,9 @@ def connect_from_environment(start_camera=True):
         memory = FaceMemory()
         memory._load_nets()
         print('Face memory ready: {} people, {} things.'.format(len(memory.names()), len(memory.things)))
+        old = os.path.join(DATA_DIR, 'faces.sqlite3')
+        if not memory.names() and os.path.exists(old):
+            print('Face memory: the face model changed; please introduce yourselves again ("запомни меня, я ...").')
     except Exception as exc:
         print('Face memory off: {}'.format(exc))
         memory = None

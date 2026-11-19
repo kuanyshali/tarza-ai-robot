@@ -65,6 +65,28 @@ class FaceMemoryTests(unittest.TestCase):
         self.assertIsNone(self.memory.faces(self.frame((10, 10, 200)))[0]['name'])
         self.assertEqual(self.memory.faces(self.frame((0, 0, 0))), [])
 
+    def test_two_similar_people_are_not_mixed_up(self):
+        # Jetson log: Шынгыс was taken for Куаныш Али and renamed him.
+        self.memory.remember('Куаныш', [self.memory.faces(self.frame((200, 10, 10)))[0]['vector']])
+        self.memory.remember('Шынгыс', [self.memory.faces(self.frame((10, 200, 10)))[0]['vector']])
+        self.assertEqual(self.memory.faces(self.frame((10, 200, 10)))[0]['name'], 'Шынгыс')
+        self.assertEqual(self.memory.faces(self.frame((200, 10, 10)))[0]['name'], 'Куаныш')
+        # Exactly between the two: unsure, no name rather than a wrong one.
+        self.assertIsNone(self.memory.faces(self.frame((105, 105, 10)))[0]['name'])
+
+    def test_yunet_decoding(self):
+        outputs = [np.zeros((1, n, c), dtype=np.float32) for c in (1, 1, 4, 10) for n in (1600, 400, 100)]
+        outputs = [outputs[i] for i in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)]
+        # cls/obj high at stride 16, cell (row 5, col 7) = index 5 * 20 + 7
+        outputs[1][0, 107, 0] = outputs[4][0, 107, 0] = 0.9
+        outputs[10][0, 107] = [0.2, 0.1, 0.8, 0.1, 0.5, 0.5, 0.3, 0.9, 0.7, 0.9]
+        faces_found = faces.decode_yunet(outputs)
+        self.assertEqual(len(faces_found), 1)
+        x1, y1, x2, y2, score, points = faces_found[0]
+        self.assertAlmostEqual(score, 0.9, places=3)
+        self.assertAlmostEqual((x1 + x2) / 2, 7 * 16, places=3)
+        self.assertAlmostEqual(points[0][0], (7 + 0.2) * 16, places=3)
+
     def test_memory_survives_restart_and_forget_deletes(self):
         ali = self.frame((200, 10, 10))
         self.memory.remember('Али', [self.memory.faces(ali)[0]['vector']])

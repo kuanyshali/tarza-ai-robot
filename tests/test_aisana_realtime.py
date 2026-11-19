@@ -339,7 +339,7 @@ class FakeStream(object):
 
 
 class FakeFaces(object):
-    threshold = 0.8
+    threshold = 1.0
 
     def __init__(self, name=None):
         self.name = name
@@ -477,6 +477,23 @@ class FaceMemoryRealtimeTests(unittest.TestCase):
         session.faces.name = None
         session.people_note('frame')
         self.assertIn('never invent names', session.people_report())
+
+    def test_camera_looks_while_the_user_speaks(self):
+        session, sent = self.session('Али')
+        looks = []
+        session.inspect_camera = lambda question, detail=None: looks.append(question) or 'Вижу человека.'
+        session.handle({'type': 'input_audio_buffer.speech_started'})
+        time.sleep(0.1)
+        self.assertEqual(len(looks), 1)                      # started before the words arrived
+        say(session, 'pf1', 'Айсана, кто перед тобой?')
+        self.wait_for(sent, 'FIRST PERSON')
+        self.assertEqual(len(looks), 1)                      # no second look
+        session.prefetch_at = 0
+        session.handle({'type': 'input_audio_buffer.speech_started'})
+        time.sleep(0.1)
+        say(session, 'pf2', 'Айсана, прочитай что тут написано')
+        time.sleep(0.3)
+        self.assertEqual(len(looks), 3)                      # reading gets its own sharp look
 
     def test_memory_replies_are_fixed_phrases(self):
         session, sent = self.session()

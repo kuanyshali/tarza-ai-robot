@@ -219,6 +219,10 @@ CAMERA_RE = re.compile(
     r'\bwho (?:is|\'s) (?:in front|there|this|that)|what (?:do|can) you see|what am i holding|'
     r'what is (?:this|that|in my hand)|look at|read (?:this|it)|how do i look|кім бар|не көріп тұрсың|'
     r'\bкто я\b|ты меня (?:знаешь|узна[её]шь|помнишь)|чь[яеёи] это|do you know me|who am i|whose is)', re.I)
+# Questions a general look answers; others (fingers, reading) get their own look.
+PREFETCH_FITS = re.compile(r'(?:кто|видишь|перед тобой|передо мной|как я выгляжу|в руке|в руках|держу|'
+                           r'\bwho\b|what do you see|how do i look|holding|кім|көріп)', re.I)
+CAMERA_PREFETCH = os.environ.get('AISANA_CAMERA_PREFETCH', '1') == '1'
 READ_RE = re.compile(r'(?:прочитай|прочти|что написано|переведи|формул|текст|\bread\b|translate|written)', re.I)
 # Her own recorded shouts heard back by the microphone.
 SHOUT_ECHO_RE = re.compile(
@@ -562,6 +566,8 @@ class RealtimeAisana(object):
         self.pending_face = None            # "запомни меня" without a name: waits for it
         self.ready = False                  # session.updated received
         self.stt_model = STT_MODEL
+        self.prefetch = None
+        self.prefetch_at = 0.0
         self.response_id = None
         self.cut_ids = set()                # replies we cancelled (marked in the log)
         self.last_people = ([], 0)
@@ -1127,6 +1133,38 @@ class RealtimeAisana(object):
             'The user set your humor level to {}%. Confirm it in ONE short sentence in the new style; you may say the number this once.'.format(
                 self.humor))}})
 
+    def start_prefetch(self):
+        """Look while the user is still speaking: "кто перед тобой?" is then
+        answered about 2.5 s sooner (the vision call is already done)."""
+        now = time.monotonic()
+        if (not CAMERA_PREFETCH or self.camera_stream is None or self.motion_active()
+                or now - self.prefetch_at < 3):
+            return
+        self.prefetch_at = now
+        box = {'done': threading.Event(), 'text': None}
+        self.prefetch = box
+
+        def worker():
+            try:
+                box['text'] = self.inspect_camera(
+                    'Кто и что сейчас передо мной? Кратко: люди, их одежда и поза, что в руках, '
+                    'главные предметы.', detail='low')
+            except Exception as exc:
+                print('Camera prefetch failed:', exc)
+            finally:
+                box['done'].set()
+        threading.Thread(target=worker, daemon=True).start()
+
+    def prefetched(self, transcript):
+        """The look taken while this question was spoken, if it fits the question."""
+        box = self.prefetch
+        if box is None or not PREFETCH_FITS.search(transcript) or READ_RE.search(transcript) \
+                or time.monotonic() - self.prefetch_at > 15:
+            return None
+        box['done'].wait(8)
+        self.prefetch = None
+        return box['text']
+
     def run_camera_locally(self, item_id, transcript):
         """Visual question: look at once and answer in first person, no "секунду, посмотрю"."""
         with self.arm_lock:
@@ -1137,8 +1175,12 @@ class RealtimeAisana(object):
 
         def worker():
             try:
-                seen = self.inspect_camera(transcript[:500])
-                print('Camera (from your words) -> {}'.format(' '.join(seen.split())[:300]))
+                seen = self.prefetched(transcript)
+                if seen:
+                    print('Camera (looked while you spoke) -> {}'.format(' '.join(seen.split())[:300]))
+                else:
+                    seen = self.inspect_camera(transcript[:500])
+                    print('Camera (from your words) -> {}'.format(' '.join(seen.split())[:300]))
                 report = 'What you see with your own eyes right now: ' + seen + ' ' + self.people_report()
             except Exception as exc:
                 print('Camera FAILED: {}'.format(exc))
@@ -1222,7 +1264,7 @@ class RealtimeAisana(object):
             if self.faces is None or self.camera_stream is None:
                 self.say_phrase('face memory is switched off or its models are missing.', 'off')
                 return
-            sure = getattr(self.faces, 'threshold', 0.8) - 0.1   # renaming/deleting needs a sure match
+            sure = getattr(self.faces, 'threshold', 1.0) - 0.1   # renaming/deleting needs a sure match
             try:
                 if action in ('remember_me', 'remember_other') and not name:
                     self.pending_face = (action, time.monotonic() + 20)
@@ -1541,6 +1583,7 @@ class RealtimeAisana(object):
                     'metadata': {'purpose': 'shouts'}, 'instructions': SHOUTS_PROMPT}})
         elif typ == 'input_audio_buffer.speech_started':
             self.speech_started_at = time.monotonic()
+            self.start_prefetch()
             if BARGE_IN and (self.responding or self.playing):
                 self.playback_interrupted = True
                 self.stop_playback()
