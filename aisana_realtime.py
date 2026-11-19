@@ -10,6 +10,7 @@ Ctrl+C stops all subprocesses. Prefer headphones for first interruption tests.
 """
 import audioop
 import base64
+import collections
 import json
 import os
 import queue
@@ -32,6 +33,8 @@ import aisana_legs
 from aisana_legs import parse_legs_command, LEGS_ACTIONS, legs_reply
 from aisana_arm import arm_reply
 import aisana_faces
+import aisana_memory
+import wake_listener
 from aisana_faces import parse_memory_command
 
 RATE = 24000
@@ -204,6 +207,10 @@ def humor_instructions(humor):
             'about what you actually see (clothes, pose, what they hold). ' + secret)
 
 
+HISTORY_TURNS = int(os.environ.get('AISANA_HISTORY_TURNS', '12'))
+CLEAR_HISTORY_RE = re.compile(
+    r'(?:забудь|очисти|сотри|удали)\s+(?:вс[её]\s+)?(?:наш[иу]?\s+|о\s+)?(?:разговор\w*|истори\w*|переписк\w*|'
+    r'память о разговорах|о ч[её]м мы говорили)|forget (?:our|the) conversations?|clear (?:the )?history', re.I)
 FACE_SCAN_SECONDS = float(os.environ.get('AISANA_FACE_SCAN_SECONDS', '1.5'))
 FACE_GREET = os.environ.get('AISANA_FACE_GREET', '1') == '1'
 FACE_GREET_MINUTES = float(os.environ.get('AISANA_FACE_GREET_MINUTES', '30'))
@@ -367,80 +374,25 @@ def tool_definitions():
                  'required': ['query', 'language'], 'additionalProperties': False}})
     return tools
 
+# Short on purpose: the mini model got confused by a long rule list. Clear arm,
+# legs, camera and face-memory commands are run by the code from the user's
+# words, so the model needs only the gist of them.
 PROMPT = (
-    'You are Aisana (Айсана), a concise, intelligent female-voiced voice assistant. '
-    'Your job is to answer the actual question directly, not to fill silence. '
-    'LANGUAGE RULE: Identify the language of the latest USER speech, ignoring your own '
-    'previous speech and ignoring proper names. Reply entirely in that same language. '
-    'English question -> English answer. Russian question -> Russian answer. '
-    'Kazakh question -> Kazakh answer. Never switch languages unless explicitly asked. '
-    'If the user asks about an English technical topic in Russian, answer in Russian. '
-    'You may shout or sing short playful exclamations when asked ("Уииии!", "Ура!"). '
-    'Never say out loud that you are staying quiet or silent; just call stay_silent. '
-    'SILENCE RULE: during a conversation people around you also talk to each other. If the latest '
-    'speech is not a request or question for you (chatter, noise, fragments such as "Инерция же", '
-    '"Мушакал", "крепление, если будет болтаться"), call stay_silent and say nothing. '
-    'Never ask "что ты имел в виду" or other clarifying questions about such fragments. '
-    'LENGTH RULE: Default to ONE short sentence, maximum TWO short sentences. '
-    'Give more detail only when the user explicitly requests explanation or detail. '
-    'Do not add offers to help, follow-up questions, apologies, motivational language, '
-    'reassurance, greetings, or filler unless explicitly relevant. '
-    'Do not repeat yourself or continue talking after answering. '
-    'When addressed as Aisana, wait for the complete question. '
-    'In Russian use feminine grammatical forms when referring to yourself. '
-    'You HAVE a working camera tool named inspect_camera. '
-    'Faces are remembered by the robot code only when a person says "Айсана, запомни меня, я ..."; '
-    'it then tells you in a robot report. Never claim yourself that you remembered or forgot '
-    'someone, and never guess names. '
-    'VISUAL INTENT RULE: Call inspect_camera BEFORE answering whenever the user refers '
-    'to something physically in front of you, including implicit references like this, '
-    'that, here, on the screen, on the paper, on the label, or what I am showing you. '
-    'Examples: read this, what does this say, translate what is written here, '
-    'pronounce this text, explain this formula, solve the problem on this sheet, '
-    'identify this device, compare these phones, what model is this, and what do you see. '
-    'This rule applies equally in Russian, English and Kazakh. '
-    'For a request to translate or read text already SPOKEN aloud by the user, '
-    'answer directly WITHOUT camera. If ambiguous but the user is showing an object, '
-    'prefer the camera. When reading visible text, quote only legible words; '
-    'say briefly when text is unreadable instead of inventing it. '
-    'CAMERA BEHAVIOR: Never narrate your actions or plans. Never say you need to take '
-    'a photo, will check the camera, are looking now, are analyzing, or will report back. '
-    'Call the camera tool silently and wait for its result. Once the result arrives, '
-    'speak directly as Aisana in FIRST PERSON: Я вижу..., Я заметила... / I can see... '
-    'Do not refer to a photo, screenshot, image model, API, or a separate observer. '
-    'Do not announce a future answer; give the actual answer. '
-    'If the camera tool fails, briefly say in first person that you cannot see right now; '
-    'do not invent objects. '
-    'Do not say you have no camera or no visual access unless that tool actually fails. '
-    'For other questions do not use the camera. '
-    'ARMS: you have two physical arms with grippers, controlled by move_arm. '
-    'Call move_arm FIRST and silently, without saying anything before the call; '
-    'never say the arm is moving before move_arm has returned. '
-    'When the user names a position number for the shoulder (плечо) or the elbow (локоть), '
-    'use action position with that joint, never nudge. If the user says several commands, '
-    'one call is enough: the robot re-reads the user\'s exact words and runs them in order. '
-    'Never invent a position number or direction the user did not say; ask instead. '
-    'Arm moves take a few seconds: after move_arm say only a few words ("Поднимаю правую руку."). '
-    'Never claim a move finished; if a sensor report about a problem arrives, say it in one sentence. '
-    'Call move_arm only when the user explicitly asks to move an arm, go to a numbered '
-    'position, open or close a gripper, stop the arms or report their status. '
-    'Positions are numbered 0 to 4; 0 is the zero (home) position; a higher number lifts the arm. '
-    'If the user does not say which arm, use both. '
-    'RELATIVE MOVES: "подними руку", "чуть-чуть наверх", "немного ниже", "a bit higher", "опусти" '
-    'are action nudge, direction up or down, joint shoulder unless the user mentions the elbow '
-    '(локоть). Degrees: чуть-чуть/slightly 5, немного/a bit 10, no amount 15, сильно/a lot 30, '
-    'or the number the user said (max 45). "Ещё" / "more" repeats the previous nudge. '
-    'When asked to stop the arms, call move_arm with action stop at once. '
-    'After move_arm returns, confirm in a few words; if it failed, say so briefly. '
-    'TOOLS FIRST: for move_arm and move_legs call the tool immediately and say NOTHING before '
-    'it (no "let me think", no "okay"); speak only after the tool result, in the user\'s language. '
-    'LEGS: you can drive on wheels with move_legs: forward, backward, arc_left/arc_right (drive while '
-    'turning), spin_left/spin_right (turn on the spot), stop, faster, slower. Call it only when the user '
-    'explicitly asks you to drive or turn; "повернись налево" = spin_left, "езжай налево" = arc_left, '
-    '"развернись" = spin 180. Never invent a time or distance. After move_legs say only a few words '
-    '("Еду вперёд."). Problems such as an obstacle or motors needing calibration are reported to you. '
-    'WEATHER: always call get_weather for weather; never guess. '
-    'LIVE FACTS: call web_search for news, elections, results, prices and other changing facts. '
+    'You are Aisana (Айсана), a female robot at a university, with a camera, two arms and wheels. '
+    'In Russian always use feminine forms for yourself (рада, сделала, увидела). '
+    'LANGUAGE: reply in the language of the user\'s latest words (Russian, Kazakh, English, Arabic). '
+    'LENGTH: one short sentence, two at most, unless asked to explain. No filler, no offers of help, '
+    'no follow-up questions, no greetings, no apologies. '
+    'NOT FOR YOU: people around also talk to each other. If the latest words are not a request or '
+    'question for you, call stay_silent and say nothing; never say aloud that you are silent. '
+    'ROBOT REPORTS: system messages starting "Robot report" or "What you see" are true facts from your '
+    'body; trust them over your own guesses. Never claim a move, a memory or a sight you were not told '
+    'about. Faces are remembered only when a person asks the robot ("запомни меня, я ..."); never guess names. '
+    'CAMERA: for questions about something in front of you (this, here, what do you see, read this) '
+    'call inspect_camera silently, then answer in first person ("Вижу..."); never mention photos. '
+    'ARMS and LEGS: call move_arm / move_legs only when asked to move, silently and first; never invent '
+    'positions, times or distances; afterwards say a few words. '
+    'Use get_weather for weather and web_search for news, prices and other changing facts. '
 )
 
 
@@ -549,7 +501,7 @@ class RealtimeAisana(object):
         self.arm_lock = threading.Lock()
         self.last_arm_at = 0.0
         self.local_items = set()            # commands already run from the user's words
-        self.humor = max(0, min(100, int(os.environ.get('AISANA_HUMOR', '75'))))
+        self.humor = max(0, min(100, int(os.environ.get('AISANA_HUMOR', '45'))))
         self.shouts = ShoutPlayer()
         self.oob_ids = set()                # out-of-band responses (shout recording)
         self.shout_buffer = bytearray()
@@ -566,6 +518,10 @@ class RealtimeAisana(object):
         self.pending_face = None            # "запомни меня" without a name: waits for it
         self.ready = False                  # session.updated received
         self.stt_model = STT_MODEL
+        self.spotter = None                 # wake_listener.WakeSpotter (AISANA_LOCAL_WAKE=1)
+        self.stream_until = 0.0
+        self.history = aisana_memory if aisana_memory.ENABLED else None   # tests set None
+        self.saved_items = set()
         self.prefetch = None
         self.prefetch_at = 0.0
         self.response_id = None
@@ -889,9 +845,16 @@ class RealtimeAisana(object):
         except queue.Full:
             print('Audio queue overloaded; dropping audio frame')
 
+    def streaming(self):
+        """With the local wake word: is the cloud allowed to hear the microphone now?"""
+        return (self.spotter is None or time.monotonic() < self.stream_until or self.dialog_active()
+                or self.motion_active() or self.hold_item is not None or self.responding)
+
     def capture(self):
         try:
             levels = []
+            # Vosk confirms the name at the next pause: replay the whole phrase.
+            preroll = collections.deque(maxlen=int(6 * RATE * 2 / CHUNK))
             self.mic = subprocess.Popen(
                 ['arecord', '-q', '-D', self.mic_device, '-t', 'raw',
                  '-f', 'S16_LE', '-r', str(RATE), '-c', '1'],
@@ -912,6 +875,19 @@ class RealtimeAisana(object):
                         levels = []
                 if ECHO_GUARD and (self.echo_guard_active or self.responding or self.playing or time.monotonic() < self.mute_until):
                     continue
+                if not self.streaming():
+                    # Outside a conversation only the local spotter listens.
+                    preroll.append(pcm)
+                    if not self.spotter.feed(pcm):
+                        continue
+                    print('Local wake word heard.')
+                    self.stream_until = time.monotonic() + 8
+                    for chunk in preroll:
+                        self.send({'type': 'input_audio_buffer.append',
+                                   'audio': base64.b64encode(chunk).decode('ascii')})
+                    preroll.clear()
+                    continue
+                preroll.clear()
                 self.send({'type': 'input_audio_buffer.append',
                            'audio': base64.b64encode(pcm).decode('ascii')})
         except Exception as exc:
@@ -1105,6 +1081,58 @@ class RealtimeAisana(object):
         except Exception as exc:
             if not self.stop.is_set():
                 print('Tool response error:', exc)
+
+    def load_history(self):
+        """Earlier conversations (shared with robot.py) as context for this session."""
+        if self.history is None:
+            return
+        try:
+            turns = self.history.recent_turns(HISTORY_TURNS)
+        except Exception as exc:
+            print('Conversation memory unavailable:', exc)
+            return
+        if not turns:
+            return
+        now = time.time()
+        lines = []
+        for created, question, answer in turns:
+            days = int((now - created) // 86400)
+            when = 'today' if days == 0 else 'yesterday' if days == 1 else '{} days ago'.format(days)
+            lines.append('[{}] User: {} | Aisana: {}'.format(when, question[:200], answer[:200]))
+        text = 'Earlier conversations (use them if the user refers to the past; do not bring them up by yourself):\n'
+        self.send({'type': 'conversation.item.create', 'item': {
+            'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (text + '\n'.join(lines))[-3000:]}]}})
+        print('Conversation memory: {} earlier turns loaded.'.format(len(turns)))
+
+    def save_turn(self, answer):
+        """Keep a real exchange (not noise, not a cut reply) for later sessions."""
+        item = self.last_item
+        question = self.transcripts.get(item, '')
+        if (self.history is None or not question or item in self.saved_items
+                or item not in self.responded_items):
+            return
+        self.saved_items.add(item)
+        try:
+            self.history.remember_turn(question, answer)
+        except Exception as exc:
+            print('Conversation memory error:', exc)
+
+    def clear_history(self, item_id):
+        with self.arm_lock:
+            self.responded_items.add(item_id)
+            self.local_items.add(item_id)
+        self.saved_items.add(item_id)
+        self.cancel_reply()
+        if self.history is not None:
+            self.history.clear_history()
+        print('Conversation memory cleared.')
+
+        def worker():
+            self.speak_report('Robot report: all saved conversations were deleted.',
+                              confirm_instruction('Всё, наши разговоры стёрты. Начнём с чистого листа.'
+                                                  if self.user_language == 'Russian' else
+                                                  'Done, our conversations are erased.', ''))
+        threading.Thread(target=worker, daemon=True).start()
 
     def stt_fallback(self, reason):
         """The newer STT model was refused (not enabled for the key): use the old one."""
@@ -1464,6 +1492,11 @@ class RealtimeAisana(object):
                 self.release_hold(drop=True)
             self.set_humor(item_id, int(humor.group(1)))
             return
+        if addressed and not stop and CLEAR_HISTORY_RE.search(transcript):
+            if held:
+                self.release_hold(drop=True)
+            self.clear_history(item_id)
+            return
         memory = parse_memory_command(transcript) if addressed and not stop else None
         if memory is None and self.pending_face and time.monotonic() < self.pending_face[1] \
                 and self.dialog_active() and not stop:
@@ -1583,6 +1616,8 @@ class RealtimeAisana(object):
                     'metadata': {'purpose': 'shouts'}, 'instructions': SHOUTS_PROMPT}})
         elif typ == 'input_audio_buffer.speech_started':
             self.speech_started_at = time.monotonic()
+            if self.spotter is not None and time.monotonic() < self.stream_until:
+                self.stream_until = time.monotonic() + 20     # a long question keeps streaming
             self.start_prefetch()
             if BARGE_IN and (self.responding or self.playing):
                 self.playback_interrupted = True
@@ -1635,6 +1670,8 @@ class RealtimeAisana(object):
             if text:
                 cut = e.get('response_id') in self.cut_ids
                 print('Aisana (cut):' if cut else 'Aisana:', text)
+                if not cut:
+                    self.save_turn(text)
         elif typ == 'input_audio_buffer.committed':
             self.last_item = e.get('item_id')
             # Inside an open dialogue start the answer at once, but hold its audio
@@ -1743,6 +1780,7 @@ class RealtimeAisana(object):
                     }
                 }
             })
+            self.load_history()
             self.ws.settimeout(10)
             threading.Thread(target=self.audio_worker, daemon=True).start()
             if self.faces is not None and self.camera_stream is not None:
@@ -1786,6 +1824,7 @@ def main():
     arm = connect_from_environment()
     legs = aisana_legs.connect_from_environment()
     camera, faces = aisana_faces.connect_from_environment()     # camera stays on across reconnects
+    spotter = wake_listener.spotter_from_environment()
     delay = 2
     try:
         while True:
@@ -1793,6 +1832,7 @@ def main():
             session = RealtimeAisana()
             session.arm, session.legs = arm, legs
             session.camera_stream, session.faces = camera, faces
+            session.spotter = spotter
             try:
                 session.run(manage_devices=False)
                 problem = 'session ended'

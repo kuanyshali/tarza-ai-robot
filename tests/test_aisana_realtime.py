@@ -36,6 +36,7 @@ class FakeArm(object):
 
 def make_session():
     session = rt.RealtimeAisana()
+    session.history = None              # never write the real ~/.local history in tests
     sent = []
     session.send = sent.append
     return session, sent
@@ -420,6 +421,74 @@ class HearingTests(unittest.TestCase):
         session, sent = make_session()
         session.handle({'type': 'error', 'error': {'message': 'conversation_already_has_active_response'}})
         self.assertEqual(session.stt_model, rt.STT_MODEL)
+
+
+class FakeHistory(object):
+    def __init__(self, turns=()):
+        self.turns = list(turns)
+        self.saved = []
+        self.cleared = False
+
+    def recent_turns(self, limit=12):
+        return self.turns[-limit:]
+
+    def remember_turn(self, question, answer):
+        self.saved.append((question, answer))
+
+    def clear_history(self):
+        self.cleared = True
+
+
+class LocalWakeTests(unittest.TestCase):
+    def test_cloud_hears_only_after_the_name_or_inside_a_conversation(self):
+        session, _ = make_session()
+        self.assertTrue(session.streaming())                  # no spotter: as before
+        session.spotter = object()
+        self.assertFalse(session.streaming())
+        session.stream_until = time.monotonic() + 5           # "Айсана" heard locally
+        self.assertTrue(session.streaming())
+        session.stream_until = 0
+        session.dialog_until = time.monotonic() + 5           # she just answered
+        self.assertTrue(session.streaming())
+        session.dialog_until = 0
+        session.motion_until = time.monotonic() + 5           # "стоп" must work while driving
+        self.assertTrue(session.streaming())
+
+
+class ConversationMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_earlier_conversations_are_loaded(self):
+        session, sent = make_session()
+        session.history = FakeHistory([(time.time() - 86400 * 1.5, 'Когда у нас пара?', 'В десять.')])
+        session.load_history()
+        text = sent[-1]['item']['content'][0]['text']
+        self.assertIn('[yesterday] User: Когда у нас пара? | Aisana: В десять.', text)
+
+    def test_answers_are_saved_but_not_noise_or_cut_replies(self):
+        session, sent = make_session()
+        session.history = FakeHistory()
+        say(session, 'h1', 'Айсана, как дела?')
+        session.handle({'type': 'response.created', 'response': {'id': 'r1'}})
+        session.handle({'type': 'response.output_audio_transcript.done', 'response_id': 'r1', 'transcript': 'Отлично.'})
+        self.assertEqual(session.history.saved, [('Айсана, как дела?', 'Отлично.')])
+        session.handle({'type': 'response.output_audio_transcript.done', 'response_id': 'r1', 'transcript': 'Ещё раз.'})
+        self.assertEqual(len(session.history.saved), 1)               # one answer per question
+        session.cut_ids.add('r2')
+        say(session, 'h2', 'Айсана, а погода?')
+        session.handle({'type': 'response.output_audio_transcript.done', 'response_id': 'r2', 'transcript': 'Секунду'})
+        self.assertEqual(len(session.history.saved), 1)
+
+    def test_voice_command_clears_history(self):
+        session, sent = make_session()
+        session.history = FakeHistory()
+        say(session, 'h3', 'Айсана, забудь наши разговоры')
+        self.assertTrue(session.history.cleared)
 
 
 class FaceMemoryRealtimeTests(unittest.TestCase):
