@@ -302,7 +302,13 @@ SHORT_REPLIES = re.compile(
 def is_stray_word(text):
     """A lone word that is not a usual short reply ("Pairing.", "Мушакал")."""
     words = re.findall(r'\w+', text or '')
-    return len(words) == 1 and not SHORT_REPLIES.match(words[0]) and not re.match(r'^\d+$', words[0])
+    if len(words) != 1 or SHORT_REPLIES.match(words[0]) or re.match(r'^\d+$', words[0]):
+        return False
+    # "Вперёд", "Развернись", "Налево", "Выше" are commands or answers, not noise.
+    if re.match(r'^(?:налево|направо|влево|вправо|вперёд|вперед|назад|выше|ниже|быстрее|медленнее|'
+                r'left|right|forward|back|up|down|faster|slower|оң|сол|алға|артқа)$', words[0], re.I):
+        return False
+    return not (parse_legs_command(text) or parse_arm_commands(text))
 
 
 def is_sleep_phrase(text):

@@ -396,6 +396,8 @@ class LogFixesTests(unittest.TestCase):
         session.dialog_until = time.monotonic() + 20
         say(session, 'p1', 'Pairing.')
         self.assertEqual(sent[-1], {'type': 'conversation.item.delete', 'item_id': 'p1'})
+        for text in ('Вперёд', 'Назад', 'Развернись', 'Налево'):
+            self.assertFalse(rt.is_stray_word(text), text)        # one-word commands still work
         for text in ('Да', 'спасибо', 'Почему?', 'Айсана'):
             self.assertFalse(rt.is_stray_word(text) and not rt.has_wake_name(text), text)
 
