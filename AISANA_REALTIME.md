@@ -2,6 +2,8 @@
 
 This is the **fast mode**. Microphone PCM streams to OpenAI Realtime and generated PCM is played as it arrives. Tools: camera, the Arm team's Arduino arms over USB, Open-Meteo weather and web search. SQLite memory is not connected yet. See [README.md](README.md) for arms and settings.
 
+Follow-up response generation starts on committed audio in parallel with transcription (`AISANA_REALTIME_FAST=1`, default). Physical arm calls are held until the full transcript verifies the command; numbered presets take priority over the model's guess. Set `AISANA_REALTIME_FAST=0` to wait for transcription before every response.
+
 A conversation starts with the name **Aisana / Айсана**; after each reply follow-ups need no name for `AISANA_DIALOG_TIMEOUT` (20) seconds. Speech that is not addressed to her is deleted from the conversation. `AISANA_REALTIME_WAKE=0` restores the old answer-everything behaviour. "Айсана, стоп" immediately sends the arms an emergency stop.
 
 ## Jetson Nano / Python 3.6
