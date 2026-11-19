@@ -8,6 +8,7 @@ default); follow-ups need no name for AISANA_DIALOG_TIMEOUT seconds.
 Uses websocket-client==1.3.1, arecord, aplay and Realtime GA.
 Ctrl+C stops all subprocesses. Prefer headphones for first interruption tests.
 """
+import audioop
 import base64
 import json
 import os
@@ -44,7 +45,15 @@ ECHO_TAIL_SECONDS = float(os.environ.get('AISANA_ECHO_TAIL_SECONDS', '1.0'))
 # The Xiaomi USB speaker drops the first ~0.2 s after the stream opens: lead with silence.
 PLAYBACK_LEAD_MS = max(0, min(1000, int(os.environ.get('AISANA_PLAYBACK_LEAD_MS', '300'))))
 KEY = os.environ.get('OPENAI_API_KEY')
-STT_MODEL = os.environ.get('AISANA_REALTIME_STT_MODEL', 'gpt-4o-mini-transcribe')
+# gpt-transcribe: OpenAI's newer, more accurate model for committed-turn realtime
+# transcription (uses earlier turns as context). Falls back by itself if refused.
+STT_MODEL = os.environ.get('AISANA_REALTIME_STT_MODEL', 'gpt-transcribe')
+STT_FALLBACK = 'gpt-4o-mini-transcribe'
+MIC_GAIN = float(os.environ.get('AISANA_MIC_GAIN', '1.0'))          # software gain, e.g. 2.0
+MIC_LEVEL = os.environ.get('AISANA_MIC_LEVEL', '0') == '1'           # print loudness once a second
+VAD_THRESHOLD = float(os.environ.get('AISANA_VAD_THRESHOLD', '0.5'))  # lower = hears quieter speech
+# far_field: the speaker stands a metre or more from the robot's microphone.
+NOISE_REDUCTION = os.environ.get('AISANA_NOISE_REDUCTION', 'far_field')
 # Respond only after the name "Aisana" (then a timed follow-up window).
 WAKE_GATE = os.environ.get('AISANA_REALTIME_WAKE', '1') == '1'
 DIALOG_TIMEOUT = max(5.0, float(os.environ.get('AISANA_DIALOG_TIMEOUT', '12')))
@@ -552,6 +561,7 @@ class RealtimeAisana(object):
         self.greeted_at = {}
         self.pending_face = None            # "запомни меня" without a name: waits for it
         self.ready = False                  # session.updated received
+        self.stt_model = STT_MODEL
         self.response_id = None
         self.cut_ids = set()                # replies we cancelled (marked in the log)
         self.last_people = ([], 0)
@@ -875,6 +885,7 @@ class RealtimeAisana(object):
 
     def capture(self):
         try:
+            levels = []
             self.mic = subprocess.Popen(
                 ['arecord', '-q', '-D', self.mic_device, '-t', 'raw',
                  '-f', 'S16_LE', '-r', str(RATE), '-c', '1'],
@@ -883,6 +894,16 @@ class RealtimeAisana(object):
                 pcm = self.mic.stdout.read(CHUNK)
                 if len(pcm) != CHUNK:
                     raise RuntimeError('Microphone capture ended unexpectedly')
+                if MIC_GAIN != 1.0:
+                    pcm = audioop.mul(pcm, 2, MIC_GAIN)      # clips instead of wrapping around
+                if MIC_LEVEL:
+                    levels.append(audioop.rms(pcm, 2))
+                    if len(levels) >= 33:
+                        peak = max(levels)
+                        print('Mic level: avg {} peak {} ({})'.format(
+                            sum(levels) // len(levels), peak,
+                            'too quiet' if peak < 1500 else 'clipping' if peak > 25000 else 'ok'))
+                        levels = []
                 if ECHO_GUARD and (self.echo_guard_active or self.responding or self.playing or time.monotonic() < self.mute_until):
                     continue
                 self.send({'type': 'input_audio_buffer.append',
@@ -1078,6 +1099,15 @@ class RealtimeAisana(object):
         except Exception as exc:
             if not self.stop.is_set():
                 print('Tool response error:', exc)
+
+    def stt_fallback(self, reason):
+        """The newer STT model was refused (not enabled for the key): use the old one."""
+        if self.stt_model == STT_FALLBACK or not re.search(r'model|support|invalid|not found|access', reason, re.I):
+            return
+        print('STT model {} not available; using {}.'.format(self.stt_model, STT_FALLBACK))
+        self.stt_model = STT_FALLBACK
+        self.send({'type': 'session.update', 'session': {'type': 'realtime', 'audio': {'input': {
+            'transcription': {'model': self.stt_model, 'prompt': STT_PROMPT}}}}})
 
     def instructions(self):
         return PROMPT + humor_instructions(self.humor) + voice_style_instructions()
@@ -1575,6 +1605,7 @@ class RealtimeAisana(object):
             self.handle_transcript(e.get('item_id'), (e.get('transcript') or '').strip())
         elif typ == 'conversation.item.input_audio_transcription.failed':
             print('Realtime transcription failed:', e.get('error', {}))
+            self.stt_fallback(str(e.get('error', {})))
         elif typ == 'response.function_call_arguments.done':
             self.start_tool(e.get('call_id'), e.get('name'), e.get('arguments'))
         elif typ == 'response.output_item.done':
@@ -1601,6 +1632,8 @@ class RealtimeAisana(object):
         elif typ == 'error':
             error = e.get('error', {}) or {}
             print('Realtime API error:', error)
+            if re.search(r'transcri', str(error), re.I):
+                self.stt_fallback(str(error))
             if self.oob_ids and re.search(r'conversation|metadata|out.of.band', str(error.get('message', '')), re.I):
                 self.oob_ids.clear()                    # shout recording unsupported: fall back
                 print('Shout recording not available; she will shout once per move instead.')
@@ -1617,6 +1650,8 @@ class RealtimeAisana(object):
         self.speaker = alsa_device('aplay', 'USB Composite Device', 'Xiaomi speaker')
         self.shouts.speaker = self.speaker
         print('Input:', self.mic_device, 'Output:', self.speaker)
+        print('STT:', self.stt_model, 'Mic gain:', MIC_GAIN, 'Noise reduction:', NOISE_REDUCTION,
+              'VAD threshold:', VAD_THRESHOLD)
         print('Model:', MODEL, 'Voice:', VOICE,
               'Barge-in:', 'ON (experimental)' if BARGE_IN else 'OFF',
               'Echo guard:', 'ON (no interruptions during playback)' if ECHO_GUARD else 'OFF',
@@ -1642,15 +1677,16 @@ class RealtimeAisana(object):
                             'format': {'type': 'audio/pcm', 'rate': RATE},
                             # Transcripts drive the wake-name gate and voice "stop".
                             'transcription': {
-                                'model': STT_MODEL,
+                                'model': self.stt_model,
                                 # A list of names here gets echoed back on noise.
                                 # Keep it short: STT repeats its hint on noise (a command list here
                                 # was once "heard" and opened the grippers).
                                 'prompt': STT_PROMPT
                             },
+                            'noise_reduction': {'type': NOISE_REDUCTION} if NOISE_REDUCTION in ('near_field', 'far_field') else None,
                             'turn_detection': {
                                 'type': 'server_vad',
-                                'threshold': 0.5,
+                                'threshold': VAD_THRESHOLD,
                                 'prefix_padding_ms': 500,
                                 'silence_duration_ms': max(500, min(3000, SILENCE_MS)),
                                 'create_response': not WAKE_GATE,

@@ -142,6 +142,11 @@ python3 -u robot.py 2>&1 | tee robot.log              # классический
 | `AISANA_ECHO_TAIL_SECONDS` | `1.0` | Сколько секунд после её речи микрофон ещё выключен (защита от эха) |
 | `AISANA_REALTIME_MODEL` | `gpt-realtime-2.1-mini` | Модель realtime |
 | `AISANA_REALTIME_VOICE` | `marin` | Голос: `shimmer`, `coral`, `sage`, `marin` — женские; `alloy`, `ballad`, `verse`, `ash`, `echo`, `cedar` |
+| `AISANA_REALTIME_STT_MODEL` | `gpt-transcribe` | Распознавание речи; если ключ его не поддерживает, сама переходит на `gpt-4o-mini-transcribe` |
+| `AISANA_MIC_GAIN` | `1.0` | Программное усиление микрофона (например `2.0`) |
+| `AISANA_MIC_LEVEL` | `0` | `1` — раз в секунду печатать громкость микрофона |
+| `AISANA_VAD_THRESHOLD` | `0.5` | Ниже (0.3–0.4) — слышит тише, но и шум тоже |
+| `AISANA_NOISE_REDUCTION` | `far_field` | Шумоподавление OpenAI: `far_field` (говорят издалека), `near_field`, `off` |
 | `AISANA_HUMOR` | `75` | Уровень юмора и сарказма 0–100, как у TARS; голосом: «Айсана, юмор 60 процентов» |
 | `AISANA_VOICE_STYLE` | пусто | Манера речи: `cute` (мягко, мило, «аниме»), `calm` (спокойно) или свой текст |
 | `AISANA_REALTIME_BARGE_IN` | `0` | Перебивать голосом (только с наушниками) |

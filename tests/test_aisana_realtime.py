@@ -405,6 +405,23 @@ class LogFixesTests(unittest.TestCase):
         self.assertIsNone(rt.parse_legs_command('Айсана, разберись с этим кодом'))
 
 
+class HearingTests(unittest.TestCase):
+    def test_new_stt_model_falls_back_when_refused(self):
+        session, sent = make_session()
+        session.stt_model = 'gpt-transcribe'
+        session.handle({'type': 'error', 'error': {'message': "Invalid value: 'gpt-transcribe'. Supported transcription models: ..."}})
+        self.assertEqual(session.stt_model, rt.STT_FALLBACK)
+        self.assertEqual(sent[-1]['session']['audio']['input']['transcription']['model'], rt.STT_FALLBACK)
+        sent[:] = []
+        session.handle({'type': 'error', 'error': {'message': 'transcription failed again: model'}})
+        self.assertEqual(sent, [])                       # only once
+
+    def test_unrelated_errors_keep_the_model(self):
+        session, sent = make_session()
+        session.handle({'type': 'error', 'error': {'message': 'conversation_already_has_active_response'}})
+        self.assertEqual(session.stt_model, rt.STT_MODEL)
+
+
 class FaceMemoryRealtimeTests(unittest.TestCase):
     def setUp(self):
         self.original = rt.WAKE_GATE
