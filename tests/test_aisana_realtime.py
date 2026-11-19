@@ -70,6 +70,22 @@ class WakePhraseTests(unittest.TestCase):
         self.assertTrue(rt.is_sleep_phrase('Айсана, отбой'))
 
 
+class VoiceStyleTests(unittest.TestCase):
+    def test_voice_style_presets(self):
+        import os
+        old = os.environ.pop('AISANA_VOICE_STYLE', None)
+        try:
+            self.assertEqual(rt.voice_style_instructions(), '')
+            os.environ['AISANA_VOICE_STYLE'] = 'cute'
+            self.assertIn('anime', rt.voice_style_instructions())
+            os.environ['AISANA_VOICE_STYLE'] = 'whisper a little'
+            self.assertEqual(rt.voice_style_instructions(), 'VOICE STYLE: whisper a little ')
+        finally:
+            os.environ.pop('AISANA_VOICE_STYLE', None)
+            if old is not None:
+                os.environ['AISANA_VOICE_STYLE'] = old
+
+
 class WakeGateTests(unittest.TestCase):
     def setUp(self):
         self.original = rt.WAKE_GATE

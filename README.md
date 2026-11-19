@@ -87,6 +87,8 @@ python3 -u robot.py 2>&1 | tee robot.log              # классический
 | `AISANA_REALTIME_WAKE` | `1` | Realtime: `0` — отвечать на любую речь (старое поведение) |
 | `AISANA_DIALOG_TIMEOUT` | `20` | Realtime: секунд без имени после ответа |
 | `AISANA_REALTIME_MODEL` | `gpt-realtime-2.1-mini` | Модель realtime |
+| `AISANA_REALTIME_VOICE` | `marin` | Голос: `shimmer`, `coral`, `sage`, `marin` — женские; `alloy`, `ballad`, `verse`, `ash`, `echo`, `cedar` |
+| `AISANA_VOICE_STYLE` | пусто | Манера речи: `cute` (мягко, мило, «аниме»), `calm` (спокойно) или свой текст |
 | `AISANA_REALTIME_BARGE_IN` | `0` | Перебивать голосом (только с наушниками) |
 | `TARZA_CAMERA_ROTATE` | `180` | Поворот кадра камеры (камера стоит вверх ногами); `0`, `90`, `270` |
 | `TARZA_DIALOG_TIMEOUT` | `35` | `robot.py`: секунд без имени после ответа |

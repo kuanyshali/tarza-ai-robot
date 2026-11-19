@@ -59,6 +59,20 @@ WAKE_ANYWHERE = re.compile(
     r'آيسانا|ايسانا|أيسانا|عيسانا|إيسانا)(?!\w)', re.I)
 
 
+VOICE_STYLES = {
+    'cute': ('VOICE STYLE: speak softly, sweetly and cheerfully, with a light, slightly higher, '
+             'gentle tone, like a kind cute anime girl; warm, playful intonation, smiling voice. '
+             'Keep the same short answers; do not add extra words because of the style. '),
+    'calm': 'VOICE STYLE: speak calmly, softly and slowly, warm and quiet. ',
+}
+
+
+def voice_style_instructions():
+    """AISANA_VOICE_STYLE=cute|calm|<your own text>; empty = neutral."""
+    style = os.environ.get('AISANA_VOICE_STYLE', '').strip()
+    return VOICE_STYLES.get(style, ('VOICE STYLE: ' + style + ' ') if style else '')
+
+
 def has_wake_name(text):
     """True if the user addresses Aisana: at the start or anywhere as "Айсана"."""
     text = (text or '').strip().casefold()
@@ -708,7 +722,7 @@ class RealtimeAisana(object):
                 'session': {
                     'type': 'realtime',
                     'model': MODEL,
-                    'instructions': PROMPT,
+                    'instructions': PROMPT + voice_style_instructions(),
                     'tools': tool_definitions(),
                     'tool_choice': 'auto',
                     'output_modalities': ['audio'],
