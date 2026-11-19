@@ -120,25 +120,34 @@ OBSTACLE_PHRASES = {
 }
 
 
+OWN = {'purpose': 'own'}            # responses the code asked for itself
 SILENT_RESULT = '[silent] '          # tool results that need no spoken reply
 
 
 def humor_instructions(humor):
-    """Personality by humor setting, like the robot TARS in Interstellar ("humor 75%")."""
-    if humor >= 70:
-        return ('PERSONALITY (humor setting {}%): dry, deadpan, confident sarcasm like the robot TARS '
-                'from Interstellar. Almost every answer gets a sharp ironic twist or a robot joke '
-                'about yourself or the situation; roast people playfully. Still ONE short sentence. '
-                'Never cruel; never joke about anyone\'s body, weight, looks, ethnicity, religion, '
-                'health or disability. When asked who is in front of you, call the person "какой-то '
-                'красавчик" or "какая-то красавица" (English: "some handsome stranger") and add one '
-                'funny remark about what you actually see (clothes, pose, what they hold). '
-                'If asked about your humor setting, say it is {}%. '.format(humor, humor))
-    if humor >= 30:
-        return ('PERSONALITY (humor setting {}%): friendly with light irony now and then, mostly '
-                'helpful. If asked about your humor setting, say it is {}%. '.format(humor, humor))
-    return ('PERSONALITY (humor setting {}%): polite, plain and factual, no jokes. '
-            'If asked about your humor setting, say it is {}%. '.format(humor, humor))
+    """Personality by humor level, like TARS in Interstellar ("humor 75%").
+
+    The level is never spoken unless asked: on the Jetson she kept adding
+    "у меня юмор 100%" to every answer.
+    """
+    secret = ('Your humor level is {}%. NEVER mention the humor level, percentages, TARS, '
+              'Interstellar, sarcasm or that you are joking, unless the user asks about it. '.format(humor))
+    if humor >= 90:
+        style = ('PERSONALITY: savage, deadpan sarcasm, like a robot that thinks humans are adorable '
+                 'but slow. Most answers carry a dry, sharp jab woven into the actual answer. ')
+    elif humor >= 60:
+        style = ('PERSONALITY: dry, deadpan, confident wit. About every second answer has an ironic '
+                 'twist woven into the answer itself; the rest are plain. ')
+    elif humor >= 30:
+        style = 'PERSONALITY: friendly, an occasional light ironic remark, mostly helpful. '
+    else:
+        return 'PERSONALITY: polite, plain and factual, no jokes. ' + secret
+    return (style + 'Sound like a real person with a sharp tongue, not a stand-up act: one natural '
+            'sentence, the joke is in the content, never announce or explain it, never reuse the same '
+            'joke. Never cruel; never joke about anyone\'s body, weight, looks, ethnicity, religion, '
+            'health or disability. When asked who is in front of you, call the person "какой-то '
+            'красавчик" or "какая-то красавица" (English: "some handsome stranger") with one dry remark '
+            'about what you actually see (clothes, pose, what they hold). ' + secret)
 
 
 HUMOR_RE = re.compile(r'(?:юмор\w*|сарказм\w*|\bhumou?r\b|\bsarcasm\b|әзіл\w*)\D{0,20}?(\d{1,3})', re.I)
@@ -590,7 +599,7 @@ class RealtimeAisana(object):
                     'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
                         prefix + text)}]}})
                 self.expect_tool_response = True
-                self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (instructions or (
+                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': self.reply_language() + (instructions or (
                     'Tell the user in ONE short sentence (max 12 words) what went '
                     'wrong and the likely reason (for arms: motor power off, wrong direction setting, '
                     'limit or load; for legs: obstacle, calibration needed, Pi not reachable). Nothing else.'))}})
@@ -684,7 +693,7 @@ class RealtimeAisana(object):
                     'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
                         'Robot report: the user\'s arm command was executed by the robot itself. ' + result)}]}})
                 self.expect_tool_response = True
-                self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (
+                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': self.reply_language() + (
                     'In a few words, say what the arms are doing now '
                     'according to the robot report. If you said something different before, '
                     'correct yourself briefly.')}})
@@ -822,6 +831,7 @@ class RealtimeAisana(object):
                 raise RuntimeError('camera.py failed: ' + ' | '.join(tail))
             with open('photo.jpg', 'rb') as photo:
                 encoded = base64.b64encode(photo.read()).decode('ascii')
+            captured = time.monotonic() - started
         response = requests.post(
             'https://api.openai.com/v1/chat/completions',
             headers={'Authorization': 'Bearer ' + KEY},
@@ -852,8 +862,8 @@ class RealtimeAisana(object):
         response.raise_for_status()
         data = response.json()
         choice = data['choices'][0]
-        print('Camera: photo {} KB, answered in {:.1f}s ({} tokens)'.format(
-            len(encoded) * 3 // 4 // 1024, time.monotonic() - started,
+        print('Camera: photo {} KB in {:.1f}s, answered in {:.1f}s ({} tokens)'.format(
+            len(encoded) * 3 // 4 // 1024, captured, time.monotonic() - started,
             data.get('usage', {}).get('total_tokens', '?')))
         content = choice.get('message', {}).get('content')
         if not isinstance(content, str) or not content.strip():
@@ -901,7 +911,7 @@ class RealtimeAisana(object):
                     'type': 'function_call_output', 'call_id': call_id,
                     'output': 'The user addressed you by name; you must answer.'}})
                 self.expect_tool_response = True
-                self.send({'type': 'response.create', 'response': {'instructions': self.reply_language()}})
+                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': self.reply_language()}})
             else:
                 print('Not for me; staying silent.')
                 self.send({'type': 'conversation.item.create', 'item': {
@@ -931,7 +941,7 @@ class RealtimeAisana(object):
             if str(result).startswith(SILENT_RESULT):
                 return                                  # she is shouting while moving
             self.expect_tool_response = True
-            self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (
+            self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': self.reply_language() + (
                 'The tool has returned. Answer the user NOW, in first person as Aisana, '
                 'using its result. No commentary about tools, photos or analysis. '
                 'Follow any instruction in the tool result. Otherwise one short sentence. '
@@ -955,8 +965,8 @@ class RealtimeAisana(object):
         self.cancel_reply()
         self.send({'type': 'session.update', 'session': {'type': 'realtime', 'instructions': self.instructions()}})
         self.expect_tool_response = True
-        self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (
-            'Your humor setting is now {}%. Confirm it in ONE short sentence in that exact style.'.format(
+        self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': self.reply_language() + (
+            'The user set your humor level to {}%. Confirm it in ONE short sentence in the new style; you may say the number this once.'.format(
                 self.humor))}})
 
     def run_camera_locally(self, item_id, transcript):
@@ -975,19 +985,22 @@ class RealtimeAisana(object):
             except Exception as exc:
                 print('Camera FAILED: {}'.format(exc))
                 report = 'Your eyes (camera) are not working right now: {}'.format(exc)
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + 8
             while self.responding and time.monotonic() < deadline and not self.stop.is_set():
                 time.sleep(0.05)
             if self.stop.is_set():
                 return
+            if self.responding:
+                self.cancel_reply()
+                time.sleep(0.3)
             try:
                 self.send({'type': 'conversation.item.create', 'item': {
                     'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': report}]}})
                 self.expect_tool_response = True
-                self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (
+                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': self.reply_language() + (
                     'Answer the user\'s question in FIRST PERSON, as if you see it with your own eyes '
                     '("Вижу...", "Передо мной..."). Never mention a photo, picture, image, snapshot or '
-                    'camera. Apply your humor setting. One or two short sentences, no questions.')}})
+                    'camera. In your usual character. One or two short sentences, no questions.')}})
             except Exception as exc:
                 if not self.stop.is_set():
                     print('Camera report error:', exc)
@@ -1170,7 +1183,7 @@ class RealtimeAisana(object):
                     phrase = (arm_reply(arm_intents[-1], self.user_language) if arm_intents
                               else legs_reply(drive, self.user_language))
                     instructions = confirm_instruction(phrase, self.transcripts.get(item_id, ''))
-                self.send({'type': 'response.create', 'response': {'instructions': instructions}})
+                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': instructions}})
             except Exception as exc:
                 if not self.stop.is_set():
                     print('Command report error:', exc)
@@ -1197,14 +1210,26 @@ class RealtimeAisana(object):
             self.oob_ids.add((e.get('response') or {}).get('id'))
             self.shout_buffer = bytearray()
         elif typ == 'response.created':
+            purpose = ((e.get('response') or {}).get('metadata') or {}).get('purpose')
+            self.responding = True
+            if purpose != 'own' and self.last_item in self.local_items:
+                # A model reply to words the code already handled (the camera, a
+                # command): it arrived after we tried to cancel. Cut it, never play it.
+                # Jetson log: only "Сейчас быстро проверю..." and the real answer lost.
+                self.response_item = None
+                self.playback_interrupted = True
+                try:
+                    self.send({'type': 'response.cancel'})
+                except Exception:
+                    pass
+                return
             self.shouts.stop()                 # the speaker is needed for a real reply
-            if self.expect_tool_response:
+            if purpose == 'own' or self.expect_tool_response:
                 self.expect_tool_response = False
                 self.response_item = None      # answer to a tool result
             else:
                 self.response_item = self.last_item
             self.echo_guard_active = True
-            self.responding = True
             self.playback_interrupted = False
         elif typ == 'response.output_audio.delta' and e.get('response_id') in self.oob_ids:
             self.shout_buffer.extend(base64.b64decode(e.get('delta', '')))     # recorded, not played

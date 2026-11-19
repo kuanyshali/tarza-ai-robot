@@ -262,9 +262,9 @@ class HumorAndCameraTests(unittest.TestCase):
 
     def test_tars_style_humor_setting(self):
         text = rt.humor_instructions(75)
-        self.assertIn('TARS', text)
         self.assertIn('красавчик', text)
         self.assertIn('never joke about', text.replace("Never", 'never'))
+        self.assertIn('NEVER mention the humor level', text)   # no "юмор 100%" in every answer
         self.assertIn('no jokes', rt.humor_instructions(10))
 
     def test_voice_command_changes_humor(self):
@@ -272,7 +272,7 @@ class HumorAndCameraTests(unittest.TestCase):
         say(session, 'u1', 'Айсана, юмор 60 процентов')
         self.assertEqual(session.humor, 60)
         update = [m for m in sent if m['type'] == 'session.update'][0]
-        self.assertIn('humor setting 60%', update['session']['instructions'])
+        self.assertIn('humor level is 60%', update['session']['instructions'])
         self.assertEqual(sent[-1]['type'], 'response.create')
 
     def test_who_is_in_front_answers_in_first_person_at_once(self):
@@ -286,6 +286,25 @@ class HumorAndCameraTests(unittest.TestCase):
         self.assertIn('Never mention a photo', sent[-1]['response']['instructions'])
         # The model's own camera call for the same words stays silent (no double answer).
         self.assertTrue(session.run_tool('inspect_camera', {'question': 'кто?'}).startswith(rt.SILENT_RESULT))
+
+    def test_late_model_reply_to_camera_question_is_cut(self):
+        # Jetson log: the reply started at commit arrived after the transcript and
+        # only "Сейчас быстро проверю..." was played; the real answer was lost.
+        session, sent = make_session()
+        session.inspect_camera = lambda question, detail=None: 'Вижу человека.'
+        session.last_item = 'c2'
+        say(session, 'c2', 'Айсана, кто перед тобой?')
+        session.handle({'type': 'response.created', 'response': {'id': 'r1'}})
+        self.assertIn({'type': 'response.cancel'}, sent)
+        session.handle({'type': 'response.output_audio.delta', 'response_id': 'r1', 'delta': 'AAAA'})
+        self.assertTrue(session.audio_queue.empty())
+        session.handle({'type': 'response.done', 'response': {'id': 'r1'}})
+        time.sleep(0.3)
+        own = [m for m in sent if m['type'] == 'response.create' and 'FIRST PERSON' in str(m)]
+        self.assertEqual(len(own), 1)
+        # Our own answer is played, not cut.
+        session.handle({'type': 'response.created', 'response': {'id': 'r2', 'metadata': rt.OWN}})
+        self.assertFalse(session.playback_interrupted)
 
     def test_camera_phrases(self):
         for text in ('Айсана, кто перед тобой?', 'что ты сейчас видишь?', 'что у меня в руке?',
