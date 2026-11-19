@@ -339,6 +339,8 @@ class FakeStream(object):
 
 
 class FakeFaces(object):
+    threshold = 0.8
+
     def __init__(self, name=None):
         self.name = name
         self.remembered = []
@@ -428,30 +430,44 @@ class FaceMemoryRealtimeTests(unittest.TestCase):
     def test_remember_me_only_on_request(self):
         session, sent = self.session()
         say(session, 'f1', 'Айсана, запомни меня, я Али')
-        self.wait_for(sent, 'remembered the face of Али')
+        self.wait_for(sent, 'the face of Али is now remembered')
         self.assertEqual(session.faces.remembered, [('Али', 4)])
         self.assertIn('f1', session.local_items)
 
     def test_name_asked_when_missing(self):
         session, sent = self.session()
         say(session, 'f2', 'Айсана, запомни меня')
-        self.wait_for(sent, 'Ask only for the name')
+        self.wait_for(sent, 'the name is needed')
         session.dialog_until = time.monotonic() + 10
         say(session, 'f3', 'Меня зовут Айгерим')
-        self.wait_for(sent, 'remembered the face of Айгерим')
+        self.wait_for(sent, 'the face of Айгерим is now remembered')
 
     def test_forget_me(self):
         session, sent = self.session('Али')
         say(session, 'f4', 'Айсана, забудь меня')
-        self.wait_for(sent, 'deleted the face of Али')
+        self.wait_for(sent, 'the face of Али was deleted')
         self.assertEqual(session.faces.forgotten, ['Али'])
 
     def test_camera_answer_uses_known_name(self):
-        session, _ = self.session('Али')
-        note = session.people_note('frame')
-        self.assertIn('Face memory recognizes: Али (center)', note)
+        # Jetson log: "Faces: Коныш Али 0.26" but the answer was "я не знаю, кто это".
+        session, sent = self.session('Али')
+        session.inspect_camera = lambda question, detail=None: (session.people_note('frame'), 'Вижу человека.')[1]
+        say(session, 'k1', 'Айсана, кто перед тобой?')
+        self.wait_for(sent, 'FIRST PERSON')
+        report = [m for m in sent if m['type'] == 'conversation.item.create'][-1]['item']['content'][0]['text']
+        self.assertIn('this is Али (center)', report)
+        self.assertNotIn('Али', session.people_note('frame'))      # the vision model never gets names
         session.faces.name = None
-        self.assertIn('never invent their names', session.people_note('frame'))
+        session.people_note('frame')
+        self.assertIn('never invent names', session.people_report())
+
+    def test_memory_replies_are_fixed_phrases(self):
+        session, sent = self.session()
+        say(session, 'f9', 'Айсана, запомни меня, я Али')
+        self.wait_for(sent, 'Say exactly this')
+        text = sent[-1]['response']['instructions']
+        self.assertIn('Али', text)
+        self.assertNotIn('запомнил ', text)                         # feminine only
 
     def test_greets_a_known_face_once(self):
         session, sent = self.session('Али')
@@ -461,12 +477,12 @@ class FaceMemoryRealtimeTests(unittest.TestCase):
         try:
             worker = __import__('threading').Thread(target=session.watch_faces, daemon=True)
             worker.start()
-            self.wait_for(sent, 'Greet Али by name')
+            self.wait_for(sent, 'Али (you know them) just came into view')
             time.sleep(0.3)
             session.stop.set()
         finally:
             rt.FACE_SCAN_SECONDS = original
-        self.assertEqual(sum('Greet Али' in str(m) for m in sent), 1)
+        self.assertEqual(sum('just came into view' in str(m) for m in sent), 1)
 
 
 class VoiceStyleTests(unittest.TestCase):

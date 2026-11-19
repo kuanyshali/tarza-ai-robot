@@ -114,6 +114,49 @@ def confirm_instruction(phrase, transcript):
     return 'Say exactly this and nothing else, with lively intonation: "{}"'.format(phrase)
 
 
+# Fixed phrases for face memory: the model kept contradicting the robot report
+# ("моя память не хранится между разговорами") and used masculine forms.
+MEMORY_PHRASES = {
+    'Russian': {
+        'remembered': ('Запомнила, {n}. Теперь от меня не спрячешься.', 'Готово, {n}, ты в моей базе. Навсегда, ну или пока не скажешь «забудь».',
+                       'Записала, {n}. Лицо в памяти, имя тоже.'),
+        'ask_name': ('Как тебя зовут?', 'Имя назови, а то лицо без подписи.'),
+        'no_face': ('Не вижу лица. Посмотри прямо на меня и повтори.',),
+        'forgot': ('Всё, {n}, я тебя забыла. Кто это вообще был?', 'Удалила, {n}. Мы не знакомы.'),
+        'unknown': ('Я тебя и так не знала.',),
+        'forgot_name': ('Забыла: {n}.',),
+        'no_such': ('{n}? Такого в памяти нет.',),
+        'off': ('Память на лица сейчас выключена.',),
+        'failed': ('Не получилось, память на лица дала сбой.',),
+        'greet': ('Привет, {n}!', 'О, {n}! Снова ты.', '{n}, привет. Узнала.', 'Здравствуй, {n}. Камера не врёт, это ты.'),
+        'list': ('Я знаю: {n}.',),
+        'list_none': ('Пока я никого не знаю.',),
+        'thing': ('Запомнила: {n}.',),
+    },
+    'English': {
+        'remembered': ('Got it, {n}. You cannot hide from me now.', 'Saved, {n}. Face and name are in my memory.'),
+        'ask_name': ('What is your name?',),
+        'no_face': ('I cannot see a face. Look straight at me and try again.',),
+        'forgot': ('Done, {n}, I have forgotten you. Who was that?',),
+        'unknown': ('I did not know you anyway.',),
+        'forgot_name': ('Forgotten: {n}.',),
+        'no_such': ('{n}? Not in my memory.',),
+        'off': ('Face memory is switched off right now.',),
+        'failed': ('That did not work, face memory failed.',),
+        'greet': ('Hi, {n}!', 'Oh, {n}! You again.', 'Hello, {n}. I know that face.'),
+        'list': ('I know: {n}.',),
+        'list_none': ('I do not know anyone yet.',),
+        'thing': ('Remembered: {n}.',),
+    },
+}
+
+
+def memory_phrase(kind, language, name=''):
+    import random
+    phrases = MEMORY_PHRASES.get(language) or MEMORY_PHRASES['English']
+    return random.choice(phrases[kind]).format(n=name)
+
+
 OBSTACLE_PHRASES = {
     'Russian': ('Стоп! Препятствие в {} сантиметрах.', 'Стоп! Сработал датчик препятствий.'),
     'Kazakh': ('Тоқта! {} сантиметрде кедергі бар.', 'Тоқта! Кедергі датчигі іске қосылды.'),
@@ -509,6 +552,9 @@ class RealtimeAisana(object):
         self.greeted_at = {}
         self.pending_face = None            # "запомни меня" without a name: waits for it
         self.ready = False                  # session.updated received
+        self.response_id = None
+        self.cut_ids = set()                # replies we cancelled (marked in the log)
+        self.last_people = ([], 0)
         self.handled_calls = set()
         self.calls_lock = threading.Lock()
         self.mic_device = None
@@ -867,7 +913,9 @@ class RealtimeAisana(object):
                 return photo.read(), None
 
     def people_note(self, frame):
-        """What the face memory says about the people in this frame (for the vision model)."""
+        """Notes for the vision model; who is who goes to Aisana herself (self.last_people):
+        the vision model ignored the names and said "Извините, я не знаю, кто передо мной"."""
+        self.last_people = ([], 0)
         if frame is None or self.faces is None:
             return ''
         try:
@@ -875,26 +923,33 @@ class RealtimeAisana(object):
         except Exception as exc:
             print('Face memory error:', exc)
             return ''
-        now = time.monotonic()
-        known = []
         print('Faces: ' + (', '.join('{} {:.2f} {}'.format(f['name'] or 'unknown', f['distance'], f['where'])
                                     for f in found) or 'none'))
+        now = time.monotonic()
+        known = []
         for face in found:
             if face['name']:
                 self.faces.learn(face['name'], face['vector'], face['distance'])
                 self.seen_at[face['name']] = now
                 self.greeted_at[face['name']] = now        # named now: no extra greeting
                 known.append('{} ({})'.format(face['name'], face['where']))
-        unknown = len(found) - len(known)
-        parts = []
-        if known:
-            parts.append('Face memory recognizes: ' + ', '.join(known) + '. Call them by name.')
-        if unknown:
-            parts.append('{} face(s) nobody introduced to you: describe them as a stranger ("какой-то '
-                         'красавчик"), never invent their names, no apologies.'.format(unknown))
+        self.last_people = (known, len(found) - len(known))
+        parts = ['Do not try to identify people and never say you do not know who someone is; '
+                 'just describe them.'] if found else []
         things = self.faces.things_text()
         if things:
             parts.append('Things you were shown before (say whose it is if you see one): ' + things + '.')
+        return ' '.join(parts)
+
+    def people_report(self):
+        known, strangers = getattr(self, 'last_people', ([], 0))
+        parts = []
+        if known:
+            parts.append('Face memory (certain, stored on the robot): this is ' + ', '.join(known) +
+                         '. Call them by this name.')
+        if strangers:
+            parts.append('{} person(s) nobody introduced to you: a stranger ("какой-то красавчик"), '
+                         'never invent names.'.format(strangers))
         return ' '.join(parts)
 
     def inspect_camera(self, question, detail=None, extra=None):
@@ -1054,7 +1109,7 @@ class RealtimeAisana(object):
             try:
                 seen = self.inspect_camera(transcript[:500])
                 print('Camera (from your words) -> {}'.format(' '.join(seen.split())[:300]))
-                report = 'What you see with your own eyes right now: ' + seen
+                report = 'What you see with your own eyes right now: ' + seen + ' ' + self.people_report()
             except Exception as exc:
                 print('Camera FAILED: {}'.format(exc))
                 report = 'Your eyes (camera) are not working right now: {}'.format(exc)
@@ -1072,7 +1127,8 @@ class RealtimeAisana(object):
                 self.expect_tool_response = True
                 self.send({'type': 'response.create', 'response': {'metadata': OWN, 'tool_choice': 'none', 'instructions': self.reply_language() + (
                     'Answer the user\'s question in FIRST PERSON, as if you see it with your own eyes '
-                    '("Вижу...", "Передо мной..."). Never mention a photo, picture, image, snapshot or '
+                    '("Вижу...", "Передо мной..."). If face memory names someone, use that name and never '
+                    'say you do not know who it is. Never mention a photo, picture, image, snapshot or '
                     'camera. In your usual character. One or two short sentences, no questions.')}})
             except Exception as exc:
                 if not self.stop.is_set():
@@ -1099,6 +1155,14 @@ class RealtimeAisana(object):
             if not self.stop.is_set():
                 print('Report error:', exc)
 
+    def say_phrase(self, report, kind, name=''):
+        """A memory event: the report for the model's context plus a fixed phrase."""
+        phrase = memory_phrase(kind, self.user_language, name)
+        instructions = confirm_instruction(phrase, '')
+        if self.user_language not in MEMORY_PHRASES:
+            instructions = 'Say this in {}, nothing else: "{}"'.format(self.user_language, phrase)
+        self.speak_report('Robot report (true, stored permanently on the robot): ' + report, instructions)
+
     def face_vectors(self, seconds=3.0):
         """Vectors of the biggest face over a few seconds (several angles)."""
         vectors, frames = [], 0
@@ -1122,64 +1186,65 @@ class RealtimeAisana(object):
         self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
         self.cancel_reply()
         transcript = self.transcripts.get(item_id, '')
-        say = 'In ONE short sentence, in your character, tell the user this. Nothing else.'
 
         def worker():
             action, name = command['action'], command.get('name')
             if self.faces is None or self.camera_stream is None:
-                self.speak_report('Robot report: face memory is switched off or its models are missing.', say)
+                self.say_phrase('face memory is switched off or its models are missing.', 'off')
                 return
+            sure = getattr(self.faces, 'threshold', 0.8) - 0.1   # renaming/deleting needs a sure match
             try:
                 if action in ('remember_me', 'remember_other') and not name:
                     self.pending_face = (action, time.monotonic() + 20)
-                    self.speak_report('Robot report: to remember a face you need the name.',
-                                      'Ask only for the name, in a few words.')
+                    self.say_phrase('to remember a face the name is needed.', 'ask_name')
                     return
                 if action in ('remember_me', 'remember_other'):
                     vectors = self.face_vectors()
                     if len(vectors) < 3:
-                        self.speak_report('Robot report: no face was clearly visible, nothing remembered.',
-                                          say + ' Ask them to look straight at you and try again.')
+                        self.say_phrase('no face was clearly visible, nothing remembered.', 'no_face')
                         return
                     if action == 'remember_me':
-                        old, _ = self.faces.identify(vectors[0])
-                        if old and old != name:
+                        old, distance = self.faces.identify(vectors[0])
+                        if old and old != name and distance < sure:
                             self.faces.forget(old)          # a person renames only themselves
+                            print('Face renamed: {} -> {}'.format(old, name))
                     self.faces.remember(name, vectors)
                     now = time.monotonic()
                     self.seen_at[name] = self.greeted_at[name] = now
                     print('Face remembered: {} ({} views)'.format(name, len(vectors)))
-                    self.speak_report('Robot report: you have just remembered the face of {}.'.format(name), say)
+                    self.say_phrase('the face of {} is now remembered.'.format(name), 'remembered', name)
                 elif action == 'forget_me':
                     frame = self.camera_stream.latest()
                     found = self.faces.faces(frame) if frame is not None else []
-                    known = found[0]['name'] if found else None
+                    known = found[0]['name'] if found and found[0]['distance'] < sure else None
                     if known:
                         self.faces.forget(known)
                         print('Face forgotten:', known)
-                        self.speak_report('Robot report: you deleted the face of {}; you no longer know '
-                                          'them.'.format(known), say)
+                        self.say_phrase('the face of {} was deleted.'.format(known), 'forgot', known)
                     else:
-                        self.speak_report('Robot report: you did not know this face anyway.', say)
+                        self.say_phrase('this face was not known.', 'unknown')
                 elif action == 'forget':
                     gone = self.faces.forget(name)
                     print('Forgotten: {} ({} records)'.format(name, gone))
-                    self.speak_report('Robot report: ' + ('you deleted {} from memory.'.format(name) if gone
-                                      else 'you had nothing called {} in memory.'.format(name)), say)
+                    if gone:
+                        self.say_phrase('{} was deleted from memory.'.format(name), 'forgot_name', name)
+                    else:
+                        self.say_phrase('nothing called {} in memory.'.format(name), 'no_such', name)
                 elif action == 'list':
-                    names = self.faces.names()
-                    things = [label for _, label, owner, _ in self.faces.things]
-                    self.speak_report('Robot report: faces you know: {}. Things: {}.'.format(
-                        ', '.join(names) or 'none', ', '.join(things) or 'none'),
-                        'List them in one or two short sentences, in your character.')
+                    known = self.faces.names() + ['{}{}'.format(label, ' ({})'.format(owner) if owner else '')
+                                                  for _, label, owner, _ in self.faces.things]
+                    if known:
+                        self.say_phrase('known: ' + ', '.join(known), 'list', ', '.join(known))
+                    else:
+                        self.say_phrase('nobody is known yet.', 'list_none')
                 elif action == 'remember_thing':
-                    self.remember_thing(command.get('label') or '', transcript, say)
+                    self.remember_thing(command.get('label') or '', transcript)
             except Exception as exc:
                 print('Face memory FAILED:', exc)
-                self.speak_report('Robot report: memory did not work: {}'.format(exc), say)
+                self.say_phrase('memory failed: {}'.format(exc), 'failed')
         threading.Thread(target=worker, daemon=True).start()
 
-    def remember_thing(self, label, transcript, say):
+    def remember_thing(self, label, transcript):
         picture, frame = self.take_photo()
         owner = None
         if POSSESSIVE_RE.search(label) and frame is not None:
@@ -1193,8 +1258,8 @@ class RealtimeAisana(object):
         self.faces.remember_thing(clean, owner, description,
                                   aisana_faces.jpeg(frame, 60) if frame is not None else picture)
         print('Thing remembered: {} ({}) - {}'.format(clean, owner or 'no owner', description[:120]))
-        self.speak_report('Robot report: you remembered the thing "{}"{}: {}'.format(
-            clean, ' of ' + owner if owner else '', description), say)
+        what = clean + (' ({})'.format(owner) if owner else '')
+        self.say_phrase('the thing "{}" is remembered: {}'.format(what, description), 'thing', what)
 
     def watch_faces(self):
         """Greets people she knows when they come into view (at most once per half hour)."""
@@ -1224,8 +1289,7 @@ class RealtimeAisana(object):
                     self.greeted_at[name] = now
                     print('Face seen: {} -> greeting'.format(name))
                     self.dialog_until = now + DIALOG_TIMEOUT
-                    self.speak_report('Robot report: {} (you know them) just came into view.'.format(name),
-                                      'Greet {} by name in a few words, in your character. No questions.'.format(name))
+                    self.say_phrase('{} (you know them) just came into view.'.format(name), 'greet', name)
                     break
 
     def motion_active(self):
@@ -1363,6 +1427,7 @@ class RealtimeAisana(object):
 
     def cancel_reply(self):
         if self.responding:
+            self.cut_ids.add(self.response_id)
             try:
                 self.send({'type': 'response.cancel'})
             except Exception:
@@ -1458,12 +1523,14 @@ class RealtimeAisana(object):
         elif typ == 'response.created':
             purpose = ((e.get('response') or {}).get('metadata') or {}).get('purpose')
             self.responding = True
+            self.response_id = (e.get('response') or {}).get('id')
             if purpose != 'own' and self.last_item in self.local_items:
                 # A model reply to words the code already handled (the camera, a
                 # command): it arrived after we tried to cancel. Cut it, never play it.
                 # Jetson log: only "Сейчас быстро проверю..." and the real answer lost.
                 self.response_item = None
                 self.playback_interrupted = True
+                self.cut_ids.add(self.response_id)
                 try:
                     self.send({'type': 'response.cancel'})
                 except Exception:
@@ -1493,7 +1560,8 @@ class RealtimeAisana(object):
             # One clean console line per reply (audio itself still streams).
             text = ' '.join((e.get('transcript') or '').split())
             if text:
-                print('Aisana:', text)
+                cut = e.get('response_id') in self.cut_ids
+                print('Aisana (cut):' if cut else 'Aisana:', text)
         elif typ == 'input_audio_buffer.committed':
             self.last_item = e.get('item_id')
             # Inside an open dialogue start the answer at once, but hold its audio
