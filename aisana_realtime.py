@@ -51,9 +51,17 @@ SLEEP_PATTERN = re.compile(
     r'(?:^|\W)(?:отбой|спи|хватит слушать|go to sleep|end conversation|болды)(?:\W|$)', re.I)
 
 
+# The name as a form of address anywhere in the phrase: "Позицию ноль верни.
+# Айсана, позиция ноль." Inflected forms ("про Айсану", "Айсане") do not count.
+WAKE_ANYWHERE = re.compile(
+    r'(?<!\w)(?:айсана|айсанна|айсанаа|эйсана|айсона|aisana|aysana|aissana|aisanna|'
+    r'آيسانا|ايسانا|أيسانا|عيسانا|إيسانا)(?!\w)', re.I)
+
+
 def has_wake_name(text):
-    """True if the utterance starts with Aisana (a short preface is allowed)."""
-    return bool(WAKE_PATTERN.match((text or '').strip().casefold()))
+    """True if the user addresses Aisana: at the start or anywhere as "Айсана"."""
+    text = (text or '').strip().casefold()
+    return bool(WAKE_PATTERN.match(text) or WAKE_ANYWHERE.search(text))
 
 
 def _short(text, words=5):

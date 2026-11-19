@@ -44,6 +44,8 @@ TABLE_LINE = re.compile(
 IMPORTANT_LINE = re.compile(
     r'STOPPED|EMERGENCY|limit is|nearest limit|limit reached|not set|feedback is OFF|'
     r'can\'t|cannot|calibrat|wrong way|outside|!!|doesn\'t match', re.I)
+# Lines of the firmware's help text ("h"), printed at every start.
+HELP_LINE = re.compile(r'^(?:-{5,}|Arm:|Whole arm:|Stepper:|Jog:|Elbow:|Gripper:|Other:)', re.I)
 # "p" status lines, e.g. "RIGHT stepper: 42.01  target 42.01  [between positions]"
 STATUS_LINE = re.compile(
     r'^(RIGHT|LEFT)\s+(stepper|elbow):\s+(-?[\d.]+)\s+target\s+(-?[\d.]+)\s*(.*)$', re.I)
@@ -270,7 +272,8 @@ class ArmController(object):
                     self.position_table[(table.group(1).lower(), joint)] = tuple(float(v) for v in values)
             except ValueError:
                 pass
-        if self.echo >= 2 or (self.echo == 1 and IMPORTANT_LINE.search(line)):
+        if self.echo >= 2 or (self.echo == 1 and IMPORTANT_LINE.search(line)
+                               and not HELP_LINE.match(line)):
             self.log('Arduino: ' + line)
         if READY_TEXT in line and not self.ready.is_set():
             self.ready.set()
@@ -390,7 +393,11 @@ def connect_from_environment(log=print, environ=None):
     except ImportError:
         log('Arm: pyserial is missing; run python3 -m pip install --user "pyserial==3.5".')
     except Exception as error:
-        log('Arm: not connected ({}). Voice and camera keep working.'.format(error))
+        hint = ''
+        if 'busy' in str(error).lower() or 'Errno 16' in str(error):
+            hint = (' The port is used by another program: close the Arduino IDE Serial Monitor '
+                    'or the other running Aisana (see: fuser -v {}).'.format(environ.get('AISANA_ARM_PORT') or '/dev/ttyACM*'))
+        log('Arm: not connected ({}).{} Voice and camera keep working.'.format(error, hint))
     return None
 
 

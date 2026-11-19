@@ -217,7 +217,8 @@ class ControllerTests(unittest.TestCase):
     def test_console_shows_only_important_arduino_lines(self):
         fake = FakeSerial(boot_lines=(
             b'Both arms ready.\n', b'RIGHT stepper reached 77.48\n',
-            b'LEFT STEPPER STOPPED: joint outside limits.\n', b'RIGHT elbow -> 129.00\n'))
+            b'LEFT STEPPER STOPPED: joint outside limits.\n', b'RIGHT elbow -> 129.00\n',
+            b'Other:     p (status) | t (positions table) | x (EMERGENCY STOP) | h\n'))
         controller, logs = open_controller_with_echo(fake, 1)
         try:
             time.sleep(0.2)

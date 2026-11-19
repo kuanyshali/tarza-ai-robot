@@ -45,7 +45,11 @@ class WakePhraseTests(unittest.TestCase):
                      'Окей, Айсана, какая погода?', 'آيسانا، إزيك؟'):
             with self.subTest(text=text):
                 self.assertTrue(rt.has_wake_name(text))
-        for text in ('что ты видишь?', 'я сказал айсане привет', 'hello there', ''):
+        # From the Jetson log: the name came at the end of the phrase.
+        self.assertTrue(rt.has_wake_name('Позицию ноль верни. Айсана, позиция ноль.'))
+        self.assertTrue(rt.has_wake_name('подними руки, Aisana'))
+        for text in ('что ты видишь?', 'я сказал айсане привет', 'поговорим про айсану',
+                     'hello there', ''):
             with self.subTest(text=text):
                 self.assertFalse(rt.has_wake_name(text))
 
