@@ -266,13 +266,13 @@ BACKWARD = re.compile(r'(?:назад|\bback(?:wards?)?\b|артқа|لورا|و
 LEFT = re.compile(r'(?:налево|влево|лево|левее|\bleft\b|солға|شمال|يسار)', re.I)
 RIGHT = re.compile(r'(?:направо|вправо|право|правее|\bright\b|оңға|يمين)', re.I)
 # "поведи/повели" is how STT often hears "поверни" (Jetson log, Nov 19).
-SPIN = re.compile(r'(?:поверн\w*|повед[иь]\w*|повели\b|разверн\w*|развед[иь]с\w*|разверт\w*|крут\w*|'
+SPIN = re.compile(r'(?:поверн\w*|повед[иь]\w*|повели\b|разверн\w*|развед[иь]с\w*|развел[иь]с\w*|(?:^|,\s*)разбер[иь]сь[.!]?\s*$|разверт\w*|крут\w*|'
                   r'разворот\w*|\bturn\b|\bspin\b|'
                   r'бұрыл\w*|لف)', re.I)
 TIMES_RE = re.compile(r'(\d+)\s*(?:раз\w*|times|рет|مرات|مرة)', re.I)
 FEW_TIMES = re.compile(r'(?:несколько раз|пару раз|много раз|a few times|several times|бірнеше рет)', re.I)
-# "разведись", "развертись" are how STT hears "развернись" (Jetson log, Nov 19).
-AROUND = re.compile(r'(?:разверн\w*|развед[иь]с\w*|разверт\w*|разворот\w*|turn around|кругом)', re.I)
+# "разведись", "развертись", "развелись", "<имя>, разберись" are how STT hears "развернись" (Jetson log, Nov 19).
+AROUND = re.compile(r'(?:разверн\w*|развед[иь]с\w*|развел[иь]с\w*|(?:^|,\s*)разбер[иь]сь[.!]?\s*$|разверт\w*|разворот\w*|turn around|кругом)', re.I)
 DRIVE = re.compile(
     r'(?:\bедь\b|езжай|поезжай|прое[дзхй]\w*|подъе[дзхй]\w*|отъе[дзхй]\w*|ехай|едем|поехали|двигайся|'
     r'подвинься|иди\b|пойди|шагай|\bdrive\b|\bgo\b|\bmove\b|\bcome\b|\broll\b|жүр|бар\b|'

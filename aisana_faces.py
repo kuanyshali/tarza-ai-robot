@@ -24,8 +24,9 @@ MODELS_DIR = os.path.expanduser(os.environ.get('AISANA_MODELS_DIR', os.path.join
 DATA_DIR = os.path.expanduser(os.environ.get('AISANA_DATA_DIR', '~/.local/share/aisana'))
 DB_PATH = os.path.expanduser(os.environ.get('AISANA_FACES_DB', os.path.join(DATA_DIR, 'faces.sqlite3')))
 # L2 distance between normalized OpenFace vectors: same person is usually < 0.7.
-THRESHOLD = float(os.environ.get('AISANA_FACE_THRESHOLD', '0.75'))
-MIN_FACE_PX = int(os.environ.get('AISANA_FACE_MIN_PX', '60'))
+THRESHOLD = float(os.environ.get('AISANA_FACE_THRESHOLD', '0.8'))
+MIN_FACE_PX = int(os.environ.get('AISANA_FACE_MIN_PX', '40'))
+MAX_VIEWS = 40                    # stored views per person (it keeps learning new angles)
 ENABLED = os.environ.get('AISANA_FACES', '1') == '1'
 
 MODELS = {
@@ -171,6 +172,17 @@ def jpeg(frame, quality=80):
     return data.tobytes()
 
 
+def square_crop(frame, box, margin=0.1):
+    """The face as a square with a little margin: the same framing every time
+    (the detector box changes shape from frame to frame)."""
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = box[:4]
+    side = int(max(x2 - x1, y2 - y1) * (1 + margin))
+    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+    left, top = max(0, cx - side // 2), max(0, cy - side // 2)
+    return frame[top:min(height, top + side), left:min(width, left + side)]
+
+
 class FaceMemory(object):
     """Names for faces, stored as 128 numbers per face in SQLite."""
 
@@ -182,6 +194,7 @@ class FaceMemory(object):
         self.detector = detector
         self.nets = None
         self.lock = threading.RLock()
+        self.learned_at = {}
         self.people = []                  # [(name, vector)]
         self.things = []                  # [(id, label, owner, description)]
         folder = os.path.dirname(db_path)
@@ -216,7 +229,7 @@ class FaceMemory(object):
             self.nets = (detector, embedder)
         return self.nets
 
-    def detect(self, frame, min_confidence=0.6):
+    def detect(self, frame, min_confidence=0.5):
         """Face boxes [(x1, y1, x2, y2, confidence)], biggest first."""
         if self.detector is not None:
             return self.detector(frame)
@@ -246,8 +259,7 @@ class FaceMemory(object):
         else:
             import cv2
             embedder = self._load_nets()[1]
-            x1, y1, x2, y2 = box[:4]
-            face = frame[y1:y2, x1:x2]
+            face = square_crop(frame, box)
             blob = cv2.dnn.blobFromImage(face, 1.0 / 255, (96, 96), (0, 0, 0), swapRB=True, crop=False)
             with self.lock:
                 embedder.setInput(blob)
@@ -286,6 +298,21 @@ class FaceMemory(object):
                 db.execute('INSERT INTO faces (name, vector, created_at) VALUES (?, ?, ?)',
                            (name, vector.astype('float32').tobytes(), now))
         self._load()
+
+    def learn(self, name, vector, distance):
+        """Recognized but from a new angle/light: keep this view too (few per minute)."""
+        now = time.monotonic()
+        if not (0.4 < distance < self.threshold - 0.05):
+            return False
+        if now - self.learned_at.get(name, 0) < 15:
+            return False
+        with self.lock:
+            views = sum(1 for known, _ in self.people if known == name)
+        if views >= MAX_VIEWS:
+            return False
+        self.learned_at[name] = now
+        self.remember(name, [vector])
+        return True
 
     def forget(self, name):
         """Deletes a person or a thing by name; how many records went."""

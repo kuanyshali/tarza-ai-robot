@@ -51,7 +51,7 @@ DIALOG_TIMEOUT = max(5.0, float(os.environ.get('AISANA_DIALOG_TIMEOUT', '12')))
 
 WAKE_PATTERN = re.compile(
     r'^\W*(?:(?:ok|okay|окей|ок|эй|hey|привет)\W+)?'
-    r'(?:айсан\w*|айсон\w*|эйсан\w*|асан[аеуы]\b|асама\b|айсама\b|асына\b|aisan\w*|aysan\w*|aissan\w*|'
+    r'(?:айсан\w*|айсон\w*|эйсан\w*|асан[аеуы]\b|асама\b|айсама\b|айсам\b|асына\b|aisan\w*|aysan\w*|aissan\w*|'
     r'آيسان\w*|ايسان\w*|أيسان\w*|عيسان\w*|إيسان\w*)', re.I)
 STOP_PATTERN = re.compile(
     r'(?:^|\W)(?:стоп|остановись|остановитесь|замри|stop|freeze|тоқта\w*|اسكت|وقف)(?:\W|$)', re.I)
@@ -62,7 +62,7 @@ SLEEP_PATTERN = re.compile(
 # The name as a form of address anywhere in the phrase: "Позицию ноль верни.
 # Айсана, позиция ноль." Inflected forms ("про Айсану", "Айсане") do not count.
 WAKE_ANYWHERE = re.compile(
-    r'(?<!\w)(?:айсана|айсанна|айсанаа|эйсана|айсона|асана|асама|айсама|асына|aisana|aysana|aissana|aisanna|'
+    r'(?<!\w)(?:айсана|айсанна|айсанаа|эйсана|айсона|асана|асама|айсама|айсам|асына|aisana|aysana|aissana|aisanna|'
     r'آيسانا|ايسانا|أيسانا|عيسانا|إيسانا)(?!\w)', re.I)
 
 
@@ -227,6 +227,19 @@ def is_prompt_echo(text):
     return False
 
 
+SHORT_REPLIES = re.compile(
+    r'^(?:да|нет|ага|угу|неа|спасибо|пасиба|привет|пока|ок|окей|ладно|хорошо|давай|конечно|точно|'
+    r'стоп|стой|ещё|еще|повтори|почему|зачем|когда|где|кто|что|как|сколько|правда|серьёзно|серьезно|'
+    r'yes|no|yeah|nope|ok|okay|thanks|hi|hello|bye|why|what|who|where|when|how|really|again|stop|'
+    r'иә|жоқ|рахмет|сәлем|aiwa|la|shukran)$', re.I)
+
+
+def is_stray_word(text):
+    """A lone word that is not a usual short reply ("Pairing.", "Мушакал")."""
+    words = re.findall(r'\w+', text or '')
+    return len(words) == 1 and not SHORT_REPLIES.match(words[0]) and not re.match(r'^\d+$', words[0])
+
+
 def is_sleep_phrase(text):
     return _short(text) and bool(SLEEP_PATTERN.search((text or '').casefold()))
 
@@ -320,9 +333,9 @@ PROMPT = (
     'When addressed as Aisana, wait for the complete question. '
     'In Russian use feminine grammatical forms when referring to yourself. '
     'You HAVE a working camera tool named inspect_camera. '
-    'Your robot body remembers faces, but only of people who ask ("Айсана, запомни меня, я Али") '
-    'and forgets them on "забудь меня"; the code does it, you only talk. Never guess the name '
-    'of a person you were not told about. '
+    'Faces are remembered by the robot code only when a person says "Айсана, запомни меня, я ..."; '
+    'it then tells you in a robot report. Never claim yourself that you remembered or forgot '
+    'someone, and never guess names. '
     'VISUAL INTENT RULE: Call inspect_camera BEFORE answering whenever the user refers '
     'to something physically in front of you, including implicit references like this, '
     'that, here, on the screen, on the paper, on the label, or what I am showing you. '
@@ -617,7 +630,7 @@ class RealtimeAisana(object):
                     'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
                         prefix + text)}]}})
                 self.expect_tool_response = True
-                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': self.reply_language() + (instructions or (
+                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'tool_choice': 'none', 'instructions': self.reply_language() + (instructions or (
                     'Tell the user in ONE short sentence (max 12 words) what went '
                     'wrong and the likely reason (for arms: motor power off, wrong direction setting, '
                     'limit or load; for legs: obstacle, calibration needed, Pi not reachable). Nothing else.'))}})
@@ -711,7 +724,7 @@ class RealtimeAisana(object):
                     'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
                         'Robot report: the user\'s arm command was executed by the robot itself. ' + result)}]}})
                 self.expect_tool_response = True
-                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': self.reply_language() + (
+                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'tool_choice': 'none', 'instructions': self.reply_language() + (
                     'In a few words, say what the arms are doing now '
                     'according to the robot report. If you said something different before, '
                     'correct yourself briefly.')}})
@@ -864,8 +877,11 @@ class RealtimeAisana(object):
             return ''
         now = time.monotonic()
         known = []
+        print('Faces: ' + (', '.join('{} {:.2f} {}'.format(f['name'] or 'unknown', f['distance'], f['where'])
+                                    for f in found) or 'none'))
         for face in found:
             if face['name']:
+                self.faces.learn(face['name'], face['vector'], face['distance'])
                 self.seen_at[face['name']] = now
                 self.greeted_at[face['name']] = now        # named now: no extra greeting
                 known.append('{} ({})'.format(face['name'], face['where']))
@@ -874,7 +890,8 @@ class RealtimeAisana(object):
         if known:
             parts.append('Face memory recognizes: ' + ', '.join(known) + '. Call them by name.')
         if unknown:
-            parts.append('{} face(s) you do not know; never invent their names.'.format(unknown))
+            parts.append('{} face(s) nobody introduced to you: describe them as a stranger ("какой-то '
+                         'красавчик"), never invent their names, no apologies.'.format(unknown))
         things = self.faces.things_text()
         if things:
             parts.append('Things you were shown before (say whose it is if you see one): ' + things + '.')
@@ -967,7 +984,7 @@ class RealtimeAisana(object):
                     'type': 'function_call_output', 'call_id': call_id,
                     'output': 'The user addressed you by name; you must answer.'}})
                 self.expect_tool_response = True
-                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': self.reply_language()}})
+                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'tool_choice': 'none', 'instructions': self.reply_language()}})
             else:
                 print('Not for me; staying silent.')
                 self.send({'type': 'conversation.item.create', 'item': {
@@ -1021,7 +1038,7 @@ class RealtimeAisana(object):
         self.cancel_reply()
         self.send({'type': 'session.update', 'session': {'type': 'realtime', 'instructions': self.instructions()}})
         self.expect_tool_response = True
-        self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': self.reply_language() + (
+        self.send({'type': 'response.create', 'response': {'metadata': OWN, 'tool_choice': 'none', 'instructions': self.reply_language() + (
             'The user set your humor level to {}%. Confirm it in ONE short sentence in the new style; you may say the number this once.'.format(
                 self.humor))}})
 
@@ -1053,7 +1070,7 @@ class RealtimeAisana(object):
                 self.send({'type': 'conversation.item.create', 'item': {
                     'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': report}]}})
                 self.expect_tool_response = True
-                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': self.reply_language() + (
+                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'tool_choice': 'none', 'instructions': self.reply_language() + (
                     'Answer the user\'s question in FIRST PERSON, as if you see it with your own eyes '
                     '("Вижу...", "Передо мной..."). Never mention a photo, picture, image, snapshot or '
                     'camera. In your usual character. One or two short sentences, no questions.')}})
@@ -1076,23 +1093,25 @@ class RealtimeAisana(object):
             self.send({'type': 'conversation.item.create', 'item': {
                 'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': report}]}})
             self.expect_tool_response = True
-            self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': (
+            self.send({'type': 'response.create', 'response': {'metadata': OWN, 'tool_choice': 'none', 'instructions': (
                 self.reply_language() + instructions)}})
         except Exception as exc:
             if not self.stop.is_set():
                 print('Report error:', exc)
 
-    def face_vectors(self, seconds=2.0):
-        """Vectors of the biggest face over a couple of seconds (several angles)."""
-        vectors = []
+    def face_vectors(self, seconds=3.0):
+        """Vectors of the biggest face over a few seconds (several angles)."""
+        vectors, frames = [], 0
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline and not self.stop.is_set():
             frame = self.camera_stream.latest(max_age=1.0, wait=1.0) if self.camera_stream else None
             if frame is not None:
+                frames += 1
                 found = self.faces.faces(frame)
                 if found:
                     vectors.append(found[0]['vector'])
             time.sleep(0.25)
+        print('Face views: {} of {} frames had a face'.format(len(vectors), frames))
         return vectors
 
     def run_memory_locally(self, item_id, command):
@@ -1198,6 +1217,7 @@ class RealtimeAisana(object):
                 name = face['name']
                 if not name:
                     continue
+                self.faces.learn(name, face['vector'], face['distance'])
                 away = now - self.seen_at.get(name, -1e9)
                 self.seen_at[name] = now
                 if FACE_GREET and away > 120 and now - self.greeted_at.get(name, -1e9) > FACE_GREET_MINUTES * 60:
@@ -1243,6 +1263,15 @@ class RealtimeAisana(object):
                 or SHOUT_ECHO_RE.match(transcript.strip()):
             # Noise or the STT hint repeated back: never a request, never a move.
             print('Empty speech or noise; ignored.')
+            if held:
+                self.release_hold(drop=True)
+            if item_id in self.responded_items:
+                self.cancel_reply()
+            self.ignore_item(item_id)
+            return
+        if WAKE_GATE and not has_wake_name(transcript) and is_stray_word(transcript):
+            # "Pairing." heard in an open dialogue: noise or someone else, not a reply.
+            print('Stray word; ignored.')
             if held:
                 self.release_hold(drop=True)
             if item_id in self.responded_items:
@@ -1399,7 +1428,7 @@ class RealtimeAisana(object):
                     phrase = (arm_reply(arm_intents[-1], self.user_language) if arm_intents
                               else legs_reply(drive, self.user_language))
                     instructions = confirm_instruction(phrase, self.transcripts.get(item_id, ''))
-                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': instructions}})
+                self.send({'type': 'response.create', 'response': {'metadata': OWN, 'tool_choice': 'none', 'instructions': instructions}})
             except Exception as exc:
                 if not self.stop.is_set():
                     print('Command report error:', exc)

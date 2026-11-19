@@ -355,6 +355,9 @@ class FakeFaces(object):
         self.remembered.append((name, len(vectors)))
         self.name = name
 
+    def learn(self, name, vector, distance):
+        return False
+
     def forget(self, name):
         self.forgotten.append(name)
         self.name = None
@@ -365,6 +368,39 @@ class FakeFaces(object):
 
     def things_text(self):
         return ''
+
+
+class LogFixesTests(unittest.TestCase):
+    """Jetson log of Nov 19, 23:40."""
+
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_own_answers_cannot_call_the_camera_again(self):
+        # "Сейчас быстро посмотрю..." + inspect_camera instead of the real answer.
+        session, sent = make_session()
+        session.inspect_camera = lambda question, detail=None: 'Вижу человека.'
+        say(session, 'c1', 'Айсана, кто перед тобой?')
+        time.sleep(0.2)
+        self.assertEqual(sent[-1]['response']['tool_choice'], 'none')
+
+    def test_stray_word_in_dialogue_is_ignored(self):
+        session, sent = make_session()
+        session.dialog_until = time.monotonic() + 20
+        say(session, 'p1', 'Pairing.')
+        self.assertEqual(sent[-1], {'type': 'conversation.item.delete', 'item_id': 'p1'})
+        for text in ('Да', 'спасибо', 'Почему?', 'Айсана'):
+            self.assertFalse(rt.is_stray_word(text) and not rt.has_wake_name(text), text)
+
+    def test_misheard_turnaround(self):
+        self.assertTrue(rt.has_wake_name('Айсам, развелись.'))
+        for text in ('Айсана, развелись.', 'Айсана, разберись.'):
+            self.assertEqual(rt.parse_legs_command(text)['action'], 'spin_right', text)
+        self.assertIsNone(rt.parse_legs_command('Айсана, разберись с этим кодом'))
 
 
 class FaceMemoryRealtimeTests(unittest.TestCase):
@@ -618,7 +654,7 @@ class ArmVerificationTests(unittest.TestCase):
             time.sleep(0.2)
             self.assertEqual(session.arm.calls[0][:3], ('position', 'right', 2))
             self.assertIn('Robot report', sent[-2]['item']['content'][0]['text'])
-            self.assertNotIn('tool_choice', sent[-1].get('response', {}))
+            self.assertEqual(sent[-1]['response'].get('tool_choice'), 'none')   # no second arm move
         finally:
             rt.WAKE_GATE = original
 
