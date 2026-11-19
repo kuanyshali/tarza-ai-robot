@@ -19,7 +19,12 @@ class FakeArm(object):
     def execute_many(self, intents, verify=True):
         self.calls.extend((i['action'], i['arm'], i['position'], i['joint'], i['direction'], i['degrees'])
                           for i in intents)
-        return 'Sent to the Arduino. Feedback: right shoulder: 47 -> 61, target 77, still moving.'
+        self.verified = verify
+        return 'Sent to the Arduino.'
+
+    def watch(self, intents, report, first=0.8, second=2.5):
+        self.watched = intents
+        self.report = report
 
     def emergency_stop(self):
         self.stopped += 1
@@ -134,7 +139,29 @@ class ArmVerificationTests(unittest.TestCase):
         self.assertEqual([c[:4] for c in session.arm.calls],
                          [('position', 'right', 1, 'shoulder'), ('position', 'right', 4, 'shoulder'),
                           ('position', 'right', 2, 'shoulder')])
-        self.assertIn('still moving', result)
+        self.assertIn('right arm shoulder -> position 2', result)
+        self.assertIn('few words', result)            # short spoken reply, no long report
+        self.assertFalse(session.arm.verified)       # no 2 s sensor wait before speaking
+        self.assertEqual(len(session.arm.watched), 3) # sensors checked in the background
+
+    def test_model_may_not_invent_position(self):
+        # From the Jetson log: "Рука правая." became "right arm -> position 2".
+        session, _ = make_session()
+        session.arm = FakeArm()
+        say(session, 'i8', 'Рука правая.')
+        result = session.run_tool('move_arm', {'action': 'position', 'arm': 'right', 'position': 2})
+        self.assertEqual(session.arm.calls, [])
+        self.assertIn('В какую позицию', result)
+
+    def test_sensor_problem_is_spoken(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        say(session, 'i9', 'руки в позицию ноль')
+        session.run_tool('move_arm', {'action': 'position', 'arm': 'both', 'position': 0})
+        session.arm.report(['LEFT STEPPER STOPPED: moving the wrong way.'])
+        time.sleep(0.3)
+        self.assertIn('wrong way', sent[-2]['item']['content'][0]['text'])
+        self.assertEqual(sent[-1]['type'], 'response.create')
 
     def test_arm_tool_refused_when_user_did_not_ask(self):
         session, _ = make_session()
@@ -142,7 +169,7 @@ class ArmVerificationTests(unittest.TestCase):
         say(session, 'i2', 'Айсана, какая сегодня погода?')
         result = session.run_tool('move_arm', {'action': 'position', 'arm': 'both', 'position': 3})
         self.assertEqual(session.arm.calls, [])
-        self.assertIn('NOT moved', result)
+        self.assertIn('Nothing moved', result)
 
     def test_vague_arm_request_uses_model_interpretation(self):
         session, _ = make_session()
@@ -218,7 +245,7 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(session.arm.calls, [('position', 'left', 3, 'whole', None, None)])
         session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'direction': 'up', 'degrees': 5})
         self.assertEqual(session.arm.calls[-1], ('nudge', 'right', None, 'whole', 'up', 5))
-        self.assertIn('Arduino', result)
+        self.assertIn('left arm -> position 3', result)
 
     def test_move_arm_without_usb_is_reported_not_faked(self):
         session, _ = make_session()

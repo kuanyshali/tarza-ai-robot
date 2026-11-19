@@ -44,6 +44,9 @@ TABLE_LINE = re.compile(
 IMPORTANT_LINE = re.compile(
     r'STOPPED|EMERGENCY|limit is|nearest limit|limit reached|not set|feedback is OFF|'
     r'can\'t|cannot|calibrat|wrong way|outside|!!|doesn\'t match', re.I)
+# Firmware lines that mean a joint really failed (EMERGENCY STOP is user-requested).
+SERIOUS_LINE = re.compile(r'STEPPER STOPPED|wrong way|outside limits|feedback is OFF|is not set', re.I)
+STOPPED_AT = re.compile(r'stopped at (-?[\d.]+) \(target (-?[\d.]+)\)', re.I)
 # Lines of the firmware's help text ("h"), printed at every start.
 HELP_LINE = re.compile(r'^(?:-{5,}|Arm:|Whole arm:|Stepper:|Jog:|Elbow:|Gripper:|Other:)', re.I)
 # "p" status lines, e.g. "RIGHT stepper: 42.01  target 42.01  [between positions]"
@@ -208,6 +211,7 @@ class ArmController(object):
         self._lines = collections.deque(maxlen=300)
         self._lines_lock = threading.Lock()
         self._sequence = 0
+        self._stops = 0
         self.ready = threading.Event()
         self._stop = threading.Event()
         self._reader = None
@@ -291,6 +295,8 @@ class ArmController(object):
             raise ArmError('Arduino did not report "{}"'.format(READY_TEXT))
         with self._lines_lock:
             start = self._sequence
+        if command == 'x':
+            self._stops += 1
         with self._write_lock:
             self._serial.write((command + '\n').encode('ascii'))
             self._serial.flush()
@@ -367,6 +373,51 @@ class ArmController(object):
         if problems:
             summary += ' Arduino reported: ' + ' | '.join(sorted(set(problems))[-3:])
         return summary
+
+    def watch(self, intents, report, first=0.8, second=2.5):
+        """Check the sensors in the background after a move; call report(problems)
+        only if something really went wrong. Nothing is said when all is fine."""
+        joints = []
+        for intent in intents:
+            for key in affected_joints(intent['action'], intent['arm'], intent['joint']):
+                if key not in joints:
+                    joints.append(key)
+        if not joints:
+            return None
+        with self._lines_lock:
+            start = self._sequence
+        stops = self._stops
+
+        def worker():
+            try:
+                time.sleep(first)
+                early = parse_status(self.send('p', collect_seconds=0.3))
+                time.sleep(max(0.0, second - first - 0.3))
+                late = parse_status(self.send('p', collect_seconds=0.3))
+            except Exception as error:
+                self.log('Arm: check failed: {}'.format(error))
+                return
+            if self._stops != stops:
+                return                      # user said "стоп": holding is expected
+            problems = []
+            for line in self._lines_after(start):
+                stopped = STOPPED_AT.search(line)
+                if SERIOUS_LINE.search(line) or (
+                        stopped and abs(float(stopped.group(1)) - float(stopped.group(2))) > 8):
+                    if line not in problems:
+                        problems.append(line)
+            for key in joints:
+                if key in early and key in late:
+                    now, target, _note = late[key]
+                    if abs(target - now) > 4 and abs(now - early[key][0]) < 1.0:
+                        problems.append('{} is not moving: at {:.0f}, target {:.0f}'.format(
+                            JOINT_TITLES[key], now, target))
+            if problems:
+                report(problems[:3])
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        return thread
 
     def emergency_stop(self):
         try:
@@ -532,6 +583,25 @@ def parse_arm_commands(text, limit=4):
 
 
 make_intent = _intent
+NUMBER_ANY = re.compile(r'\d|' + '|'.join(pattern for _number, pattern in NUMBER_WORDS), re.I)
+MOVE_WORDS = re.compile(r'(?:подвига\w*|подвинь|двига\w*|помаши|пошевели|\bmove\b|\bwave\b|қозға\w*)', re.I)
+
+
+def describe(intents):
+    """Short English description of what was sent, for the model."""
+    side = {'right': 'right arm', 'left': 'left arm', 'both': 'both arms'}
+    parts = []
+    for intent in intents:
+        who = side[intent['arm']] + ('' if intent['joint'] in (None, 'whole') else ' ' + intent['joint'])
+        if intent['action'] == 'position':
+            parts.append('{} -> position {}'.format(who, intent['position']))
+        elif intent['action'] == 'nudge':
+            parts.append('{} {} {} degrees'.format(who, intent['direction'], intent['degrees']))
+        elif intent['action'] in ('gripper_open', 'gripper_close'):
+            parts.append('{} gripper {}'.format(side[intent['arm']], intent['action'].split('_')[1]))
+        else:
+            parts.append(intent['action'])
+    return '; '.join(parts)
 CONTINUE_WORDS = re.compile(
     r'(?:ещ[её]|снова|опять|повтори|\bagain\b|\bmore\b|тағы|كمان)', re.I)
 

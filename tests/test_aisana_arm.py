@@ -240,6 +240,26 @@ class ControllerTests(unittest.TestCase):
         finally:
             controller.close()
 
+    def test_watch_reports_only_real_problems(self):
+        fake = StatusSerial(before=47.0, after=47.2, target=77.0)
+        controller, _ = open_controller(fake)
+        try:
+            reports = []
+            intents = arm.parse_arm_commands('правое плечо в позицию 1')
+            controller.watch(intents, reports.append, first=0.05, second=0.4).join(2)
+            self.assertIn('right shoulder is not moving', reports[0][0])
+            reports[:] = []
+            fake.after = 63.0                        # moving: stay silent
+            controller.watch(intents, reports.append, first=0.05, second=0.4).join(2)
+            self.assertEqual(reports, [])
+            fake.after = 47.2                        # user said stop meanwhile: silent
+            thread = controller.watch(intents, reports.append, first=0.05, second=0.4)
+            controller.emergency_stop()
+            thread.join(2)
+            self.assertEqual(reports, [])
+        finally:
+            controller.close()
+
     def test_status_reply_is_collected(self):
         fake = FakeSerial()
         controller, _ = open_controller(fake)

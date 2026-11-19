@@ -81,7 +81,8 @@ python3 -u robot.py 2>&1 | tee robot.log              # классический
 | `AISANA_ARM` | `1` | `0` — не подключаться к Arduino |
 | `AISANA_ARM_PORT` | автопоиск | Явный порт Arduino |
 | `AISANA_ARM_ECHO` | `1` | Вывод Arduino в консоль: `1` — только ошибки и предупреждения, `2` — всё, `0` — ничего |
-| `AISANA_ARM_VERIFY_SECONDS` | `1.0` | Через сколько секунд после команды проверять датчики рук |
+| `AISANA_ARM_VERIFY_SECONDS` | `1.0` | `robot.py`: через сколько секунд после команды проверять датчики рук |
+| `AISANA_REALTIME_SILENCE_MS` | `700` | Realtime: сколько мс тишины считать концом фразы (больше — реже перебивает, но медленнее) |
 | `AISANA_ARM_UP` | `position4` | `position0` — поменять местами «вверх» и «вниз» |
 | `AISANA_REALTIME_WAKE` | `1` | Realtime: `0` — отвечать на любую речь (старое поведение) |
 | `AISANA_DIALOG_TIMEOUT` | `20` | Realtime: секунд без имени после ответа |

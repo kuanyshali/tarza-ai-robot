@@ -23,8 +23,9 @@ try:
 except ImportError:          # tests and robot.py do not need websocket-client
     websocket = None
 
-from aisana_arm import (connect_from_environment, parse_arm_commands, make_intent,
-                        ARM_WORDS, UP_WORDS, DOWN_WORDS, CONTINUE_WORDS)
+from aisana_arm import (connect_from_environment, parse_arm_commands, make_intent, describe,
+                        ARM_WORDS, UP_WORDS, DOWN_WORDS, CONTINUE_WORDS, NUMBER_ANY,
+                        MOVE_WORDS, OPEN_WORDS, CLOSE_WORDS)
 from sadam_features import WEB_ENABLED, get_weather, search_web
 
 RATE = 24000
@@ -32,7 +33,7 @@ CHUNK = 1440  # 30 ms of mono S16_LE PCM
 MODEL = os.environ.get('AISANA_REALTIME_MODEL', 'gpt-realtime-2.1-mini')
 VOICE = os.environ.get('AISANA_REALTIME_VOICE', 'marin')
 BARGE_IN = os.environ.get('AISANA_REALTIME_BARGE_IN', '0') == '1'
-SILENCE_MS = int(os.environ.get('AISANA_REALTIME_SILENCE_MS', '850'))
+SILENCE_MS = int(os.environ.get('AISANA_REALTIME_SILENCE_MS', '700'))
 ECHO_GUARD = os.environ.get('AISANA_ECHO_GUARD', '1') == '1'
 ECHO_TAIL_SECONDS = float(os.environ.get('AISANA_ECHO_TAIL_SECONDS', '1.5'))
 KEY = os.environ.get('OPENAI_API_KEY')
@@ -173,8 +174,9 @@ PROMPT = (
     'When the user names a position number for the shoulder (плечо) or the elbow (локоть), '
     'use action position with that joint, never nudge. If the user says several commands, '
     'one call is enough: the robot re-reads the user\'s exact words and runs them in order. '
-    'move_arm reports real sensor feedback per joint: reached, still moving, already there or '
-    'DID NOT MOVE. Say exactly that; never say a joint moved if the report says it did not. '
+    'Never invent a position number or direction the user did not say; ask instead. '
+    'Arm moves take a few seconds: after move_arm say only a few words ("Поднимаю правую руку."). '
+    'Never claim a move finished; if a sensor report about a problem arrives, say it in one sentence. '
     'Call move_arm only when the user explicitly asks to move an arm, go to a numbered '
     'position, open or close a gripper, stop the arms or report their status. '
     'Positions are numbered 0 to 4; 0 is the zero (home) position; a higher number lifts the arm. '
@@ -274,32 +276,73 @@ class RealtimeAisana(object):
         """move_arm, checked against what the user actually said.
 
         Explicit commands are re-parsed from the transcript (deterministic, the
-        user's last words win); the model's own arguments are used only for vague
-        requests that still mention the arms, a stop, or a short "ещё / выше".
+        user's last words win). The model's own arguments are used only when the
+        words support them: a position needs a spoken number, a nudge needs
+        up/down/move words, a gripper needs open/close. The command is sent at
+        once; sensors are checked in the background (watch) and only problems
+        are spoken, so the reply is immediate and short.
         """
         item_id = self.last_item
-        transcript = self.wait_transcript(item_id)
+        transcript = self.wait_transcript(item_id, timeout=1.5)
         intents = parse_arm_commands(transcript) if transcript else []
-        source = 'from the user\'s words'
         if not intents:
-            model_intent = make_intent(args.get('action'), args.get('arm') or 'both',
-                                       args.get('position'), args.get('joint') or 'whole',
-                                       args.get('direction'), args.get('degrees'))
+            action = args.get('action')
+            words = transcript or ''
             recent = time.monotonic() - self.last_arm_at < 90
-            follow_up = recent and transcript and (CONTINUE_WORDS.search(transcript) or UP_WORDS.search(transcript)
-                                                    or DOWN_WORDS.search(transcript))
-            if (args.get('action') == 'stop' or transcript is None
-                    or ARM_WORDS.search(transcript) or follow_up):
-                intents, source = [model_intent], 'as interpreted by you'
-            else:
-                return ('The user did not ask to move the arms (they said: "{}"). The arms were NOT moved. '
-                        'Answer what the user actually said.'.format(transcript))
+            if transcript is not None and action not in ('stop', 'status'):
+                if not (ARM_WORDS.search(words) or (recent and (CONTINUE_WORDS.search(words)
+                        or UP_WORDS.search(words) or DOWN_WORDS.search(words)))):
+                    return ('The user did not ask to move the arms (they said: "{}"). Nothing moved. '
+                            'Answer what they actually said.'.format(words))
+                if action == 'position' and not NUMBER_ANY.search(words):
+                    return ('Nothing moved: the user did not say a position number. Ask only: '
+                            '"В какую позицию, от нуля до четырёх?" (in the user\'s language).')
+                if action == 'nudge' and not (UP_WORDS.search(words) or DOWN_WORDS.search(words)
+                                              or CONTINUE_WORDS.search(words) or MOVE_WORDS.search(words)):
+                    return ('Nothing moved: the user did not say up or down. Ask only: '
+                            '"Вверх или вниз?" (in the user\'s language).')
+                if action in ('gripper_open', 'gripper_close') and not (
+                        OPEN_WORDS.search(words) or CLOSE_WORDS.search(words)):
+                    return 'Nothing moved: ask in a few words whether to open or close the gripper.'
+            intents = [make_intent(action, args.get('arm') or 'both', args.get('position'),
+                                   args.get('joint') or 'whole', args.get('direction'), args.get('degrees'))]
         if self.arm is None:
-            return ('The arm controller (Arduino Mega) is not connected over USB. '
-                    'Tell the user briefly; do not pretend the arm moved.')
-        result = self.arm.execute_many(intents)
+            return 'Arm controller is not connected over USB; nothing moved. Say so in a few words.'
+        if intents[0]['action'] == 'status':
+            return self.arm.execute_many(intents)
+        result = self.arm.execute_many(intents, verify=False)
         self.last_arm_at = time.monotonic()
-        return 'Executed {}: {}. {}'.format(source, intents, result)
+        if intents[0]['action'] != 'stop':
+            self.arm.watch(intents, self.report_arm_problem)
+        problem = ' Arduino said: ' + result.split('Arduino reported: ', 1)[1] if 'Arduino reported: ' in result else ''
+        return ('Sent to the arms: {}.{} Say ONLY a few words that you are doing it, e.g. '
+                '"Опускаю руки в ноль." Do not describe results; sensors are checked automatically '
+                'and problems will be reported to you.'.format(describe(intents), problem))
+
+    def report_arm_problem(self, problems):
+        """Speak up only when the sensors show a real problem after a move."""
+        text = ' | '.join(problems)
+        print('Arm problem:', text)
+
+        def worker():
+            deadline = time.monotonic() + 12
+            while self.responding and time.monotonic() < deadline and not self.stop.is_set():
+                time.sleep(0.2)
+            if self.stop.is_set():
+                return
+            try:
+                self.send({'type': 'conversation.item.create', 'item': {
+                    'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
+                        'Arm sensor report after the last move: ' + text)}]}})
+                self.expect_tool_response = True
+                self.send({'type': 'response.create', 'response': {'instructions': (
+                    'Tell the user in ONE short sentence (max 12 words), in their language, which joint '
+                    'has a problem and the likely reason: motor power off, wrong direction setting, '
+                    'limit or too much load. Nothing else.')}})
+            except Exception as exc:
+                if not self.stop.is_set():
+                    print('Arm report error:', exc)
+        threading.Thread(target=worker, daemon=True).start()
 
     def run_pending_arm(self, item_id):
         """Safety net: the user gave a clear arm command but the model never
@@ -315,8 +358,10 @@ class RealtimeAisana(object):
                 if self.arm is None:
                     result = 'Arm controller not connected over USB; nothing moved.'
                 else:
-                    result = self.arm.execute_many(intents)
+                    result = 'Sent to the arms: {}.'.format(describe(intents))
+                    self.arm.execute_many(intents, verify=False)
                     self.last_arm_at = time.monotonic()
+                    self.arm.watch(intents, self.report_arm_problem)
             except Exception as exc:
                 result = 'Arm command failed: {}'.format(exc)
             print('Arm (from your words) {} -> {}'.format(intents, ' '.join(result.split())[:300]))
@@ -328,9 +373,9 @@ class RealtimeAisana(object):
                         'Robot report: the user\'s arm command was executed by the robot itself. ' + result)}]}})
                 self.expect_tool_response = True
                 self.send({'type': 'response.create', 'response': {'instructions': (
-                    'In one short sentence, in the user\'s language, tell the user what the arms '
-                    'actually did according to the robot report. If you said something different '
-                    'before, correct yourself.')}})
+                    'In a few words, in the user\'s language, say what the arms are doing now '
+                    'according to the robot report. If you said something different before, '
+                    'correct yourself briefly.')}})
             except Exception as exc:
                 if not self.stop.is_set():
                     print('Arm report error:', exc)
@@ -547,7 +592,8 @@ class RealtimeAisana(object):
             self.send({'type': 'response.create', 'response': {'instructions': (
                 'The tool has returned. Answer the user NOW, in first person as Aisana, '
                 'using its result. No commentary about tools, photos or analysis. '
-                'One or two short sentences in the language of the user question. '
+                'Follow any instruction in the tool result. Otherwise one short sentence, '
+                'in the language of the user question. '
                 'No filler, no wishes, no offers of more help, no follow-up questions. '
                 'If the tool failed, say briefly that it did not work.') }})
         except Exception as exc:
