@@ -14,18 +14,23 @@
 
 ## Запуск на Jetson
 
+Быстрый режим работает в `.venv` (там websocket-client), классический — в системном `python3` (там cv2 из JetPack). У системного `python3` на Jetson нет pip.
+
 ```bash
 cd ~/ai_robot
 git pull --ff-only origin main
-python3 -m pip install --user -r requirements.txt    # один раз
-sudo usermod -aG dialout $USER                        # один раз, затем перелогиниться: доступ к Arduino
-python3 -m unittest discover -s tests -v              # офлайн-тесты, без железа
-python3 -u aisana_realtime.py 2>&1 | tee realtime.log # быстрый режим
+# один раз:
+.venv/bin/python -m pip install "pyserial==3.5" "websocket-client==1.3.1"
+sudo apt install python3-serial                       # pyserial для robot.py
+sudo usermod -aG dialout $USER                        # доступ к Arduino; затем выйти из SSH и зайти снова
+# каждый раз:
+.venv/bin/python -m unittest discover -s tests -v     # офлайн-тесты, без железа
+.venv/bin/python -u aisana_realtime.py 2>&1 | tee realtime.log   # быстрый режим
 # или
 python3 -u robot.py 2>&1 | tee robot.log              # классический режим
 ```
 
-`OPENAI_API_KEY` должен быть в окружении. Флаг `-u` нужен, чтобы лог сразу писался в файл.
+`OPENAI_API_KEY` должен быть в окружении. Флаг `-u` нужен, чтобы лог сразу писался в файл. Камеру realtime-режим снимает через `/usr/bin/python3 camera.py`, поэтому cv2 в `.venv` не нужен.
 
 ## Руки Arm team (Arduino Mega по USB)
 

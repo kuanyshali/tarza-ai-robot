@@ -9,8 +9,8 @@ A conversation starts with the name **Aisana / Айсана**; after each reply 
 ```bash
 cd ~/ai_robot
 git pull --ff-only origin main
-python3 -m pip install --user -r requirements.txt
-python3 -u aisana_realtime.py 2>&1 | tee realtime.log
+.venv/bin/python -m pip install "pyserial==3.5" "websocket-client==1.3.1"
+.venv/bin/python -u aisana_realtime.py 2>&1 | tee realtime.log
 ```
 
 Requires an existing OPENAI_API_KEY environment variable, KT USB Audio mic, Xiaomi USB Composite Device speaker and ALSA arecord/aplay.
@@ -20,7 +20,7 @@ Default model: gpt-realtime-2.1-mini. Override with AISANA_REALTIME_MODEL. Defau
 **Test with headphones or low speaker volume.** For experimental interruptions:
 
 ```bash
-AISANA_REALTIME_BARGE_IN=1 python3 -u aisana_realtime.py
+AISANA_REALTIME_BARGE_IN=1 .venv/bin/python -u aisana_realtime.py
 ```
 
 Echo cancellation and accurate conversation.item.truncate are **not** implemented; the speaker can trigger false interruptions and the conversation state may not exactly match played audio. Keep barge-in disabled until tested with headphones. Do not leave the prototype unattended or connected indefinitely: continuous audio incurs API charges. 

@@ -14,6 +14,8 @@ Aisana (Айсана): university voice robot on an NVIDIA Jetson Nano. The owne
   commands from `aisana_arm.build_command` may be sent. Opening the port resets the board;
   wait for `Both arms ready.`. Physical motion: keep "стоп" → `x` working in both modes.
 - Repo lives at `~/ai_robot` on the Jetson; the owner updates with `git pull --ff-only origin main`.
+- On the Jetson, system `python3` has no pip. Realtime mode runs in `~/ai_robot/.venv`
+  (`.venv/bin/python aisana_realtime.py`); `robot.py` runs with system `python3` (JetPack cv2).
 
 ## Code map
 - `aisana_realtime.py` — main fast mode (OpenAI Realtime GA over websocket-client 1.3.1).
