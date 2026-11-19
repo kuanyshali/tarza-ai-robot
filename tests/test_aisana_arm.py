@@ -193,6 +193,22 @@ class ControllerTests(unittest.TestCase):
         finally:
             controller.close()
 
+    def test_accepted_target_not_claimed_as_completed_motion(self):
+        class AckSerial(FakeSerial):
+            def write(self, data):
+                super(AckSerial, self).write(data)
+                if data == b'r m 2\n':
+                    with self.lock:
+                        self.incoming.append(b'RIGHT stepper -> 161.80\n')
+        fake = AckSerial()
+        controller, _ = open_controller(fake)
+        try:
+            summary = controller.execute('position', 'right', 2, 'shoulder')
+            self.assertIn('Arduino accepted command', summary)
+            self.assertIn('completion is NOT confirmed', summary)
+        finally:
+            controller.close()
+
     def test_live_table_rejects_unset_shoulder_position(self):
         fake = FakeSerial()
         controller, _ = open_controller(fake)
