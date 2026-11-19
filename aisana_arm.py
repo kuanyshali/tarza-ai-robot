@@ -267,7 +267,7 @@ class ArmController(object):
         with self._lines_lock:
             return [line for number, line in self._lines if number > sequence]
 
-    def send(self, command, collect_seconds=0.0):
+    def send(self, command, collect_seconds=0.0, generation=None):
         """Write one whitelisted command; optionally collect the reply lines."""
         if self._serial is None:
             raise ArmError('Arm is not connected')
@@ -276,6 +276,8 @@ class ArmController(object):
         with self._lines_lock:
             start = self._sequence
         with self._write_lock:
+            if generation is not None and generation != self._stop_generation:
+                raise ArmError('Movement cancelled by stop; no command sent.')
             self._serial.write((command + '\n').encode('ascii'))
             self._serial.flush()
         if self.echo >= 2:
@@ -334,7 +336,7 @@ class ArmController(object):
             for command in commands:
                 if generation != self._stop_generation:
                     return 'Movement cancelled by stop; do not claim success.'
-                lines.extend(self.send(command, collect_seconds=0.6))
+                lines.extend(self.send(command, collect_seconds=0.6, generation=generation))
             sent = ', '.join('"{}"'.format(c) for c in commands)
             print('Arm feedback:', ' | '.join(lines) if lines else '(no Arduino reply)')
             problems = [line for line in lines if IMPORTANT_LINE.search(line)]
@@ -351,7 +353,11 @@ class ArmController(object):
             status = [line for line in status if re.match(r'^(RIGHT|LEFT)\s+(stepper|elbow|gripper):', line, re.I)]
             if status:
                 print('Arm status:', ' | '.join(status))
-                problems.extend(line for line in status if ('[STOPPED]' in line or 'feedback OFF' in line))
+                for side, j in expected:
+                    motor = {'shoulder': 'stepper', 'elbow': 'elbow', 'gripper': 'gripper'}[j]
+                    problems.extend(line for line in status
+                                    if line.lower().startswith(side + ' ' + motor + ':')
+                                    and ('[STOPPED]' in line or 'feedback OFF' in line))
             if problems:
                 return 'Command {} sent; Arduino warning/error: {}. Movement not confirmed.'.format(
                     sent, ' | '.join(problems[-4:]))
