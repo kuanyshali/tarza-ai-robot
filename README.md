@@ -80,6 +80,7 @@ python3 -u robot.py 2>&1 | tee robot.log              # классический
 | `AISANA_ARM_PORT` | автопоиск | Явный порт Arduino |
 | `AISANA_ARM_ECHO` | `1` | Вывод Arduino в консоль: `1` — только ошибки и предупреждения, `2` — всё, `0` — ничего |
 | `AISANA_ARM_UP` | `position4` | `position0` — поменять местами «вверх» и «вниз» |
+| `AISANA_REALTIME_FAST` | `1` | Realtime: быстрые ответы в открытом диалоге; команды рук ждут полной транскрипции. `0` — всегда ждать транскрипцию. |
 | `AISANA_REALTIME_WAKE` | `1` | Realtime: `0` — отвечать на любую речь (старое поведение) |
 | `AISANA_DIALOG_TIMEOUT` | `20` | Realtime: секунд без имени после ответа |
 | `AISANA_REALTIME_MODEL` | `gpt-realtime-2.1-mini` | Модель realtime |
