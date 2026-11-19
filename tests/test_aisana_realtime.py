@@ -59,13 +59,10 @@ class WakePhraseTests(unittest.TestCase):
 class WakeGateTests(unittest.TestCase):
     def setUp(self):
         self.original = rt.WAKE_GATE
-        self.original_fast = rt.FAST_FOLLOWUP
         rt.WAKE_GATE = True
-        rt.FAST_FOLLOWUP = True
 
     def tearDown(self):
         rt.WAKE_GATE = self.original
-        rt.FAST_FOLLOWUP = self.original_fast
 
     def test_unaddressed_speech_is_dropped(self):
         session, sent = make_session()
@@ -75,14 +72,13 @@ class WakeGateTests(unittest.TestCase):
                         'item_id': 'i1', 'transcript': 'ребята, пойдём обедать'})
         self.assertEqual(sent, [{'type': 'conversation.item.delete', 'item_id': 'i1'}])
 
-    def test_name_starts_dialogue_and_followups_start_before_transcript(self):
+    def test_name_starts_dialogue_and_followups_answer_immediately(self):
         session, sent = make_session()
         session.handle({'type': 'conversation.item.input_audio_transcription.completed',
                         'item_id': 'i1', 'transcript': 'Айсана, привет'})
         self.assertEqual(types(sent), ['response.create'])
         self.assertTrue(session.dialog_active())
-        session.handle({'type': 'response.done'})
-        # Response generation starts immediately, but movement must wait for STT.
+        # Follow-up inside the window: respond at commit, not after STT.
         session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'i2'})
         self.assertEqual(types(sent), ['response.create', 'response.create'])
         session.handle({'type': 'conversation.item.input_audio_transcription.completed',
@@ -108,93 +104,6 @@ class WakeGateTests(unittest.TestCase):
         session.handle({'type': 'conversation.item.input_audio_transcription.completed',
                         'item_id': 'i4', 'transcript': 'Айсана, стоп'})
         self.assertEqual(session.arm.stopped, 1)
-
-
-class FastArmTests(unittest.TestCase):
-    def start_fast(self):
-        session, sent = make_session()
-        session.arm = FakeArm()
-        session.dialog_until = time.monotonic() + 30
-        session.begin_fast_turn('fast1')
-        return session, sent
-
-    def test_early_wrong_nudge_waits_and_uses_numbered_shoulder_target(self):
-        session, sent = self.start_fast()
-        session.start_tool('arm1', 'move_arm', json.dumps({
-            'action': 'nudge', 'arm': 'right', 'joint': 'shoulder',
-            'direction': 'up', 'degrees': 10}))
-        self.assertEqual(session.arm.calls, [])
-        session.handle_transcript('fast1', 'Айсана, правое плечо в позицию 2')
-        session.handle({'type': 'response.done'})
-        deadline = time.monotonic() + 1
-        while not session.arm.calls and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertEqual(session.arm.calls, [('position', 'right', 2, 'shoulder', None, None)])
-
-    def test_failed_transcript_does_not_send_motion(self):
-        session, sent = self.start_fast()
-        session.start_tool('arm1', 'move_arm', json.dumps({
-            'action': 'position', 'arm': 'both', 'position': 3}))
-        session.handle({'type': 'conversation.item.input_audio_transcription.failed', 'item_id': 'fast1'})
-        session.handle({'type': 'response.done'})
-        deadline = time.monotonic() + 1
-        while len(sent) < 3 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertEqual(session.arm.calls, [])
-        self.assertTrue(any('No intelligible command' in e.get('item', {}).get('output', '') for e in sent))
-
-    def test_grippers_both(self):
-        session, sent = self.start_fast()
-        session.handle_transcript('fast1', 'Айсана, закрой захваты')
-        self.assertTrue(session.fast_turn['allowed'])
-        self.assertEqual(session.pending_position['action'], 'gripper_close')
-
-    def test_fallback_if_numbered_command_gets_no_tool(self):
-        session, sent = self.start_fast()
-        session.handle_transcript('fast1', 'Айсана, правое плечо в позицию 2')
-        self.assertEqual(types(sent), ['response.create'])
-        session.handle({'type': 'response.done'})
-        self.assertEqual(sent[-1]['response']['tool_choice']['name'], 'move_arm')
-
-    def test_ambiguous_command_not_executed(self):
-        session, sent = self.start_fast()
-        session.handle_transcript('fast1', 'Айсана, плечо в позицию 2')
-        self.assertFalse(session.fast_turn['allowed'])
-
-
-class NumberedPositionTests(unittest.TestCase):
-    def test_last_position_in_real_report(self):
-        matched, intent = rt.numbered_position_intent(
-            'Айсана, подвигай плечом. Плечо правое в позицию 1. Позиция 4. Айсана, правое плечо в позицию 2.')
-        self.assertTrue(matched)
-        self.assertEqual(intent, {'action': 'position', 'arm': 'right', 'joint': 'shoulder', 'position': 2})
-
-    def test_spoken_two_not_both(self):
-        matched, intent = rt.numbered_position_intent('Айсана, правое плечо в позицию два')
-        self.assertTrue(matched)
-        self.assertEqual(intent['arm'], 'right')
-        self.assertEqual(intent['position'], 2)
-
-    def test_short_followup_reuses_target(self):
-        _, first = rt.numbered_position_intent('Айсана, левый локоть в позицию 1')
-        _, second = rt.numbered_position_intent('позиция 3', first)
-        self.assertEqual(second, dict(first, position=3))
-
-    def test_model_nudge_is_overridden_by_numbered_transcript(self):
-        session, sent = make_session()
-        session.arm = FakeArm()
-        session.handle_transcript('i5', 'Айсана, правое плечо в позицию 2')
-        self.assertEqual(sent[-1]['response']['tool_choice']['name'], 'move_arm')
-        session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'joint': 'shoulder',
-                                      'direction': 'up', 'degrees': 10})
-        self.assertEqual(session.arm.calls, [('position', 'right', 2, 'shoulder', None, None)])
-        session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right'})
-        self.assertEqual(len(session.arm.calls), 1)
-
-    def test_ambiguous_joint_side_does_not_move(self):
-        matched, intent = rt.numbered_position_intent('Айсана, плечо в позицию 2')
-        self.assertTrue(matched)
-        self.assertIsNone(intent)
 
 
 class ToolTests(unittest.TestCase):
