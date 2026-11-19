@@ -15,7 +15,7 @@ from aisana_memory import load_history, remember_turn, CONTEXT_MESSAGES
 from aisana_stream import stream_transcribe
 from sadam_features import (weather_intent, WEATHER_ENABLED, get_weather,
                             online_search_intent, search_web, semantic_turn_incomplete)
-from aisana_arm import connect_from_environment, parse_arm_command, arm_reply
+from aisana_arm import connect_from_environment, parse_arm_commands, arm_reply
 
 API_KEY = os.environ.get('OPENAI_API_KEY')
 if not API_KEY:
@@ -1185,15 +1185,21 @@ def main():
                 break
             language = response_language(question)
             answer_started = time.monotonic()
-            arm_intent = parse_arm_command(question)
+            arm_intents = parse_arm_commands(question)
+            arm_intent = arm_intents[-1] if arm_intents else None
             if arm_intent is not None:
-                # Explicit arm command: parsed locally, no model call, fast.
-                print('Tool: arm', arm_intent)
+                # Explicit arm commands: parsed locally, no model call, fast.
                 try:
                     if arm is None:
                         raise RuntimeError('Arm controller not connected')
-                    print(arm.execute(**arm_intent))
+                    result = arm.execute_many(arm_intents)
+                    print('Tool: arm', arm_intents, '->', result)
                     answer = arm_reply(arm_intent, language)
+                    if 'DID NOT MOVE' in result:
+                        answer = {'Russian': 'Команду отправила, но рука не сдвинулась. Проверьте питание моторов.',
+                                  'Kazakh': 'Команда жіберілді, бірақ қол қозғалмады. Мотор қуатын тексеріңіз.',
+                                  'Egyptian Arabic': 'بعت الأمر بس الإيد ما اتحركتش. اتأكدوا من كهربا الموتور.',
+                                  }.get(language, 'I sent the command, but the arm did not move. Check the motor power.')
                 except Exception as error:
                     print('Arm command failed:', error)
                     answer = arm_reply(arm_intent, language, error=error)

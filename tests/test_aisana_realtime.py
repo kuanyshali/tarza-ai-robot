@@ -16,6 +16,11 @@ class FakeArm(object):
         self.calls.append((action, arm, position, joint, direction, degrees))
         return 'Sent to the Arduino.'
 
+    def execute_many(self, intents, verify=True):
+        self.calls.extend((i['action'], i['arm'], i['position'], i['joint'], i['direction'], i['degrees'])
+                          for i in intents)
+        return 'Sent to the Arduino. Feedback: right shoulder: 47 -> 61, target 77, still moving.'
+
     def emergency_stop(self):
         self.stopped += 1
 
@@ -106,6 +111,90 @@ class WakeGateTests(unittest.TestCase):
         self.assertEqual(session.arm.stopped, 1)
 
 
+def say(session, item_id, transcript):
+    session.handle({'type': 'input_audio_buffer.committed', 'item_id': item_id})
+    session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                    'item_id': item_id, 'transcript': transcript})
+
+
+class ArmVerificationTests(unittest.TestCase):
+    """The case from the Jetson log of 2026-11-19: the model chose a nudge."""
+
+    def test_users_exact_words_override_model_guess(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        say(session, 'i1', 'Айсана, подвигай плечом. Плечо правое в позицию 1. Позиция 4. '
+                           'Айсана, правое плечо в позицию 2.')
+        result = session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'joint': 'shoulder',
+                                               'direction': 'up', 'degrees': 10})
+        self.assertEqual([c[:4] for c in session.arm.calls],
+                         [('position', 'right', 1, 'shoulder'), ('position', 'right', 4, 'shoulder'),
+                          ('position', 'right', 2, 'shoulder')])
+        self.assertIn('still moving', result)
+
+    def test_arm_tool_refused_when_user_did_not_ask(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        say(session, 'i2', 'Айсана, какая сегодня погода?')
+        result = session.run_tool('move_arm', {'action': 'position', 'arm': 'both', 'position': 3})
+        self.assertEqual(session.arm.calls, [])
+        self.assertIn('NOT moved', result)
+
+    def test_vague_arm_request_uses_model_interpretation(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        say(session, 'i3', 'Айсана, помаши правой рукой')
+        session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'direction': 'up', 'degrees': 15})
+        self.assertEqual(session.arm.calls[0][:2], ('nudge', 'right'))
+
+    def test_short_followup_more_allowed_after_recent_move(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        session.last_arm_at = time.monotonic()
+        say(session, 'i4', 'ещё')
+        session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'direction': 'up', 'degrees': 5})
+        self.assertEqual(len(session.arm.calls), 1)
+
+    def test_safety_net_runs_command_model_ignored(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        session.dialog_until = time.monotonic() + 20
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'i5'})
+        session.handle({'type': 'response.created'})
+        session.handle({'type': 'response.done'})            # model answered with words only
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'i5', 'transcript': 'левая рука в позицию 3'})
+        time.sleep(0.2)
+        self.assertEqual(session.arm.calls[0][:3], ('position', 'left', 3))
+        self.assertIn('Robot report', sent[-2]['item']['content'][0]['text'])
+        self.assertEqual(sent[-1]['type'], 'response.create')
+
+    def test_no_double_move_when_model_called_tool(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        session.dialog_until = time.monotonic() + 20
+        session.handle_tool_call = lambda *a: None
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'i6'})
+        session.handle({'type': 'response.created'})
+        session.handle({'type': 'response.function_call_arguments.done', 'call_id': 'c9',
+                        'name': 'move_arm', 'arguments': '{}'})
+        session.handle({'type': 'response.done'})
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'i6', 'transcript': 'левая рука в позицию 3'})
+        time.sleep(0.2)
+        self.assertEqual(session.arm.calls, [])            # tool thread owns it, net stays off
+
+    def test_first_turn_with_arm_command_forces_tool(self):
+        original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+        try:
+            session, sent = make_session()
+            say(session, 'i7', 'Айсана, правая рука в позицию 2')
+            self.assertEqual(sent[-1]['response']['tool_choice']['name'], 'move_arm')
+        finally:
+            rt.WAKE_GATE = original
+
+
 class ToolTests(unittest.TestCase):
     def test_tools_offered_to_model(self):
         names = [tool['name'] for tool in rt.tool_definitions()]
@@ -120,6 +209,7 @@ class ToolTests(unittest.TestCase):
     def test_move_arm_goes_through_controller(self):
         session, _ = make_session()
         session.arm = FakeArm()
+        session.last_item = None            # no transcript: model arguments are used
         result = session.run_tool('move_arm', {'action': 'position', 'arm': 'left', 'position': 3})
         self.assertEqual(session.arm.calls, [('position', 'left', 3, 'whole', None, None)])
         session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'direction': 'up', 'degrees': 5})

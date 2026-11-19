@@ -13,6 +13,10 @@ Aisana (Айсана): university voice robot on an NVIDIA Jetson Nano. The owne
   (text commands: `b 1`, `l g o`, `r m 3`, `x` emergency stop, `p` status). Only whitelisted
   commands from `aisana_arm.build_command` may be sent. Opening the port resets the board;
   wait for `Both arms ready.`. Physical motion: keep "стоп" → `x` working in both modes.
+  Latest firmware: robotic_arms_checked.ino (Nov 19; right elbow positions 106..46, limits 32-134).
+  Arm moves are verified with "p" before/after; never let the model claim motion without feedback.
+  In realtime mode explicit commands are re-parsed from the STT transcript (aisana_arm.parse_arm_commands);
+  model arguments are used only for vague arm requests.
 - Repo lives at `~/ai_robot` on the Jetson; the owner updates with `git pull --ff-only origin main`.
 - On the Jetson, system `python3` has no pip. Realtime mode runs in `~/ai_robot/.venv`
   (`.venv/bin/python aisana_realtime.py`); `robot.py` runs with system `python3` (JetPack cv2).

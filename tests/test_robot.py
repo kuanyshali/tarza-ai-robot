@@ -74,7 +74,7 @@ class RobotTests(unittest.TestCase):
         main = FUNCTIONS['main']
         called = {node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, 'id', None)
                   for node in ast.walk(main) if isinstance(node, ast.Call)}
-        for name in ('connect_from_environment', 'parse_arm_command', 'execute',
+        for name in ('connect_from_environment', 'parse_arm_commands', 'execute_many',
                      'emergency_stop', 'arm_reply'):
             self.assertIn(name, called)
 

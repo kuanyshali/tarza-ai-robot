@@ -23,7 +23,8 @@ try:
 except ImportError:          # tests and robot.py do not need websocket-client
     websocket = None
 
-from aisana_arm import connect_from_environment
+from aisana_arm import (connect_from_environment, parse_arm_commands, make_intent,
+                        ARM_WORDS, UP_WORDS, DOWN_WORDS, CONTINUE_WORDS)
 from sadam_features import WEB_ENABLED, get_weather, search_web
 
 RATE = 24000
@@ -161,6 +162,11 @@ PROMPT = (
     'ARMS: you have two physical arms with grippers, controlled by move_arm. '
     'Call move_arm FIRST and silently, without saying anything before the call; '
     'never say the arm is moving before move_arm has returned. '
+    'When the user names a position number for the shoulder (плечо) or the elbow (локоть), '
+    'use action position with that joint, never nudge. If the user says several commands, '
+    'one call is enough: the robot re-reads the user\'s exact words and runs them in order. '
+    'move_arm reports real sensor feedback per joint: reached, still moving, already there or '
+    'DID NOT MOVE. Say exactly that; never say a joint moved if the report says it did not. '
     'Call move_arm only when the user explicitly asks to move an arm, go to a numbered '
     'position, open or close a gripper, stop the arms or report their status. '
     'Positions are numbered 0 to 4; 0 is the zero (home) position; a higher number lifts the arm. '
@@ -215,6 +221,16 @@ class RealtimeAisana(object):
         self.arm = None
         self.dialog_until = 0.0
         self.responded_items = set()
+        self.transcripts = {}
+        self.transcript_cond = threading.Condition()
+        self.last_item = None
+        self.response_item = None
+        self.expect_tool_response = False
+        self.done_items = set()
+        self.pending_arm = {}
+        self.arm_done_items = set()
+        self.arm_lock = threading.Lock()
+        self.last_arm_at = 0.0
         self.handled_calls = set()
         self.calls_lock = threading.Lock()
         self.mic_device = None
@@ -223,12 +239,94 @@ class RealtimeAisana(object):
     def dialog_active(self):
         return time.monotonic() < self.dialog_until
 
-    def respond(self, item_id=None):
+    def respond(self, item_id=None, force_arm=False):
         """Answer the latest user turn and keep the follow-up window open."""
         if item_id:
             self.responded_items.add(item_id)
         self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
-        self.send({'type': 'response.create'})
+        if force_arm:
+            # The words are a clear arm command: the model must call move_arm.
+            self.send({'type': 'response.create', 'response': {
+                'tool_choice': {'type': 'function', 'name': 'move_arm'}}})
+        else:
+            self.send({'type': 'response.create'})
+
+    def wait_transcript(self, item_id, timeout=3.0):
+        """Transcript of a user turn; None if STT did not deliver in time."""
+        deadline = time.monotonic() + timeout
+        with self.transcript_cond:
+            while item_id not in self.transcripts:
+                remaining = deadline - time.monotonic()
+                if item_id is None or remaining <= 0:
+                    return None
+                self.transcript_cond.wait(remaining)
+            return self.transcripts[item_id]
+
+    def arm_tool(self, args):
+        """move_arm, checked against what the user actually said.
+
+        Explicit commands are re-parsed from the transcript (deterministic, the
+        user's last words win); the model's own arguments are used only for vague
+        requests that still mention the arms, a stop, or a short "ещё / выше".
+        """
+        item_id = self.last_item
+        transcript = self.wait_transcript(item_id)
+        intents = parse_arm_commands(transcript) if transcript else []
+        source = 'from the user\'s words'
+        if not intents:
+            model_intent = make_intent(args.get('action'), args.get('arm') or 'both',
+                                       args.get('position'), args.get('joint') or 'whole',
+                                       args.get('direction'), args.get('degrees'))
+            recent = time.monotonic() - self.last_arm_at < 90
+            follow_up = recent and transcript and (CONTINUE_WORDS.search(transcript) or UP_WORDS.search(transcript)
+                                                    or DOWN_WORDS.search(transcript))
+            if (args.get('action') == 'stop' or transcript is None
+                    or ARM_WORDS.search(transcript) or follow_up):
+                intents, source = [model_intent], 'as interpreted by you'
+            else:
+                return ('The user did not ask to move the arms (they said: "{}"). The arms were NOT moved. '
+                        'Answer what the user actually said.'.format(transcript))
+        if self.arm is None:
+            return ('The arm controller (Arduino Mega) is not connected over USB. '
+                    'Tell the user briefly; do not pretend the arm moved.')
+        result = self.arm.execute_many(intents)
+        self.last_arm_at = time.monotonic()
+        return 'Executed {}: {}. {}'.format(source, intents, result)
+
+    def run_pending_arm(self, item_id):
+        """Safety net: the user gave a clear arm command but the model never
+        called move_arm (it may even have claimed success). Run it and correct."""
+        with self.arm_lock:
+            intents = self.pending_arm.get(item_id)
+            if not intents or item_id in self.arm_done_items:
+                return
+            self.arm_done_items.add(item_id)
+
+        def worker():
+            try:
+                if self.arm is None:
+                    result = 'Arm controller not connected over USB; nothing moved.'
+                else:
+                    result = self.arm.execute_many(intents)
+                    self.last_arm_at = time.monotonic()
+            except Exception as exc:
+                result = 'Arm command failed: {}'.format(exc)
+            print('Arm (from your words) {} -> {}'.format(intents, ' '.join(result.split())[:300]))
+            if self.stop.is_set():
+                return
+            try:
+                self.send({'type': 'conversation.item.create', 'item': {
+                    'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
+                        'Robot report: the user\'s arm command was executed by the robot itself. ' + result)}]}})
+                self.expect_tool_response = True
+                self.send({'type': 'response.create', 'response': {'instructions': (
+                    'In one short sentence, in the user\'s language, tell the user what the arms '
+                    'actually did according to the robot report. If you said something different '
+                    'before, correct yourself.')}})
+            except Exception as exc:
+                if not self.stop.is_set():
+                    print('Arm report error:', exc)
+        threading.Thread(target=worker, daemon=True).start()
 
     def ignore_item(self, item_id):
         """Drop unaddressed speech so it does not pollute the conversation."""
@@ -396,12 +494,7 @@ class RealtimeAisana(object):
             question = str(args.get('question') or 'What is visible?')[:500]
             return self.inspect_camera(question)
         if name == 'move_arm':
-            if self.arm is None:
-                return ('The arm controller (Arduino Mega) is not connected over USB. '
-                        'Tell the user briefly; do not pretend the arm moved.')
-            return self.arm.execute(args.get('action'), args.get('arm') or 'both',
-                                    args.get('position'), args.get('joint') or 'whole',
-                                    args.get('direction'), args.get('degrees'))
+            return self.arm_tool(args)
         if name == 'get_weather':
             city = str(args.get('city') or '').strip()[:60]
             phrase = 'weather' + (' in ' + city if city else '')
@@ -421,6 +514,11 @@ class RealtimeAisana(object):
             if call_id in self.handled_calls:
                 return
             self.handled_calls.add(call_id)
+        if name == 'move_arm':
+            # Claimed synchronously, before response.done can trigger the safety net.
+            with self.arm_lock:
+                if self.last_item:
+                    self.arm_done_items.add(self.last_item)
         threading.Thread(target=self.handle_tool_call,
                          args=(call_id, name, arguments), daemon=True).start()
 
@@ -437,6 +535,7 @@ class RealtimeAisana(object):
         try:
             self.send({'type': 'conversation.item.create', 'item': {
                 'type': 'function_call_output', 'call_id': call_id, 'output': str(result)[:4000]}})
+            self.expect_tool_response = True
             self.send({'type': 'response.create', 'response': {'instructions': (
                 'The tool has returned. Answer the user NOW, in first person as Aisana, '
                 'using its result. No commentary about tools, photos or analysis. '
@@ -449,6 +548,14 @@ class RealtimeAisana(object):
 
     def handle_transcript(self, item_id, transcript):
         print('You:', transcript)
+        with self.transcript_cond:
+            self.transcripts[item_id] = transcript
+            self.transcript_cond.notify_all()
+        intents = [] if is_prompt_echo(transcript) else parse_arm_commands(transcript)
+        if intents and intents[0]['action'] != 'stop':
+            self.pending_arm[item_id] = intents
+            if item_id in self.done_items:      # reply already finished without move_arm
+                self.run_pending_arm(item_id)
         if is_prompt_echo(transcript):
             print('Transcript looks like noise (repeated names); ignored.')
             if WAKE_GATE and item_id not in self.responded_items:
@@ -465,7 +572,7 @@ class RealtimeAisana(object):
             print('Dialogue closed; say Aisana to begin again.')
             self.ignore_item(item_id)
         elif self.dialog_active() or has_wake_name(transcript):
-            self.respond(item_id)
+            self.respond(item_id, force_arm=bool(self.pending_arm.get(item_id)))
         else:
             print('Not addressed to Aisana; ignored.')
             self.ignore_item(item_id)
@@ -483,6 +590,11 @@ class RealtimeAisana(object):
                 # cancels the active generation. A second response.cancel races
                 # with response.done and triggers response_cancel_not_active.
         elif typ == 'response.created':
+            if self.expect_tool_response:
+                self.expect_tool_response = False
+                self.response_item = None      # answer to a tool result
+            else:
+                self.response_item = self.last_item
             self.echo_guard_active = True
             self.responding = True
             self.playback_interrupted = False
@@ -496,6 +608,7 @@ class RealtimeAisana(object):
             if text:
                 print('Aisana:', text)
         elif typ == 'input_audio_buffer.committed':
+            self.last_item = e.get('item_id')
             # Inside an open dialogue answer at once, without waiting for STT.
             if WAKE_GATE and self.dialog_active():
                 self.respond(e.get('item_id'))
@@ -511,6 +624,9 @@ class RealtimeAisana(object):
                 self.start_tool(item.get('call_id'), item.get('name'), item.get('arguments'))
         elif typ == 'response.done':
             self.responding = False
+            if self.response_item:
+                self.done_items.add(self.response_item)
+                self.run_pending_arm(self.response_item)
             # Do NOT lift echo guard here: playback can lag behind generation.
             self.queue_audio('done')
         elif typ == 'error':

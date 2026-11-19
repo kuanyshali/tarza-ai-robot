@@ -29,11 +29,12 @@ ARM_LETTERS = {'right': 'r', 'left': 'l', 'both': 'b'}
 JOINT_LETTERS = {'whole': '', 'shoulder': 'm', 'elbow': 's'}
 ACTIONS = ('position', 'nudge', 'gripper_open', 'gripper_close', 'stop', 'status')
 MAX_NUDGE_DEGREES = 45
-# Pot readings of positions 0..4 from robotic_arms_Niyazbek_3.8.ino. Replaced at
+VERIFY_SECONDS = float(os.environ.get('AISANA_ARM_VERIFY_SECONDS', '1.0'))
+# Pot readings of positions 0..4 from robotic_arms_checked.ino (Nov 19). Replaced at
 # runtime by the table the Arduino prints at start-up ("POSITIONS (pot readings)").
 DEFAULT_POSITION_TABLE = {
     ('right', 'shoulder'): (47, 77, 107, 137, 167),
-    ('right', 'elbow'): (159, 129, 99, 69, 39),
+    ('right', 'elbow'): (106, 91, 76, 61, 46),
     ('left', 'shoulder'): (52, 82, 112, 142, 172),
     ('left', 'elbow'): (144, 174, 204, 234, 264),
 }
@@ -41,8 +42,35 @@ TABLE_LINE = re.compile(
     r'^(RIGHT|LEFT)\s+(stepper|elbow)\s+((?:\S+\s+){5})limits', re.I)
 # Arduino lines worth showing at AISANA_ARM_ECHO=1 (errors and safety only).
 IMPORTANT_LINE = re.compile(
-    r'STOPPED|EMERGENCY|limit|not set|feedback is OFF|can\'t|cannot|calibrat|'
-    r'wrong way|outside|!!|doesn\'t match', re.I)
+    r'STOPPED|EMERGENCY|limit is|nearest limit|limit reached|not set|feedback is OFF|'
+    r'can\'t|cannot|calibrat|wrong way|outside|!!|doesn\'t match', re.I)
+# "p" status lines, e.g. "RIGHT stepper: 42.01  target 42.01  [between positions]"
+STATUS_LINE = re.compile(
+    r'^(RIGHT|LEFT)\s+(stepper|elbow):\s+(-?[\d.]+)\s+target\s+(-?[\d.]+)\s*(.*)$', re.I)
+JOINT_TITLES = {('right', 'shoulder'): 'right shoulder', ('right', 'elbow'): 'right elbow',
+                ('left', 'shoulder'): 'left shoulder', ('left', 'elbow'): 'left elbow'}
+
+
+def parse_status(lines):
+    """{(side, joint): (now, target, note)} from the firmware's "p" reply."""
+    result = {}
+    for line in lines:
+        match = STATUS_LINE.match(line.strip())
+        if match:
+            joint = 'shoulder' if match.group(2).lower() == 'stepper' else 'elbow'
+            result[(match.group(1).lower(), joint)] = (
+                float(match.group(3)), float(match.group(4)), match.group(5).strip())
+    return result
+
+
+def affected_joints(action, arm='both', joint='whole'):
+    if action not in ('position', 'nudge'):
+        return []
+    sides = ('right', 'left') if arm == 'both' else (arm,)
+    if action == 'nudge' and joint in (None, '', 'whole'):
+        joint = 'shoulder'
+    joints = ('shoulder', 'elbow') if joint in (None, '', 'whole') else (joint,)
+    return [(side, name) for side in sides for name in joints]
 # USB vendor IDs: genuine Arduino boards, then common clone USB-serial chips.
 GENUINE_ARDUINO_VIDS = (0x2341, 0x2A03)
 CLONE_SERIAL_VIDS = (0x1A86, 0x0403, 0x10C4)
@@ -270,22 +298,71 @@ class ArmController(object):
         return self._lines_after(start)
 
     def execute(self, action, arm='both', position=None, joint='whole',
-                direction=None, degrees=None):
-        """Run an intent; returns a short English summary for the model/logs."""
-        if action == 'nudge':
-            commands = nudge_commands(arm, joint, direction, degrees,
-                                      self.position_table, self.up_toward_4)
-        else:
-            commands = [build_command(action, arm, position, joint)]
+                direction=None, degrees=None, verify=True):
+        """Run one intent; see execute_many."""
+        return self.execute_many([_intent(action, arm, position, joint, direction, degrees)], verify)
+
+    def execute_many(self, intents, verify=True):
+        """Run intents in order and report what the joints REALLY did.
+
+        With verify, the firmware status ("p") is read once before and once
+        ~1 s after the moves, so the summary says "47 -> 61, target 77, still
+        moving" or "DID NOT MOVE" instead of assuming success.
+        """
+        commands, joints = [], []
+        for intent in intents:
+            if intent['action'] == 'nudge':
+                commands += nudge_commands(intent['arm'], intent['joint'], intent['direction'],
+                                           intent['degrees'], self.position_table, self.up_toward_4)
+            else:
+                commands.append(build_command(intent['action'], intent['arm'],
+                                              intent['position'], intent['joint']))
+            for key in affected_joints(intent['action'], intent['arm'], intent['joint']):
+                if key not in joints:
+                    joints.append(key)
+        if not verify or 'x' in commands:
+            joints = []
+        status_only = commands == ['p']
+        before = parse_status(self.send('p', collect_seconds=0.3)) if joints else {}
         lines = []
         for command in commands:
-            lines.extend(self.send(command, collect_seconds=0.6 if action == 'status' else 0.15))
+            lines.extend(self.send(command, collect_seconds=0.6 if command == 'p' else 0.15))
         problems = [line for line in lines if IMPORTANT_LINE.search(line)]
         summary = 'Sent {} to the Arduino.'.format(', '.join('"{}"'.format(c) for c in commands))
-        if action == 'status':
-            summary += ' Status: ' + ' | '.join(lines[-6:]) if lines else ' No status reply yet.'
-        elif problems:
-            summary += ' Arduino reported: ' + ' | '.join(problems[-3:])
+        if status_only:
+            status = parse_status(lines)
+            summary += (' ' + '; '.join(
+                '{}: {:.0f} (target {:.0f}){}'.format(JOINT_TITLES[key], now, target,
+                                                      ' ' + note if note else '')
+                for key, (now, target, note) in sorted(status.items()))) if status else ' No status reply yet.'
+        if joints:
+            time.sleep(VERIFY_SECONDS)
+            reply = self.send('p', collect_seconds=0.4)
+            after = parse_status(reply)
+            problems += [line for line in reply if IMPORTANT_LINE.search(line)]
+            report = []
+            for key in joints:
+                if key not in after:
+                    report.append('{}: no feedback'.format(JOINT_TITLES[key]))
+                    continue
+                now, target, _note = after[key]
+                start_value = before.get(key, (None,))[0]
+                moved = start_value is not None and abs(now - start_value) >= 1.5
+                if abs(target - now) <= 3:
+                    state = 'reached' if moved or start_value is None else 'already there'
+                elif moved:
+                    state = 'still moving'
+                else:
+                    state = 'DID NOT MOVE'
+                report.append('{}: {} -> {:.0f}, target {:.0f}, {}'.format(
+                    JOINT_TITLES[key], '?' if start_value is None else '{:.0f}'.format(start_value),
+                    now, target, state))
+            summary += ' Feedback: ' + '; '.join(report) + '.'
+            if any('DID NOT MOVE' in item for item in report):
+                summary += (' Tell the user honestly which joint did not move '
+                            '(check motor power, limit or load); never claim it moved.')
+        if problems:
+            summary += ' Arduino reported: ' + ' | '.join(sorted(set(problems))[-3:])
         return summary
 
     def emergency_stop(self):
@@ -326,10 +403,10 @@ ARM_WORDS = re.compile(
     r'локт\w*|локоть|плеч[оиа]\w*|\belbows?\b|\bshoulders?\b)', re.I)
 NUMBER_WORDS = (
     (0, r'0|ноль|нуль|нулев\w*|zero|нөл\w*|صفر'),
-    (1, r'1|один|одн[уа]|перв\w*|one|first|бір\w*|واحد'),
-    (2, r'2|два|две|втор\w*|two|second|екі\w*|اتنين|اثنين'),
-    (3, r'3|три|трет\w*|three|third|үш\w*|تلاتة|ثلاثة'),
-    (4, r'4|четыре|четв[её]рт\w*|four|fourth|төрт\w*|اربعة|أربعة'),
+    (1, r'1|один|одн[уа]|перв\w*|единиц\w*|one|first|бір\w*|واحد'),
+    (2, r'2|два|две|втор\w*|двойк\w*|two|second|екі\w*|اتنين|اثنين'),
+    (3, r'3|три|трет\w*|тройк\w*|three|third|үш\w*|تلاتة|ثلاثة'),
+    (4, r'4|четыре|четв[её]рт\w*|четв[её]рк\w*|four|fourth|төрт\w*|اربعة|أربعة'),
 )
 POSITION_WORD = r'(?:позици\w*|положени\w*|positions?|pos|позиция\w*|қалып\w*|وضع\w*)'
 HOME_WORDS = re.compile(
@@ -382,6 +459,74 @@ def _position_number(text):
 def _intent(action, arm='both', position=None, joint='whole', direction=None, degrees=None):
     return {'action': action, 'arm': arm, 'position': position, 'joint': joint,
             'direction': direction, 'degrees': degrees}
+
+
+CLAUSE_SPLIT = re.compile(r'[.!?;]+|\b(?:потом|затем|после этого|and then|then|кейін)\b', re.I)
+ACTION_CUE = re.compile(POSITION_WORD + r'|исходн|в ноль|\bhome\b', re.I)
+_CONTEXT_WORDS = {'right': 'правая', 'left': 'левая', 'both': 'обе'}
+_JOINT_WORDS = {'shoulder': 'плечо', 'elbow': 'локоть', 'whole': 'рука'}
+
+
+PART_SPLIT = re.compile(r',|\s(?:и|а|and|және)\s', re.I)
+
+
+def _parse_clauses(clauses, previous):
+    """Parse clauses in order; context (arm, joint) carries over from the last one."""
+    intents = list(previous)
+    for clause in clauses:
+        clause = (clause or '').strip(' ,')
+        if not clause:
+            continue
+        intent = parse_arm_command(clause)
+        names_side = RIGHT_WORDS.search(clause) or LEFT_WORDS.search(clause)
+        if intent is None and names_side and ACTION_CUE.search(clause):
+            intent = parse_arm_command('рука ' + clause)      # "правую в позицию 2"
+        if intent is None and intents and STOP_WORDS.search(clause) and len(clause.split()) <= 3:
+            intent = _intent('stop')                         # "... Стоп!" after a move
+        if intent is None and intents and (ACTION_CUE.search(clause) or UP_WORDS.search(clause)
+                                           or DOWN_WORDS.search(clause)):
+            last = intents[-1]
+            context = '{} {} '.format('' if names_side else _CONTEXT_WORDS[last['arm']],
+                                      _JOINT_WORDS[last['joint']])
+            intent = parse_arm_command(context + clause)
+        if intent is None:
+            continue
+        # "подними правую руку, позиция один": the position replaces the vague lift.
+        if (intents[len(previous):] and intent['action'] == 'position'
+                and intents[-1]['action'] == 'nudge' and intents[-1]['arm'] == intent['arm']):
+            intents.pop()
+        intents.append(intent)
+    return intents[len(previous):]
+
+
+def parse_arm_commands(text, limit=4):
+    """All arm commands in an utterance, in order.
+
+    "Плечо правое в позицию 1. Позиция 4. Правое плечо в позицию 2" gives three
+    position commands for the right shoulder; executed in order, the last wins.
+    A clause without an arm word ("Позиция 4.") inherits arm and joint from the
+    previous command.
+    """
+    intents = []
+    for sentence in CLAUSE_SPLIT.split(text or ''):
+        sentence = (sentence or '').strip(' ,')
+        if not sentence:
+            continue
+        # "правая рука позиция один, левая рука позиция два": commas and "и" can
+        # separate commands too; use the split only if it finds several of them.
+        parts = [part for part in PART_SPLIT.split(sentence) if part and part.strip(' ,')]
+        found = _parse_clauses(parts, intents[-1:]) if len(parts) > 1 else []
+        if len(found) < 2:
+            found = _parse_clauses([sentence], intents[-1:])
+        intents.extend(found)
+    if any(intent['action'] == 'stop' for intent in intents):
+        return [_intent('stop')]           # stop always wins, nothing else is sent
+    return intents[-limit:]
+
+
+make_intent = _intent
+CONTINUE_WORDS = re.compile(
+    r'(?:ещ[её]|снова|опять|повтори|\bagain\b|\bmore\b|тағы|كمان)', re.I)
 
 
 def parse_arm_command(text):

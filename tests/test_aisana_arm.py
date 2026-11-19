@@ -39,6 +39,28 @@ class FakeSerial(object):
         self.closed = True
 
 
+class StatusSerial(FakeSerial):
+    """Answers "p" with a right-stepper position: first before, then after."""
+
+    def __init__(self, before, after, target):
+        FakeSerial.__init__(self)
+        self.before, self.after, self.target, self.status_calls = before, after, target, 0
+
+    def write(self, data):
+        self.written.append(data)
+        if data.strip() == b'p':
+            self.status_calls += 1
+            value = self.before if self.status_calls % 2 == 1 else self.after
+            with self.lock:
+                self.incoming.append('RIGHT stepper: {:.2f}  target {:.2f}  [between positions]\n'.format(
+                    value, self.target if self.status_calls % 2 == 0 else value).encode())
+
+
+def moves(fake):
+    """Commands sent, without the status ("p") reads used for verification."""
+    return [data for data in fake.written if data != b'p\n']
+
+
 def open_controller(fake):
     logs = []
     controller = arm.ArmController('/dev/ttyACM0', serial_factory=lambda port: fake,
@@ -152,12 +174,19 @@ class PortDetectionTests(unittest.TestCase):
 
 
 class ControllerTests(unittest.TestCase):
+    def setUp(self):
+        self.verify_seconds = arm.VERIFY_SECONDS
+        arm.VERIFY_SECONDS = 0.05
+
+    def tearDown(self):
+        arm.VERIFY_SECONDS = self.verify_seconds
+
     def test_waits_for_ready_then_sends_newline_command(self):
         fake = FakeSerial()
         controller, _ = open_controller(fake)
         try:
             summary = controller.execute('position', 'both', 2)
-            self.assertEqual(fake.written, [b'b 2\n'])
+            self.assertEqual(moves(fake), [b'b 2\n'])
             self.assertIn('"b 2"', summary)
         finally:
             controller.close()
@@ -167,7 +196,7 @@ class ControllerTests(unittest.TestCase):
         controller, _ = open_controller(fake)
         try:
             summary = controller.execute('nudge', 'both', None, 'elbow', 'up', 5)
-            self.assertEqual(fake.written, [b'r s r -5\n', b'l s r 5\n'])
+            self.assertEqual(moves(fake), [b'r s r -5\n', b'l s r 5\n'])
             self.assertIn('"r s r -5"', summary)
         finally:
             controller.close()
@@ -181,7 +210,7 @@ class ControllerTests(unittest.TestCase):
             time.sleep(0.1)
             self.assertEqual(controller.position_table[('right', 'shoulder')][0], 167.0)
             controller.execute('nudge', 'right', None, 'shoulder', 'up', 5)
-            self.assertEqual(fake.written, [b'r m r -5\n'])
+            self.assertEqual(moves(fake), [b'r m r -5\n'])
         finally:
             controller.close()
 
@@ -197,12 +226,25 @@ class ControllerTests(unittest.TestCase):
         finally:
             controller.close()
 
+    def test_verification_reports_real_motion(self):
+        fake = StatusSerial(before=47.0, after=47.2, target=77.0)
+        controller, _ = open_controller(fake)
+        try:
+            summary = controller.execute('position', 'right', 1, 'shoulder')
+            self.assertIn('right shoulder: 47 -> 47, target 77, DID NOT MOVE', summary)
+            self.assertIn('never claim it moved', summary)
+            fake.after = 63.0
+            summary = controller.execute('position', 'right', 1, 'shoulder')
+            self.assertIn('still moving', summary)
+        finally:
+            controller.close()
+
     def test_status_reply_is_collected(self):
         fake = FakeSerial()
         controller, _ = open_controller(fake)
         try:
             summary = controller.execute('status')
-            self.assertIn('at position 2', summary)
+            self.assertIn('right shoulder: 107 (target 107) [at position 2]', summary)
         finally:
             controller.close()
 
@@ -254,6 +296,24 @@ class VoiceParserTests(unittest.TestCase):
         self.check('руки вверх на 90 градусов', 'nudge', 'both', None, 'shoulder', 'up', 45)
         # A position number wins over "подними".
         self.check('подними правую руку, позиция один', 'position', 'right', 1)
+
+    def test_several_commands_in_one_utterance(self):
+        intents = arm.parse_arm_commands('Айсана, подвигай плечом. Плечо правое в позицию 1. '
+                                         'Позиция 4. Айсана, правое плечо в позицию 2.')
+        self.assertEqual([(i['arm'], i['joint'], i['position']) for i in intents],
+                         [('right', 'shoulder', 1), ('right', 'shoulder', 4), ('right', 'shoulder', 2)])
+        intents = arm.parse_arm_commands('правую руку в позицию 1, потом левую в позицию тройку')
+        self.assertEqual([(i['arm'], i['position']) for i in intents], [('right', 1), ('left', 3)])
+        self.assertEqual(arm.parse_arm_commands('правую в позицию 2. Стоп!'),
+                         [arm.make_intent('stop')])
+        self.assertEqual(arm.parse_arm_commands('какая погода?'), [])
+        intents = arm.parse_arm_commands('правая рука позиция один, левая рука позиция два')
+        self.assertEqual([(i['arm'], i['position']) for i in intents], [('right', 1), ('left', 2)])
+        intents = arm.parse_arm_commands('подними правую руку, позиция один')
+        self.assertEqual([(i['action'], i['position']) for i in intents], [('position', 1)])
+        intents = arm.parse_arm_commands('открой правый захват и закрой левый захват')
+        self.assertEqual([(i['action'], i['arm']) for i in intents],
+                         [('gripper_open', 'right'), ('gripper_close', 'left')])
 
     def test_not_arm_commands(self):
         for text in ('что у меня в руке?', 'what am I holding in my hand?',
