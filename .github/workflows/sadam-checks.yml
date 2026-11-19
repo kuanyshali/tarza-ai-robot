@@ -12,7 +12,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt vermin
+        run: python -m pip install -r requirements.txt vermin numpy
       - name: Compile robot code
         run: python -m py_compile *.py
       - name: Jetson Nano runs Python 3.6 - no newer syntax allowed

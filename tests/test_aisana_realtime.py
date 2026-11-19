@@ -330,6 +330,109 @@ class HumorAndCameraTests(unittest.TestCase):
         self.assertTrue(session.audio_queue.empty())
 
 
+class FakeStream(object):
+    def __init__(self):
+        self.frame = 'frame'
+
+    def latest(self, max_age=1.5, wait=3.0):
+        return self.frame
+
+
+class FakeFaces(object):
+    def __init__(self, name=None):
+        self.name = name
+        self.remembered = []
+        self.forgotten = []
+        self.things = []
+
+    def faces(self, frame):
+        return [{'box': (0, 0, 9, 9), 'vector': 'v', 'name': self.name, 'distance': 0.3, 'where': 'center'}]
+
+    def identify(self, vector):
+        return self.name, 0.3
+
+    def remember(self, name, vectors):
+        self.remembered.append((name, len(vectors)))
+        self.name = name
+
+    def forget(self, name):
+        self.forgotten.append(name)
+        self.name = None
+        return 1
+
+    def names(self):
+        return [self.name] if self.name else []
+
+    def things_text(self):
+        return ''
+
+
+class FaceMemoryRealtimeTests(unittest.TestCase):
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def session(self, name=None):
+        session, sent = make_session()
+        session.camera_stream, session.faces = FakeStream(), FakeFaces(name)
+        session.face_vectors = lambda seconds=2.0: ['v1', 'v2', 'v3', 'v4']
+        return session, sent
+
+    def wait_for(self, sent, text):
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if any(text in str(m) for m in sent):
+                return
+            time.sleep(0.02)
+        self.fail('never sent: ' + text)
+
+    def test_remember_me_only_on_request(self):
+        session, sent = self.session()
+        say(session, 'f1', 'Айсана, запомни меня, я Али')
+        self.wait_for(sent, 'remembered the face of Али')
+        self.assertEqual(session.faces.remembered, [('Али', 4)])
+        self.assertIn('f1', session.local_items)
+
+    def test_name_asked_when_missing(self):
+        session, sent = self.session()
+        say(session, 'f2', 'Айсана, запомни меня')
+        self.wait_for(sent, 'Ask only for the name')
+        session.dialog_until = time.monotonic() + 10
+        say(session, 'f3', 'Меня зовут Айгерим')
+        self.wait_for(sent, 'remembered the face of Айгерим')
+
+    def test_forget_me(self):
+        session, sent = self.session('Али')
+        say(session, 'f4', 'Айсана, забудь меня')
+        self.wait_for(sent, 'deleted the face of Али')
+        self.assertEqual(session.faces.forgotten, ['Али'])
+
+    def test_camera_answer_uses_known_name(self):
+        session, _ = self.session('Али')
+        note = session.people_note('frame')
+        self.assertIn('Face memory recognizes: Али (center)', note)
+        session.faces.name = None
+        self.assertIn('never invent their names', session.people_note('frame'))
+
+    def test_greets_a_known_face_once(self):
+        session, sent = self.session('Али')
+        session.ready = True
+        original = rt.FACE_SCAN_SECONDS
+        rt.FACE_SCAN_SECONDS = 0.05
+        try:
+            worker = __import__('threading').Thread(target=session.watch_faces, daemon=True)
+            worker.start()
+            self.wait_for(sent, 'Greet Али by name')
+            time.sleep(0.3)
+            session.stop.set()
+        finally:
+            rt.FACE_SCAN_SECONDS = original
+        self.assertEqual(sum('Greet Али' in str(m) for m in sent), 1)
+
+
 class VoiceStyleTests(unittest.TestCase):
     def test_voice_style_presets(self):
         import os

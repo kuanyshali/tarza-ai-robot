@@ -30,6 +30,8 @@ from sadam_features import WEB_ENABLED, get_weather, search_web
 import aisana_legs
 from aisana_legs import parse_legs_command, LEGS_ACTIONS, legs_reply
 from aisana_arm import arm_reply
+import aisana_faces
+from aisana_faces import parse_memory_command
 
 RATE = 24000
 CHUNK = 1440  # 30 ms of mono S16_LE PCM
@@ -150,6 +152,12 @@ def humor_instructions(humor):
             'about what you actually see (clothes, pose, what they hold). ' + secret)
 
 
+FACE_SCAN_SECONDS = float(os.environ.get('AISANA_FACE_SCAN_SECONDS', '1.5'))
+FACE_GREET = os.environ.get('AISANA_FACE_GREET', '1') == '1'
+FACE_GREET_MINUTES = float(os.environ.get('AISANA_FACE_GREET_MINUTES', '30'))
+POSSESSIVE_RE = re.compile(r'\b(?:мой|моя|моё|мое|мои|my)\b', re.I)
+THING_FILLER_RE = re.compile(r'\b(?:мой|моя|моё|мое|мои|наш|наша|наше|этот|эту|эта|это|вот|my|our|this|the)\b', re.I)
+
 HUMOR_RE = re.compile(r'(?:юмор\w*|сарказм\w*|\bhumou?r\b|\bsarcasm\b|әзіл\w*)\D{0,20}?(\d{1,3})', re.I)
 # Visual questions are answered by the camera at once, in first person.
 CAMERA_RE = re.compile(
@@ -157,7 +165,8 @@ CAMERA_RE = re.compile(
     r'что (?:у меня|я) (?:\w+ )?(?:в руке|в руках|держу)|что (?:это|перед тобой|тут|здесь)\b|'
     r'посмотри|прочитай|прочти|как я выгляжу|сколько (?:тут |здесь )?(?:людей|человек|пальцев)|'
     r'\bwho (?:is|\'s) (?:in front|there|this|that)|what (?:do|can) you see|what am i holding|'
-    r'what is (?:this|that|in my hand)|look at|read (?:this|it)|how do i look|кім бар|не көріп тұрсың)', re.I)
+    r'what is (?:this|that|in my hand)|look at|read (?:this|it)|how do i look|кім бар|не көріп тұрсың|'
+    r'\bкто я\b|ты меня (?:знаешь|узна[её]шь|помнишь)|чь[яеёи] это|do you know me|who am i|whose is)', re.I)
 READ_RE = re.compile(r'(?:прочитай|прочти|что написано|переведи|формул|текст|\bread\b|translate|written)', re.I)
 # Her own recorded shouts heard back by the microphone.
 SHOUT_ECHO_RE = re.compile(
@@ -311,6 +320,9 @@ PROMPT = (
     'When addressed as Aisana, wait for the complete question. '
     'In Russian use feminine grammatical forms when referring to yourself. '
     'You HAVE a working camera tool named inspect_camera. '
+    'Your robot body remembers faces, but only of people who ask ("Айсана, запомни меня, я Али") '
+    'and forgets them on "забудь меня"; the code does it, you only talk. Never guess the name '
+    'of a person you were not told about. '
     'VISUAL INTENT RULE: Call inspect_camera BEFORE answering whenever the user refers '
     'to something physically in front of you, including implicit references like this, '
     'that, here, on the screen, on the paper, on the label, or what I am showing you. '
@@ -478,6 +490,12 @@ class RealtimeAisana(object):
         self.hold_item = None               # reply generated at commit, held until STT says
         self.hold_deadline = 0.0            # it is not a command (no "дай подумать" chatter)
         self.held_audio = []
+        self.camera_stream = None           # aisana_faces.CameraStream: camera always on
+        self.faces = None                   # aisana_faces.FaceMemory
+        self.seen_at = {}                   # name -> last time she saw that face
+        self.greeted_at = {}
+        self.pending_face = None            # "запомни меня" without a name: waits for it
+        self.ready = False                  # session.updated received
         self.handled_calls = set()
         self.calls_lock = threading.Lock()
         self.mic_device = None
@@ -815,14 +833,17 @@ class RealtimeAisana(object):
                 print('Microphone/connection error:', exc)
                 self.stop.set()
 
-    def inspect_camera(self, question, detail=None):
-        """Capture one fresh IMX219 frame and analyze it with the vision API."""
+    def take_photo(self):
+        """(jpeg bytes, frame or None): a fresh frame from the always-on stream,
+        else the old one-shot camera.py capture."""
+        frame = self.camera_stream.latest() if self.camera_stream is not None else None
+        if frame is not None:
+            return aisana_faces.jpeg(frame), frame
         with self.camera_lock:
             # camera.py uses the Jetson GStreamer camera pipeline and writes photo.jpg.
             # Fail closed rather than analyzing a stale image if capture fails.
             if os.path.exists('photo.jpg'):
                 os.remove('photo.jpg')
-            started = time.monotonic()
             # GStreamer/Argus print ~30 lines per photo; show them only on failure.
             capture = subprocess.run(['/usr/bin/python3', 'camera.py'], stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, timeout=20)
@@ -830,8 +851,42 @@ class RealtimeAisana(object):
                 tail = capture.stdout.decode('utf-8', 'replace').strip().splitlines()[-8:]
                 raise RuntimeError('camera.py failed: ' + ' | '.join(tail))
             with open('photo.jpg', 'rb') as photo:
-                encoded = base64.b64encode(photo.read()).decode('ascii')
-            captured = time.monotonic() - started
+                return photo.read(), None
+
+    def people_note(self, frame):
+        """What the face memory says about the people in this frame (for the vision model)."""
+        if frame is None or self.faces is None:
+            return ''
+        try:
+            found = self.faces.faces(frame)
+        except Exception as exc:
+            print('Face memory error:', exc)
+            return ''
+        now = time.monotonic()
+        known = []
+        for face in found:
+            if face['name']:
+                self.seen_at[face['name']] = now
+                self.greeted_at[face['name']] = now        # named now: no extra greeting
+                known.append('{} ({})'.format(face['name'], face['where']))
+        unknown = len(found) - len(known)
+        parts = []
+        if known:
+            parts.append('Face memory recognizes: ' + ', '.join(known) + '. Call them by name.')
+        if unknown:
+            parts.append('{} face(s) you do not know; never invent their names.'.format(unknown))
+        things = self.faces.things_text()
+        if things:
+            parts.append('Things you were shown before (say whose it is if you see one): ' + things + '.')
+        return ' '.join(parts)
+
+    def inspect_camera(self, question, detail=None, extra=None):
+        """Capture one fresh frame and analyze it with the vision API."""
+        started = time.monotonic()
+        picture, frame = self.take_photo()
+        captured = time.monotonic() - started
+        encoded = base64.b64encode(picture).decode('ascii')
+        note = extra if extra is not None else self.people_note(frame)
         response = requests.post(
             'https://api.openai.com/v1/chat/completions',
             headers={'Authorization': 'Bearer ' + KEY},
@@ -849,7 +904,8 @@ class RealtimeAisana(object):
                           'Answer in the language of the user question.')},
                       {'role': 'user', 'content': [
                       {'type': 'text', 'text': (
-                          'Use this fresh camera photo to answer the user request, including reading visible text, translating signs, explaining visible formulas, or identifying objects as appropriate. '
+                          'Use this fresh camera photo to answer the user request, including reading visible text, translating signs, explaining visible formulas, or identifying objects as appropriate. ' +
+                          (note + ' ' if note else '') +
                           'Answer this question if possible: ' + question +
                           '. Be concise, factual, and avoid guessing unseen details. '
                           'Use the same language as the question.')},
@@ -1006,6 +1062,152 @@ class RealtimeAisana(object):
                     print('Camera report error:', exc)
         threading.Thread(target=worker, daemon=True).start()
 
+    def speak_report(self, report, instructions):
+        """Tell the model what the robot just did and let it say it in one phrase."""
+        deadline = time.monotonic() + 8
+        while self.responding and time.monotonic() < deadline and not self.stop.is_set():
+            time.sleep(0.05)
+        if self.stop.is_set():
+            return
+        if self.responding:
+            self.cancel_reply()
+            time.sleep(0.3)
+        try:
+            self.send({'type': 'conversation.item.create', 'item': {
+                'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': report}]}})
+            self.expect_tool_response = True
+            self.send({'type': 'response.create', 'response': {'metadata': OWN, 'instructions': (
+                self.reply_language() + instructions)}})
+        except Exception as exc:
+            if not self.stop.is_set():
+                print('Report error:', exc)
+
+    def face_vectors(self, seconds=2.0):
+        """Vectors of the biggest face over a couple of seconds (several angles)."""
+        vectors = []
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not self.stop.is_set():
+            frame = self.camera_stream.latest(max_age=1.0, wait=1.0) if self.camera_stream else None
+            if frame is not None:
+                found = self.faces.faces(frame)
+                if found:
+                    vectors.append(found[0]['vector'])
+            time.sleep(0.25)
+        return vectors
+
+    def run_memory_locally(self, item_id, command):
+        """"Запомни меня, я Али", "забудь меня", "кого ты знаешь", "запомни, это моя кружка"."""
+        with self.arm_lock:
+            self.responded_items.add(item_id)
+            self.local_items.add(item_id)
+        self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+        self.cancel_reply()
+        transcript = self.transcripts.get(item_id, '')
+        say = 'In ONE short sentence, in your character, tell the user this. Nothing else.'
+
+        def worker():
+            action, name = command['action'], command.get('name')
+            if self.faces is None or self.camera_stream is None:
+                self.speak_report('Robot report: face memory is switched off or its models are missing.', say)
+                return
+            try:
+                if action in ('remember_me', 'remember_other') and not name:
+                    self.pending_face = (action, time.monotonic() + 20)
+                    self.speak_report('Robot report: to remember a face you need the name.',
+                                      'Ask only for the name, in a few words.')
+                    return
+                if action in ('remember_me', 'remember_other'):
+                    vectors = self.face_vectors()
+                    if len(vectors) < 3:
+                        self.speak_report('Robot report: no face was clearly visible, nothing remembered.',
+                                          say + ' Ask them to look straight at you and try again.')
+                        return
+                    if action == 'remember_me':
+                        old, _ = self.faces.identify(vectors[0])
+                        if old and old != name:
+                            self.faces.forget(old)          # a person renames only themselves
+                    self.faces.remember(name, vectors)
+                    now = time.monotonic()
+                    self.seen_at[name] = self.greeted_at[name] = now
+                    print('Face remembered: {} ({} views)'.format(name, len(vectors)))
+                    self.speak_report('Robot report: you have just remembered the face of {}.'.format(name), say)
+                elif action == 'forget_me':
+                    frame = self.camera_stream.latest()
+                    found = self.faces.faces(frame) if frame is not None else []
+                    known = found[0]['name'] if found else None
+                    if known:
+                        self.faces.forget(known)
+                        print('Face forgotten:', known)
+                        self.speak_report('Robot report: you deleted the face of {}; you no longer know '
+                                          'them.'.format(known), say)
+                    else:
+                        self.speak_report('Robot report: you did not know this face anyway.', say)
+                elif action == 'forget':
+                    gone = self.faces.forget(name)
+                    print('Forgotten: {} ({} records)'.format(name, gone))
+                    self.speak_report('Robot report: ' + ('you deleted {} from memory.'.format(name) if gone
+                                      else 'you had nothing called {} in memory.'.format(name)), say)
+                elif action == 'list':
+                    names = self.faces.names()
+                    things = [label for _, label, owner, _ in self.faces.things]
+                    self.speak_report('Robot report: faces you know: {}. Things: {}.'.format(
+                        ', '.join(names) or 'none', ', '.join(things) or 'none'),
+                        'List them in one or two short sentences, in your character.')
+                elif action == 'remember_thing':
+                    self.remember_thing(command.get('label') or '', transcript, say)
+            except Exception as exc:
+                print('Face memory FAILED:', exc)
+                self.speak_report('Robot report: memory did not work: {}'.format(exc), say)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def remember_thing(self, label, transcript, say):
+        picture, frame = self.take_photo()
+        owner = None
+        if POSSESSIVE_RE.search(label) and frame is not None:
+            found = self.faces.faces(frame)
+            owner = found[0]['name'] if found and found[0]['name'] else None
+        clean = ' '.join(THING_FILLER_RE.sub(' ', label).split()) or 'вещь'
+        description = self.inspect_camera(
+            'Describe the object the user is showing or holding (the "{}") in ONE short sentence '
+            'so it can be recognized later: colour, shape, logos or text on it. Start with what it is.'.format(clean),
+            extra='')
+        self.faces.remember_thing(clean, owner, description,
+                                  aisana_faces.jpeg(frame, 60) if frame is not None else picture)
+        print('Thing remembered: {} ({}) - {}'.format(clean, owner or 'no owner', description[:120]))
+        self.speak_report('Robot report: you remembered the thing "{}"{}: {}'.format(
+            clean, ' of ' + owner if owner else '', description), say)
+
+    def watch_faces(self):
+        """Greets people she knows when they come into view (at most once per half hour)."""
+        while not self.stop.wait(FACE_SCAN_SECONDS):
+            busy = (self.responding or self.playing or self.echo_guard_active or self.motion_active()
+                    or self.hold_item is not None or time.monotonic() - self.speech_started_at < 3
+                    or not self.ready)
+            if busy:
+                continue
+            frame = self.camera_stream.latest(max_age=1.0, wait=0)
+            if frame is None:
+                continue
+            try:
+                found = self.faces.faces(frame)
+            except Exception as exc:
+                print('Face memory error:', exc)
+                continue
+            now = time.monotonic()
+            for face in found:
+                name = face['name']
+                if not name:
+                    continue
+                away = now - self.seen_at.get(name, -1e9)
+                self.seen_at[name] = now
+                if FACE_GREET and away > 120 and now - self.greeted_at.get(name, -1e9) > FACE_GREET_MINUTES * 60:
+                    self.greeted_at[name] = now
+                    print('Face seen: {} -> greeting'.format(name))
+                    self.dialog_until = now + DIALOG_TIMEOUT
+                    self.speak_report('Robot report: {} (you know them) just came into view.'.format(name),
+                                      'Greet {} by name in a few words, in your character. No questions.'.format(name))
+                    break
+
     def motion_active(self):
         return time.monotonic() < self.motion_until
 
@@ -1096,6 +1298,20 @@ class RealtimeAisana(object):
             if held:
                 self.release_hold(drop=True)
             self.set_humor(item_id, int(humor.group(1)))
+            return
+        memory = parse_memory_command(transcript) if addressed and not stop else None
+        if memory is None and self.pending_face and time.monotonic() < self.pending_face[1] \
+                and self.dialog_active() and not stop:
+            # "Как тебя зовут?" -> "Али" / "меня зовут Али"
+            found = aisana_faces.SELF_NAME_RE.search(transcript)
+            name = aisana_faces._name(found.group(1) if found else transcript)
+            if name and len(transcript.split()) <= 4:
+                memory = {'action': self.pending_face[0], 'name': name, 'label': None}
+        if memory:
+            self.pending_face = None
+            if held:
+                self.release_hold(drop=True)
+            self.run_memory_locally(item_id, memory)
             return
         if addressed and not stop and CAMERA_RE.search(transcript):
             if held:
@@ -1192,6 +1408,7 @@ class RealtimeAisana(object):
     def handle(self, e):
         typ = e.get('type', '')
         if typ == 'session.updated':
+            self.ready = True
             print('Realtime session ready. Talk to Aisana (Ctrl+C to stop).')
             if self.shouts.pcm is None and not self.oob_ids:
                 # Record her own shouts once, silently (out-of-band, not played).
@@ -1352,6 +1569,8 @@ class RealtimeAisana(object):
             })
             self.ws.settimeout(10)
             threading.Thread(target=self.audio_worker, daemon=True).start()
+            if self.faces is not None and self.camera_stream is not None:
+                threading.Thread(target=self.watch_faces, daemon=True).start()
             worker = threading.Thread(target=self.capture, daemon=True)
             worker.start()
             while not self.stop.is_set():
@@ -1390,12 +1609,14 @@ def main():
     by itself instead of ending the program. Ctrl+C stops everything."""
     arm = connect_from_environment()
     legs = aisana_legs.connect_from_environment()
+    camera, faces = aisana_faces.connect_from_environment()     # camera stays on across reconnects
     delay = 2
     try:
         while True:
             started = time.monotonic()
             session = RealtimeAisana()
             session.arm, session.legs = arm, legs
+            session.camera_stream, session.faces = camera, faces
             try:
                 session.run(manage_devices=False)
                 problem = 'session ended'
@@ -1413,6 +1634,8 @@ def main():
             legs.stop()
         if arm is not None:
             arm.close()
+        if camera is not None:
+            camera.stop()
 
 
 if __name__ == '__main__':
