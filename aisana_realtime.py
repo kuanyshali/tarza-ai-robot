@@ -23,7 +23,7 @@ try:
 except ImportError:          # tests and robot.py do not need websocket-client
     websocket = None
 
-from aisana_arm import connect_from_environment
+from aisana_arm import connect_from_environment, POSITION_WORD, NUMBER_WORDS, SHOULDER_WORDS, ELBOW_WORDS, ARM_WORDS
 from sadam_features import WEB_ENABLED, get_weather, search_web
 
 RATE = 24000
@@ -75,6 +75,78 @@ def is_sleep_phrase(text):
     return _short(text) and bool(SLEEP_PATTERN.search((text or '').casefold()))
 
 
+# Numbered presets are absolute firmware positions, not relative degrees.
+# Use the latest explicit target when speech contains a self-correction.
+_POSITION_PATTERNS = []
+for _number, _words in NUMBER_WORDS:
+    _POSITION_PATTERNS.append((_number, re.compile(
+        POSITION_WORD + r'\s*(?:номер\s*|number\s*|№\s*)?(?:' + _words + r')\b' +
+        r'|\b(?:' + _words + r')\s*' + POSITION_WORD, re.I)))
+_RIGHT = re.compile(r'\b(?:прав(?:ый|ая|ое|ую|ого|ой|ым|ом|ые|ых)|right|оң)\b', re.I)
+_LEFT = re.compile(r'\b(?:лев(?:ый|ая|ое|ую|ого|ой|ым|ом|ые|ых)|left|сол)\b', re.I)
+_BOTH = re.compile(r'\b(?:оба|обе|обоих|две|два|both|екеуін|екі)\b', re.I)
+_WHOLE = re.compile(r'\b(?:рук[аиуеой]\w*|руками|arms?|hands?|қол\w*)\b', re.I)
+_PLURAL = re.compile(r'\b(?:руки|плечи|локти|arms|shoulders|elbows)\b', re.I)
+_NEGATED = re.compile(r'\b(?:не\s+(?:двигай|поднимай|опускай|переводи|ставь|надо|нужно|в)|не\s+трогай|don.t|do not|never)\b', re.I)
+_QUESTION = re.compile(r'\b(?:какая|какой|какие|почему|зачем|что значит|расскажи|объясни|what is|which position|why|explain)\b', re.I)
+
+
+def numbered_position_intent(text, previous=None):
+    """Return (matched, intent); a matched but ambiguous request must not move."""
+    q = (text or '').casefold()
+    matches = [(m.start(), m.end(), n) for n, pattern in _POSITION_PATTERNS
+               for m in pattern.finditer(q)]
+    if not matches:
+        return False, None
+    start, end, number = max(matches, key=lambda m: (m[1], m[0]))
+    # Do not move for a question about presets, a negation, or an unaddressed
+    # standalone number with no remembered target.
+    if _NEGATED.search(q) or _QUESTION.search(q):
+        return True, None
+    if re.search(r'\b(?:или|or)\b|\d\s*[-–/]\s*\d', q):
+        return True, None
+    if not ARM_WORDS.search(q) and previous is None:
+        return True, None
+    # The latest clause takes priority; preceding clauses supply missing context.
+    cut = max(q.rfind('.', 0, start), q.rfind(';', 0, start), q.rfind('!', 0, start))
+    clause = q[cut + 1:]
+    # A correction may omit side/joint: inherit the nearest explicit context.
+    def side_of(part):
+        r, l, b = bool(_RIGHT.search(part)), bool(_LEFT.search(part)), bool(_BOTH.search(part))
+        if b or (r and l):
+            return 'both'
+        if r:
+            return 'right'
+        if l:
+            return 'left'
+        return 'both' if _PLURAL.search(part) else None
+    def joint_of(part):
+        shoulder, elbow = bool(SHOULDER_WORDS.search(part)), bool(ELBOW_WORDS.search(part))
+        if shoulder and elbow:
+            return None
+        if shoulder:
+            return 'shoulder'
+        if elbow:
+            return 'elbow'
+        return 'whole' if _WHOLE.search(part) else None
+    if SHOULDER_WORDS.search(clause) and ELBOW_WORDS.search(clause):
+        return True, None
+    prev_text = q[:cut + 1] if cut >= 0 else ''
+    # Walk backwards through earlier clauses instead of merging left/right.
+    earlier = list(reversed(re.split(r'[.!;]', prev_text)))
+    side = side_of(clause)
+    joint = joint_of(clause)
+    for part in earlier:
+        side = side or side_of(part)
+        joint = joint or joint_of(part)
+    if previous:
+        side = side or previous.get('arm')
+        joint = joint or previous.get('joint')
+    if side is None or joint is None:
+        return True, None
+    return True, {'action': 'position', 'arm': side, 'joint': joint, 'position': number}
+
+
 def tool_definitions():
     tools = [
         {'type': 'function', 'name': 'inspect_camera',
@@ -86,13 +158,16 @@ def tool_definitions():
          'description': ('Control your two physical 2-DOF robotic arms (shoulder stepper, elbow servo, gripper) '
                          'on the Arm team Arduino. Use ONLY when the user explicitly asks to move an arm, '
                          'go to a numbered position, move a little up or down, open/close a gripper, '
-                         'stop the arms, or report arm status. Positions are 0..4; 0 is the zero/home '
-                         'position. For relative requests (a bit higher, lower, чуть-чуть наверх) use '
-                         'action nudge with direction and degrees.'),
+                         'stop the arms, or report arm status. Any numbered position request MUST use '
+                         'action position, NEVER nudge: right shoulder position 2 means '
+                         'position/right/shoulder/2. A shoulder is the stepper, an elbow is the servo. '
+                         'Presets are 0..4 but some are unset; the controller validates live presets. '
+                         'Use nudge ONLY for explicitly relative movements with a specified direction. '
+                         'Ask for missing side, target or direction instead of guessing.'),
          'parameters': {'type': 'object', 'properties': {
              'action': {'type': 'string', 'enum': ['position', 'nudge', 'gripper_open', 'gripper_close', 'stop', 'status']},
              'arm': {'type': 'string', 'enum': ['right', 'left', 'both'],
-                     'description': 'Use both when the user does not say which arm'},
+                     'description': 'Use both only if both arms are requested; otherwise use the explicit or conversationally established side'},
              'position': {'type': 'integer', 'minimum': 0, 'maximum': 4,
                           'description': 'Required for action=position'},
              'joint': {'type': 'string', 'enum': ['whole', 'shoulder', 'elbow'],
@@ -163,14 +238,24 @@ PROMPT = (
     'never say the arm is moving before move_arm has returned. '
     'Call move_arm only when the user explicitly asks to move an arm, go to a numbered '
     'position, open or close a gripper, stop the arms or report their status. '
-    'Positions are numbered 0 to 4; 0 is the zero (home) position; a higher number lifts the arm. '
-    'If the user does not say which arm, use both. '
+    'POSITION PRIORITY: any numbered position (позиция 2, во вторую позицию, position two, '
+    '2-қалып) means action=position, NOT nudge or degrees. If the user corrects a number, use only '
+    'the latest intended position for that joint. Example: правое плечо в позицию 2 -> '
+    'action position, arm right, joint shoulder, position 2. Left elbow position 3 -> position,left,elbow,3. '
+    'Shoulder/плечо/иық is the stepper; elbow/локоть/шынтақ is the servo. '
+    '0 is home; some presets are not defined; never assume position 4 exists or a number means higher. '
+    'Use both only if the user explicitly asks for both; ambiguous singular side or direction requires clarification. '
+    'For vague подвигай плечом, ask which direction or position, never invent a motion. '
     'RELATIVE MOVES: "подними руку", "чуть-чуть наверх", "немного ниже", "a bit higher", "опусти" '
     'are action nudge, direction up or down, joint shoulder unless the user mentions the elbow '
     '(локоть). Degrees: чуть-чуть/slightly 5, немного/a bit 10, no amount 15, сильно/a lot 30, '
     'or the number the user said (max 45). "Ещё" / "more" repeats the previous nudge. '
     'When asked to stop the arms, call move_arm with action stop at once. '
-    'After move_arm returns, confirm in a few words; if it failed, say so briefly. '
+    'After move_arm returns, distinguish sent, accepted, rejected, and physically reached. '
+    'Do NOT say I raised/moved/reached/stopped unless the controller has confirmed that fact. '
+    'If only sent or accepted, say the command was sent or the target accepted; movement is unconfirmed. '
+    'If missing acknowledgement, unset preset, limit, fault, or no connection, state the actual problem briefly. '
+    'Never call a second movement automatically to compensate for a failure. '
     'WEATHER: always call get_weather for weather; never guess. '
     'LIVE FACTS: call web_search for news, elections, results, prices and other changing facts. '
 )
@@ -219,16 +304,22 @@ class RealtimeAisana(object):
         self.calls_lock = threading.Lock()
         self.mic_device = None
         self.transcript_open = False
+        self.last_position_target = None
+        self.pending_position = None
+        self.position_used = False
 
     def dialog_active(self):
         return time.monotonic() < self.dialog_until
 
-    def respond(self, item_id=None):
+    def respond(self, item_id=None, response=None):
         """Answer the latest user turn and keep the follow-up window open."""
         if item_id:
             self.responded_items.add(item_id)
         self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
-        self.send({'type': 'response.create'})
+        payload = {'type': 'response.create'}
+        if response:
+            payload['response'] = response
+        self.send(payload)
 
     def ignore_item(self, item_id):
         """Drop unaddressed speech so it does not pollute the conversation."""
@@ -396,6 +487,12 @@ class RealtimeAisana(object):
             question = str(args.get('question') or 'What is visible?')[:500]
             return self.inspect_camera(question)
         if name == 'move_arm':
+            if self.pending_position is not None:
+                if self.position_used:
+                    return 'No new movement: this numbered command was already processed.'
+                self.position_used = True
+                # The local parser, not model inference, owns explicit numbered requests.
+                args = dict(self.pending_position)
             if self.arm is None:
                 return ('The arm controller (Arduino Mega) is not connected over USB. '
                         'Tell the user briefly; do not pretend the arm moved.')
@@ -437,38 +534,72 @@ class RealtimeAisana(object):
         try:
             self.send({'type': 'conversation.item.create', 'item': {
                 'type': 'function_call_output', 'call_id': call_id, 'output': str(result)[:4000]}})
-            self.send({'type': 'response.create', 'response': {'instructions': (
+            response = {'instructions': (
                 'The tool has returned. Answer the user NOW, in first person as Aisana, '
                 'using its result. No commentary about tools, photos or analysis. '
                 'One or two short sentences in the language of the user question. '
                 'No filler, no wishes, no offers of more help, no follow-up questions. '
-                'If the tool failed, say briefly that it did not work.') }})
+                'If the tool failed, say briefly that it did not work. '
+                'For arms, report only the actual controller result: sent or accepted is not proof of movement. '
+                'Never claim a completed move or stop without feedback.')}
+            if name == 'move_arm':
+                response['tool_choice'] = 'none'
+            self.send({'type': 'response.create', 'response': response})
         except Exception as exc:
             if not self.stop.is_set():
                 print('Tool response error:', exc)
 
     def handle_transcript(self, item_id, transcript):
         print('You:', transcript)
-        if is_prompt_echo(transcript):
-            print('Transcript looks like noise (repeated names); ignored.')
-            if WAKE_GATE and item_id not in self.responded_items:
-                self.ignore_item(item_id)
+        if item_id in self.responded_items:
             return
+        if is_prompt_echo(transcript) or not transcript:
+            print('Transcript looks like noise; ignored.')
+            self.ignore_item(item_id)
+            return
+        active = self.dialog_active()
+        if not active:
+            self.last_position_target = None
         if is_stop_phrase(transcript):
-            if self.arm is not None:
-                self.arm.emergency_stop()
+            # Stop remains available even outside the conversation window.
+            stop_result = self.arm.emergency_stop() if self.arm is not None else []
+            self.pending_position = None
             self.stop_playback()
-        if not WAKE_GATE or item_id in self.responded_items:
+            if not WAKE_GATE or active or has_wake_name(transcript):
+                confirmed = bool(stop_result and any('EMERGENCY STOP' in line.upper() for line in stop_result))
+                self.respond(item_id, {'tool_choice': 'none', 'instructions':
+                    'Reply in the user language. ' + ('Arduino confirmed the stop command.' if confirmed else
+                    'The stop command is not confirmed; do not claim the arms stopped.')})
+            else:
+                self.ignore_item(item_id)
             return
         if is_sleep_phrase(transcript):
             self.dialog_until = 0.0
+            self.last_position_target = None
+            self.pending_position = None
             print('Dialogue closed; say Aisana to begin again.')
             self.ignore_item(item_id)
-        elif self.dialog_active() or has_wake_name(transcript):
-            self.respond(item_id)
-        else:
+            return
+        if WAKE_GATE and not (active or has_wake_name(transcript)):
             print('Not addressed to Aisana; ignored.')
             self.ignore_item(item_id)
+            return
+        self.pending_position = None
+        self.position_used = False
+        matched, intent = numbered_position_intent(transcript, self.last_position_target)
+        if intent is not None:
+            self.pending_position = intent
+            self.last_position_target = dict(intent)
+            print('Arm preset (transcript):', intent)
+            self.respond(item_id, {'tool_choice': {'type': 'function', 'name': 'move_arm'},
+                                  'instructions': 'Call move_arm once with exactly these arguments: ' +
+                                                  json.dumps(intent) + '. Do not speak first.'})
+        elif matched:
+            self.respond(item_id, {'tool_choice': 'none', 'instructions':
+                'Do not move anything. Answer a question about positions if asked, otherwise ask briefly '
+                'which arm, joint and single numbered position the user means. Do not claim motion.'})
+        else:
+            self.respond(item_id)
 
     def handle(self, e):
         typ = e.get('type', '')
@@ -496,9 +627,9 @@ class RealtimeAisana(object):
             if text:
                 print('Aisana:', text)
         elif typ == 'input_audio_buffer.committed':
-            # Inside an open dialogue answer at once, without waiting for STT.
-            if WAKE_GATE and self.dialog_active():
-                self.respond(e.get('item_id'))
+            # Always wait for the transcript: responding to raw audio early can
+            # move the wrong joint before a correction or a number is understood.
+            pass
         elif typ == 'conversation.item.input_audio_transcription.completed':
             self.handle_transcript(e.get('item_id'), (e.get('transcript') or '').strip())
         elif typ == 'conversation.item.input_audio_transcription.failed':
@@ -556,7 +687,7 @@ class RealtimeAisana(object):
                                 'threshold': 0.5,
                                 'prefix_padding_ms': 500,
                                 'silence_duration_ms': max(500, min(3000, SILENCE_MS)),
-                                'create_response': not WAKE_GATE,
+                                'create_response': False,
                                 'interrupt_response': BARGE_IN
                             }
                         },
