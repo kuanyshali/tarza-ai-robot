@@ -95,6 +95,7 @@ class ParserTests(unittest.TestCase):
         self.check('проехать вперёд две секунды', 'forward', seconds=2.0)
         self.check('отъедь назад на полметра', 'backward', meters=0.5)
         self.check('Айсана, вперед 4 секунды', 'forward', seconds=4.0)
+        self.check('Айсана, проейдь пять секунд', 'forward', seconds=5.0)
 
     def test_not_drive_commands(self):
         for text in ('что у тебя впереди?', 'Айсана, смотри вперёд и скажи что видишь',
@@ -135,10 +136,9 @@ class ControllerTests(unittest.TestCase):
         pi = FakePi(needs_calibration=True)
         problems = []
         legs_ctrl = controller(pi)
-        legs_ctrl.drive(legs.make_intent('forward'), problems.append)
-        legs_ctrl._drive.join(3)
+        with self.assertRaisesRegex(legs.LegsError, 'calibration'):
+            legs_ctrl.drive(legs.make_intent('forward'), problems.append)
         self.assertEqual(pi.commands, [])
-        self.assertIn('calibration', problems[0])
 
     def test_execute_says_not_driving_when_calibration_needed(self):
         pi = FakePi(needs_calibration=True)
@@ -146,6 +146,21 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(result.startswith('NOT driving'))
         self.assertIn('calibration', result)
         self.assertEqual(pi.commands, [])
+
+    def test_obstacle_refusal_known_before_reply(self):
+        # From the Jetson log: Pi answered 409 but Aisana had already said "Еду вперёд".
+        pi = FakePi()
+        pi.enabled = True
+        original = pi.post
+
+        def blocked(url, json=None, timeout=None):
+            if url.endswith('/motor/command') and json.get('command') != 'stop':
+                return FakeResponse(409, {'error': 'Movement blocked: obstacle closer than 40 cm.'})
+            return original(url, json, timeout)
+        pi.post = blocked
+        result = controller(pi).execute(legs.make_intent('forward'))
+        self.assertTrue(result.startswith('NOT driving'))
+        self.assertIn('obstacle', result)
 
     def test_obstacle_stop_is_reported(self):
         pi = FakePi(obstacle_after=0.2)
@@ -155,16 +170,22 @@ class ControllerTests(unittest.TestCase):
         legs_ctrl._drive.join(3)
         self.assertIn('obstacle', problems[0])
 
+    def test_unreachable_pi_does_not_crash_execute(self):
+        class DeadPi(object):
+            def get(self, *a, **k):
+                raise IOError('connection refused')
+            post = get
+        legs_ctrl = legs.LegsController('http://10.0.0.2:5000', http=DeadPi(), log=lambda *a: None)
+        self.assertIn('connection refused', legs_ctrl.execute(legs.make_intent('forward')))
+
     def test_unreachable_pi_does_not_crash(self):
         class DeadPi(object):
             def get(self, *a, **k):
                 raise IOError('connection refused')
             post = get
-        problems = []
         legs_ctrl = legs.LegsController('http://10.0.0.2:5000', http=DeadPi(), log=lambda *a: None)
-        legs_ctrl.drive(legs.make_intent('forward'), problems.append)
-        legs_ctrl._drive.join(3)
-        self.assertIn('connection refused', problems[0])
+        with self.assertRaises(IOError):
+            legs_ctrl.drive(legs.make_intent('forward'))
         legs_ctrl.stop()                                    # never raises
 
     def test_speed_and_unconfigured(self):

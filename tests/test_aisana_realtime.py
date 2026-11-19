@@ -205,7 +205,7 @@ class ArmVerificationTests(unittest.TestCase):
         say(session, 'i9', 'руки в позицию ноль')
         session.run_tool('move_arm', {'action': 'position', 'arm': 'both', 'position': 0})
         session.arm.report(['LEFT STEPPER STOPPED: moving the wrong way.'])
-        time.sleep(0.3)
+        time.sleep(1.0)
         self.assertIn('wrong way', sent[-2]['item']['content'][0]['text'])
         self.assertEqual(sent[-1]['type'], 'response.create')
 
@@ -324,6 +324,27 @@ class LegsToolTests(unittest.TestCase):
             self.assertEqual(sent[-1]['response']['tool_choice']['name'], 'move_legs')
         finally:
             rt.WAKE_GATE = original
+
+    def test_empty_speech_reply_is_cancelled(self):
+        # From the Jetson log: "You: " (noise) got "I'm here..." in English.
+        session, sent = make_session()
+        session.dialog_until = time.monotonic() + 20
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'n1'})
+        session.handle({'type': 'response.created'})
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'n1', 'transcript': ''})
+        self.assertIn({'type': 'response.cancel'}, sent)
+        self.assertEqual(sent[-1], {'type': 'conversation.item.delete', 'item_id': 'n1'})
+
+    def test_problem_report_waits_for_pending_tool_answer(self):
+        session, sent = make_session()
+        session.expect_tool_response = True            # tool answer requested, not created yet
+        session.report_problem('Legs report: ', ['blocked'])
+        time.sleep(0.3)
+        self.assertEqual(sent, [])                     # did not collide with the tool answer
+        session.expect_tool_response = False
+        time.sleep(1.0)
+        self.assertEqual(sent[-1]['type'], 'response.create')
 
     def test_legs_not_configured(self):
         session, _ = make_session()

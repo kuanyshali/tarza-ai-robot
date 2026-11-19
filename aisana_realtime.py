@@ -371,9 +371,19 @@ class RealtimeAisana(object):
         print('Problem:', prefix + text)
 
         def worker():
-            deadline = time.monotonic() + 12
-            while self.responding and time.monotonic() < deadline and not self.stop.is_set():
-                time.sleep(0.2)
+            # Wait until no reply is being generated or about to start
+            # (a tool answer may be requested but not yet created).
+            deadline = time.monotonic() + 15
+            quiet_since = None
+            while time.monotonic() < deadline and not self.stop.is_set():
+                busy = self.responding or self.expect_tool_response
+                if busy:
+                    quiet_since = None
+                elif quiet_since is None:
+                    quiet_since = time.monotonic()
+                elif time.monotonic() - quiet_since > 0.6:
+                    break
+                time.sleep(0.1)
             if self.stop.is_set():
                 return
             try:
@@ -708,6 +718,17 @@ class RealtimeAisana(object):
             self.pending_legs[item_id] = drive
             if item_id in self.done_items:
                 self.run_pending_legs(item_id)
+        if not re.search(r'\w', transcript or '') and item_id in self.responded_items:
+            # Noise answered at commit time ("You: " was empty): cancel that reply.
+            print('Empty speech; reply cancelled.')
+            if self.responding:
+                try:
+                    self.send({'type': 'response.cancel'})
+                except Exception:
+                    pass
+            self.stop_playback()
+            self.ignore_item(item_id)
+            return
         if is_prompt_echo(transcript):
             print('Transcript looks like noise (repeated names); ignored.')
             if WAKE_GATE and item_id not in self.responded_items:

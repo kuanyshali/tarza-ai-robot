@@ -153,13 +153,16 @@ class LegsController(object):
             speed = 2.0
         seconds = plan_seconds(intent, speed, self.spin_90)
 
+        # Enable and send the first command BEFORE returning, so a refusal
+        # (obstacle closer than 40 cm, motors off) is known before Aisana speaks.
+        self.ensure_enabled()
+        code, data = self._post('/motor/command', {'command': action})
+        if code != 200:
+            raise LegsError(data.get('error') or 'command refused ({})'.format(code))
+        self.log('Legs: {} for {:.1f} s'.format(action, seconds))
+
         def worker():
             try:
-                self.ensure_enabled()
-                code, data = self._post('/motor/command', {'command': action})
-                if code != 200:
-                    raise LegsError(data.get('error') or 'command refused ({})'.format(code))
-                self.log('Legs: {} for {:.1f} s'.format(action, seconds))
                 end = time.monotonic() + seconds
                 while time.monotonic() < end and not cancel.is_set():
                     code, data = self._post('/motor/heartbeat', timeout=0.3)
@@ -193,12 +196,11 @@ class LegsController(object):
             speed = self.change_speed(0.5 if action == 'faster' else -0.5)
             return 'Drive speed is now {} km/h.'.format(speed)
         try:
-            # Enable first, synchronously, so Aisana never says "Еду" when the
-            # motors cannot move (e.g. they need calibration).
-            self.ensure_enabled()
+            # Enabling and the first command happen before the reply, so Aisana
+            # never says "Еду" when the Pi refused (obstacle, calibration...).
+            seconds = self.drive(intent, report)
         except Exception as error:
             return ('NOT driving: {}. Nothing moved. Tell the user this in one short sentence.'.format(error))
-        seconds = self.drive(intent, report)
         return 'Driving {} for {:.1f} s (stops by itself).'.format(action.replace('_', ' '), seconds)
 
 
@@ -228,7 +230,7 @@ RIGHT = re.compile(r'(?:направо|вправо|право|правее|\bri
 SPIN = re.compile(r'(?:поверн\w*|разверн\w*|крут\w*|разворот\w*|\bturn\b|\bspin\b|бұрыл\w*|لف)', re.I)
 AROUND = re.compile(r'(?:разверн\w*|разворот\w*|turn around|кругом)', re.I)
 DRIVE = re.compile(
-    r'(?:\bедь\b|езжай|поезжай|прое[дзх]\w*|подъе[дзх]\w*|отъе[дзх]\w*|ехай|едем|поехали|двигайся|'
+    r'(?:\bедь\b|езжай|поезжай|прое[дзхй]\w*|подъе[дзхй]\w*|отъе[дзхй]\w*|ехай|едем|поехали|двигайся|'
     r'подвинься|иди\b|пойди|шагай|\bdrive\b|\bgo\b|\bmove\b|\bcome\b|\broll\b|жүр|бар\b|'
     r'وريني|امشي|روح|تعالى)', re.I)
 LEG_STOP = re.compile(r'(?:\bстоп\b|останов\w*|стой|замри|\bstop\b|\bhalt\b|тоқта\w*|وقف|استنى)', re.I)
