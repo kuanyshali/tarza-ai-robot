@@ -106,11 +106,29 @@ def is_stop_phrase(text):
     return _short(text) and bool(STOP_PATTERN.search((text or '').casefold()))
 
 
+STT_PROMPT = 'Speech may be Russian, Kazakh, English or Egyptian Arabic. The robot is called Aisana.'
+# Hints used now or earlier; STT may still return them verbatim on noise.
+KNOWN_HINTS = (
+    STT_PROMPT,
+    'Aisana, Aysana, Айсана, Эйсана, آيسانا. Russian, Kazakh, English, Egyptian Arabic.',
+    'поверни налево, поверни направо, развернись, развернись на 360, проедь вперёд, езжай назад, '
+    'стой, руки в позицию, открой захват, turn left, go forward.',
+)
+
+
 def is_prompt_echo(text):
-    """STT sometimes 'hears' its own hint on noise: 'Айсана, Айсана, Эйсана...'."""
+    """STT sometimes 'hears' its own hint on noise ("Айсана, Айсана, Эйсана...",
+    or the whole command list): such text is never a request."""
     words = re.findall(r'[^\W\d_]+', (text or '').casefold())
     names = [w for w in words if WAKE_PATTERN.match(w)]
-    return len(names) >= 3 and len(names) >= len(words) - 1
+    if len(names) >= 3 and len(names) >= len(words) - 1:
+        return True
+    if len(words) >= 6:
+        for hint in KNOWN_HINTS:
+            hint_words = set(re.findall(r'[^\W\d_]+', hint.casefold()))
+            if sum(1 for w in words if w in hint_words) >= 0.7 * len(words):
+                return True
+    return False
 
 
 def is_sleep_phrase(text):
@@ -170,8 +188,9 @@ def tool_definitions():
                          'description': 'Only if the user said a time; немного/a bit = 1'},
              'meters': {'type': 'number', 'minimum': 0.05, 'maximum': 5,
                         'description': 'Only if the user said a distance'},
-             'degrees': {'type': 'integer', 'minimum': 10, 'maximum': 360,
-                         'description': 'For spin_left/spin_right; default 90, развернись = 180'}},
+             'degrees': {'type': 'integer', 'minimum': 10, 'maximum': 3600,
+                         'description': 'For spin_left/spin_right; default 90, развернись = 180, '
+                                        'N times around = N*360 (the drive is capped at 10 s)'}},
              'required': ['action'], 'additionalProperties': False}})
     if WEB_ENABLED:
         tools.append(
@@ -191,6 +210,7 @@ PROMPT = (
     'English question -> English answer. Russian question -> Russian answer. '
     'Kazakh question -> Kazakh answer. Never switch languages unless explicitly asked. '
     'If the user asks about an English technical topic in Russian, answer in Russian. '
+    'You may shout or sing short playful exclamations when asked ("Уииии!", "Ура!"). '
     'SILENCE RULE: during a conversation people around you also talk to each other. If the latest '
     'speech is not a request or question for you (chatter, noise, fragments such as "Инерция же", '
     '"Мушакал", "крепление, если будет болтаться"), call stay_silent and say nothing. '
@@ -308,6 +328,7 @@ class RealtimeAisana(object):
         self.arm_done_items = set()
         self.arm_lock = threading.Lock()
         self.last_arm_at = 0.0
+        self.local_items = set()            # commands already run from the user's words
         self.handled_calls = set()
         self.calls_lock = threading.Lock()
         self.mic_device = None
@@ -351,6 +372,8 @@ class RealtimeAisana(object):
         """
         item_id = self.last_item
         transcript = self.wait_transcript(item_id, timeout=1.5)
+        if item_id in self.local_items:
+            return 'Already executed by the robot from the user\'s words; confirm in a few words.'
         intents = parse_arm_commands(transcript) if transcript else []
         if not intents:
             action = args.get('action')
@@ -432,6 +455,8 @@ class RealtimeAisana(object):
         """move_legs, checked against the user's words like move_arm."""
         item_id = self.last_item
         transcript = self.wait_transcript(item_id, timeout=1.5)
+        if item_id in self.local_items:
+            return 'Already executed by the robot from the user\'s words; confirm in a few words.'
         intent = parse_legs_command(transcript) if transcript else None
         action = args.get('action')
         if intent is None:
@@ -758,50 +783,97 @@ class RealtimeAisana(object):
         with self.transcript_cond:
             self.transcripts[item_id] = transcript
             self.transcript_cond.notify_all()
-        intents = [] if is_prompt_echo(transcript) else parse_arm_commands(transcript)
-        if intents and intents[0]['action'] != 'stop':
-            self.pending_arm[item_id] = intents
-            if item_id in self.done_items:      # reply already finished without move_arm
-                self.run_pending_arm(item_id)
-        drive = None if intents or is_prompt_echo(transcript) else parse_legs_command(transcript)
-        if drive and drive['action'] != 'stop':
-            self.pending_legs[item_id] = drive
-            if item_id in self.done_items:
-                self.run_pending_legs(item_id)
-        if not re.search(r'\w', transcript or '') and item_id in self.responded_items:
-            # Noise answered at commit time ("You: " was empty): cancel that reply.
-            print('Empty speech; reply cancelled.')
-            if self.responding:
-                try:
-                    self.send({'type': 'response.cancel'})
-                except Exception:
-                    pass
-            self.stop_playback()
+        if not re.search(r'\w', transcript or '') or is_prompt_echo(transcript):
+            # Noise or the STT hint repeated back: never a request, never a move.
+            print('Empty speech or noise; ignored.')
+            if item_id in self.responded_items:
+                self.cancel_reply()
             self.ignore_item(item_id)
             return
-        if is_prompt_echo(transcript):
-            print('Transcript looks like noise (repeated names); ignored.')
-            if WAKE_GATE and item_id not in self.responded_items:
-                self.ignore_item(item_id)
-            return
-        if is_stop_phrase(transcript) or (drive and drive['action'] == 'stop'):
+        arm_intents = parse_arm_commands(transcript)
+        drive = None if arm_intents else parse_legs_command(transcript)
+        stop = (is_stop_phrase(transcript) or (drive and drive['action'] == 'stop')
+                or (arm_intents and arm_intents[0]['action'] == 'stop'))
+        if stop:
             if self.legs is not None:
                 self.legs.stop()            # wheels first: they can run into people
             if self.arm is not None:
                 self.arm.emergency_stop()
             self.stop_playback()
+        addressed = (not WAKE_GATE or item_id in self.responded_items
+                     or self.dialog_active() or has_wake_name(transcript))
+        if addressed and not stop and (arm_intents or drive):
+            # A clear command: run it now from the user's exact words and only
+            # confirm it, instead of letting the model think aloud first.
+            self.run_command_locally(item_id, arm_intents, drive)
+            return
         if not WAKE_GATE or item_id in self.responded_items:
             return
         if is_sleep_phrase(transcript):
             self.dialog_until = 0.0
             print('Dialogue closed; say Aisana to begin again.')
             self.ignore_item(item_id)
-        elif self.dialog_active() or has_wake_name(transcript):
-            self.respond(item_id, force_arm=bool(self.pending_arm.get(item_id)),
-                         force_tool='move_legs' if self.pending_legs.get(item_id) else None)
+        elif addressed:
+            self.respond(item_id)
         else:
             print('Not addressed to Aisana; ignored.')
             self.ignore_item(item_id)
+
+    def cancel_reply(self):
+        if self.responding:
+            try:
+                self.send({'type': 'response.cancel'})
+            except Exception:
+                pass
+        self.stop_playback()
+
+    def run_command_locally(self, item_id, arm_intents, drive):
+        with self.arm_lock:
+            if item_id in self.arm_done_items or item_id in self.legs_done_items:
+                return                      # the model already called the tool for it
+            self.arm_done_items.add(item_id)
+            self.legs_done_items.add(item_id)
+            self.responded_items.add(item_id)
+            self.local_items.add(item_id)
+        self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+        self.cancel_reply()                 # cut "Секунду, подумаю..." chatter
+
+        def worker():
+            try:
+                if arm_intents:
+                    if self.arm is None:
+                        result = 'NOT done: the arm controller is not connected over USB.'
+                    else:
+                        self.arm.execute_many(arm_intents, verify=False)
+                        self.arm.watch(arm_intents, self.report_arm_problem)
+                        self.last_arm_at = time.monotonic()
+                        result = 'Arms: ' + describe(arm_intents) + '.'
+                elif self.legs is None:
+                    result = 'NOT done: legs are not connected (AISANA_LEGS_URL).'
+                else:
+                    result = 'Legs: ' + self.legs.execute(drive, self.report_legs_problem)
+            except Exception as exc:
+                result = 'NOT done: {}'.format(exc)
+            print('Command (from your words) -> {}'.format(' '.join(result.split())[:300]))
+            deadline = time.monotonic() + 3
+            while self.responding and time.monotonic() < deadline and not self.stop.is_set():
+                time.sleep(0.05)            # let the cancelled reply finish
+            if self.stop.is_set():
+                return
+            try:
+                self.send({'type': 'conversation.item.create', 'item': {
+                    'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
+                        'Robot report: the user\'s command was executed by the robot itself. ' + result)}]}})
+                self.expect_tool_response = True
+                self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (
+                    'In a few words, confirm what you are doing now, based ONLY on the robot report '
+                    '(if it says NOT done, say that briefly instead). If the user also asked for '
+                    'something you can just say or exclaim, for example to shout "Уииии!", do that too, '
+                    'playfully and stretched out. No questions, no other words.')}})
+            except Exception as exc:
+                if not self.stop.is_set():
+                    print('Command report error:', exc)
+        threading.Thread(target=worker, daemon=True).start()
 
     def handle(self, e):
         typ = e.get('type', '')
@@ -897,10 +969,9 @@ class RealtimeAisana(object):
                             'transcription': {
                                 'model': STT_MODEL,
                                 # A list of names here gets echoed back on noise.
-                                'prompt': ('Speech may be Russian, Kazakh, English or Egyptian Arabic. The robot is '
-                                           'called Aisana. Typical commands: поверни налево, поверни направо, '
-                                           'развернись, развернись на 360, проедь вперёд, езжай назад, стой, '
-                                           'руки в позицию, открой захват, turn left, go forward.')
+                                # Keep it short: STT repeats its hint on noise (a command list here
+                                # was once "heard" and opened the grippers).
+                                'prompt': STT_PROMPT
                             },
                             'turn_detection': {
                                 'type': 'server_vad',

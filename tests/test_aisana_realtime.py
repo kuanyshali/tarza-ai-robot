@@ -109,10 +109,8 @@ class LanguageAndSilenceTests(unittest.TestCase):
         session, sent = make_session()
         session.legs = FakeLegs()
         say(session, 'g1', 'Aisana, go forward for one second.')
-        session.handle_tool_call('c1', 'move_legs', json.dumps({'action': 'forward', 'seconds': 1}))
+        time.sleep(0.2)
         self.assertTrue(sent[-1]['response']['instructions'].startswith('Reply in English only'))
-        result = sent[-2]['item']['output']
-        self.assertIn('Driving forward.', result)          # English example, not only "Еду вперёд."
 
     def test_stay_silent_for_chatter(self):
         session, sent = make_session()
@@ -213,15 +211,29 @@ class ArmVerificationTests(unittest.TestCase):
         session.arm = FakeArm()
         say(session, 'i1', 'Айсана, подвигай плечом. Плечо правое в позицию 1. Позиция 4. '
                            'Айсана, правое плечо в позицию 2.')
+        time.sleep(0.2)                               # executed at once from the words
         result = session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'joint': 'shoulder',
                                                'direction': 'up', 'degrees': 10})
         self.assertEqual([c[:4] for c in session.arm.calls],
                          [('position', 'right', 1, 'shoulder'), ('position', 'right', 4, 'shoulder'),
                           ('position', 'right', 2, 'shoulder')])
-        self.assertIn('right arm shoulder -> position 2', result)
-        self.assertIn('few words', result)            # short spoken reply, no long report
+        self.assertIn('Already executed', result)     # the model's nudge guess is not run
         self.assertFalse(session.arm.verified)       # no 2 s sensor wait before speaking
         self.assertEqual(len(session.arm.watched), 3) # sensors checked in the background
+
+    def test_model_tool_path_still_checks_words(self):
+        # If the model calls move_arm before the transcript arrives, its guess is replaced.
+        session, _ = make_session()
+        session.arm = FakeArm()
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'm1'})
+        session.handle({'type': 'response.function_call_arguments.done', 'call_id': 'cm', 'name': 'move_arm',
+                        'arguments': '{}'})
+        session.handle_tool_call = lambda *a: None
+        with session.transcript_cond:
+            session.transcripts['m1'] = 'правое плечо в позицию 2'
+        result = session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'direction': 'up', 'degrees': 10})
+        self.assertEqual(session.arm.calls[0][:4], ('position', 'right', 2, 'shoulder'))
+        self.assertIn('right arm shoulder -> position 2', result)
 
     def test_model_may_not_invent_position(self):
         # From the Jetson log: "Рука правая." became "right arm -> position 2".
@@ -265,7 +277,7 @@ class ArmVerificationTests(unittest.TestCase):
         session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'direction': 'up', 'degrees': 5})
         self.assertEqual(len(session.arm.calls), 1)
 
-    def test_safety_net_runs_command_model_ignored(self):
+    def test_clear_command_runs_even_if_model_ignored_it(self):
         session, sent = make_session()
         session.arm = FakeArm()
         session.dialog_until = time.monotonic() + 20
@@ -294,15 +306,29 @@ class ArmVerificationTests(unittest.TestCase):
         time.sleep(0.2)
         self.assertEqual(session.arm.calls, [])            # tool thread owns it, net stays off
 
-    def test_first_turn_with_arm_command_forces_tool(self):
+    def test_first_turn_arm_command_runs_without_model_chatter(self):
         original = rt.WAKE_GATE
         rt.WAKE_GATE = True
         try:
             session, sent = make_session()
+            session.arm = FakeArm()
             say(session, 'i7', 'Айсана, правая рука в позицию 2')
-            self.assertEqual(sent[-1]['response']['tool_choice']['name'], 'move_arm')
+            time.sleep(0.2)
+            self.assertEqual(session.arm.calls[0][:3], ('position', 'right', 2))
+            self.assertIn('Robot report', sent[-2]['item']['content'][0]['text'])
+            self.assertNotIn('tool_choice', sent[-1].get('response', {}))
         finally:
             rt.WAKE_GATE = original
+
+    def test_stt_hint_echo_never_moves_anything(self):
+        # From the Jetson log: noise came back as the STT command list and opened the grippers.
+        session, sent = make_session()
+        session.arm, session.legs = FakeArm(), FakeLegs()
+        session.dialog_until = time.monotonic() + 20
+        say(session, 'e9', 'поверни налево, поверни направо, развернись, развернись на 360, проедь вперёд, '
+                           'езжай назад, стой, руки в позицию, открой захват, turn left, go forward.')
+        time.sleep(0.2)
+        self.assertEqual((session.arm.calls, session.legs.intents), ([], []))
 
 
 class FakeLegs(object):
@@ -323,9 +349,11 @@ class LegsToolTests(unittest.TestCase):
         session, _ = make_session()
         session.legs = FakeLegs()
         say(session, 'l1', 'Айсана, проедь вперёд 3 секунды')
+        time.sleep(0.2)
         result = session.run_tool('move_legs', {'action': 'forward', 'seconds': 8})
+        self.assertEqual(session.legs.intents, [session.legs.intents[0]])   # once, from the words
         self.assertEqual(session.legs.intents[0]['seconds'], 3.0)
-        self.assertIn('few words', result)
+        self.assertIn('Already executed', result)
 
     def test_model_cannot_drive_when_not_asked(self):
         session, _ = make_session()
@@ -338,7 +366,9 @@ class LegsToolTests(unittest.TestCase):
     def test_model_may_not_invent_duration(self):
         session, _ = make_session()
         session.legs = FakeLegs()
-        say(session, 'l3', 'Айсана, покатайся по комнате вперёд и обратно')
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'l3'})
+        with session.transcript_cond:
+            session.transcripts['l3'] = 'Айсана, покатайся по комнате вперёд и обратно'
         session.run_tool('move_legs', {'action': 'forward', 'seconds': 10})
         self.assertIsNone(session.legs.intents[0]['seconds'])
 
@@ -348,13 +378,17 @@ class LegsToolTests(unittest.TestCase):
         say(session, 'l4', 'Айсана, стой!')
         self.assertEqual((session.legs.stops, session.arm.stopped), (1, 1))
 
-    def test_first_turn_drive_forces_legs_tool(self):
+    def test_spin_and_shout(self):
         original = rt.WAKE_GATE
         rt.WAKE_GATE = True
         try:
             session, sent = make_session()
-            say(session, 'l5', 'Айсана, повернись налево')
-            self.assertEqual(sent[-1]['response']['tool_choice']['name'], 'move_legs')
+            session.legs = FakeLegs()
+            say(session, 'l5', 'Айсана, покрутись 10 секунд и кричи уииии')
+            time.sleep(0.2)
+            self.assertEqual(session.legs.intents[0]['action'], 'spin_right')
+            self.assertEqual(session.legs.intents[0]['seconds'], 10.0)
+            self.assertIn('Уииии', sent[-1]['response']['instructions'])
         finally:
             rt.WAKE_GATE = original
 
@@ -380,9 +414,10 @@ class LegsToolTests(unittest.TestCase):
         self.assertEqual(sent[-1]['type'], 'response.create')
 
     def test_legs_not_configured(self):
-        session, _ = make_session()
+        session, sent = make_session()
         say(session, 'l6', 'Айсана, вперёд')
-        self.assertIn('not connected', session.run_tool('move_legs', {'action': 'forward'}))
+        time.sleep(0.2)
+        self.assertIn('NOT done: legs are not connected', sent[-2]['item']['content'][0]['text'])
 
 
 class ToolTests(unittest.TestCase):
