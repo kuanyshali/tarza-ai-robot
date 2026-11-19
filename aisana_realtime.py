@@ -105,9 +105,13 @@ def numbered_position_intent(text, previous=None):
         return True, None
     if re.search(r'\b(?:или|or)\b|\d\s*[-–/]\s*\d', q):
         return True, None
-    if not (ARM_WORDS.search(q) or SHOULDER_WORDS.search(q) or ELBOW_WORDS.search(q)) and previous is None:
-        # Generic questions about a numbered position are not arm commands.
-        return False, None
+    if not (ARM_WORDS.search(q) or SHOULDER_WORDS.search(q) or ELBOW_WORDS.search(q)):
+        # Only a short position-only follow-up can inherit a physical target.
+        rest = WAKE_PATTERN.sub('', q[:start], count=1)
+        if rest.strip(' ,.!?;:') or q[end:].strip(' ,.!?;:'):
+            return False, None
+        if previous is None:
+            return True, None
     # The latest clause takes priority; preceding clauses supply missing context.
     cut = max(q.rfind('.', 0, start), q.rfind(';', 0, start), q.rfind('!', 0, start))
     clause = q[cut + 1:]
@@ -131,6 +135,8 @@ def numbered_position_intent(text, previous=None):
             return 'elbow'
         return 'whole' if _WHOLE.search(part) else None
     if SHOULDER_WORDS.search(clause) and ELBOW_WORDS.search(clause):
+        return True, None
+    if _RIGHT.search(clause) and _LEFT.search(clause) and not _BOTH.search(clause):
         return True, None
     prev_text = q[:cut + 1] if cut >= 0 else ''
     # Walk backwards through earlier clauses instead of merging left/right.
@@ -308,6 +314,8 @@ class RealtimeAisana(object):
         self.last_position_target = None
         self.pending_position = None
         self.position_used = False
+        self.response_idle = threading.Event()
+        self.response_idle.set()
 
     def dialog_active(self):
         return time.monotonic() < self.dialog_until
@@ -317,6 +325,7 @@ class RealtimeAisana(object):
         if item_id:
             self.responded_items.add(item_id)
         self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+        self.response_idle.clear()
         payload = {'type': 'response.create'}
         if response:
             payload['response'] = response
@@ -546,7 +555,14 @@ class RealtimeAisana(object):
                 'Never claim a completed move or stop without feedback.')}
             if name == 'move_arm':
                 response['tool_choice'] = 'none'
-            self.send({'type': 'response.create', 'response': response})
+            # A rejected/unset preset can return before the originating
+            # Realtime response is done. Do not create overlapping responses.
+            if not self.response_idle.wait(10):
+                print('Tool reply error: previous response did not finish')
+                return
+            if not self.stop.is_set():
+                self.response_idle.clear()
+                self.send({'type': 'response.create', 'response': response})
         except Exception as exc:
             if not self.stop.is_set():
                 print('Tool response error:', exc)
@@ -616,6 +632,7 @@ class RealtimeAisana(object):
                 # cancels the active generation. A second response.cancel races
                 # with response.done and triggers response_cancel_not_active.
         elif typ == 'response.created':
+            self.response_idle.clear()
             self.echo_guard_active = True
             self.responding = True
             self.playback_interrupted = False
@@ -644,6 +661,7 @@ class RealtimeAisana(object):
                 self.start_tool(item.get('call_id'), item.get('name'), item.get('arguments'))
         elif typ == 'response.done':
             self.responding = False
+            self.response_idle.set()
             # Do NOT lift echo guard here: playback can lag behind generation.
             self.queue_audio('done')
         elif typ == 'error':
