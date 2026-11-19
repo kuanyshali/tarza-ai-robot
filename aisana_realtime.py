@@ -788,7 +788,10 @@ class RealtimeAisana(object):
         elif typ == 'error':
             print('Realtime API error:', e.get('error', {}))
 
-    def run(self):
+    def run(self, manage_devices=True):
+        """One realtime session. With manage_devices=False the caller owns the
+        arm/legs links (kept across reconnects: reopening the Arduino port
+        would reset the arm board)."""
         if not KEY:
             raise RuntimeError('OPENAI_API_KEY is missing')
         if websocket is None:
@@ -800,8 +803,9 @@ class RealtimeAisana(object):
               'Barge-in:', 'ON (experimental)' if BARGE_IN else 'OFF',
               'Echo guard:', 'ON (no interruptions during playback)' if ECHO_GUARD else 'OFF',
               'Wake name:', 'required to start' if WAKE_GATE else 'OFF (answers any speech)')
-        self.arm = connect_from_environment()
-        self.legs = aisana_legs.connect_from_environment()
+        if manage_devices:
+            self.arm = connect_from_environment()
+            self.legs = aisana_legs.connect_from_environment()
         self.ws = websocket.create_connection(
             'wss://api.openai.com/v1/realtime?model=' + MODEL,
             timeout=10, header=['Authorization: Bearer ' + KEY])
@@ -861,16 +865,49 @@ class RealtimeAisana(object):
                     self.mic.wait()
             self.stop_playback()
             if self.legs is not None:
-                self.legs.stop()
-            if self.arm is not None:
+                self.legs.stop()            # never keep driving without a session
+            if manage_devices and self.arm is not None:
                 self.arm.close()
             if self.ws:
-                self.ws.close()
+                try:
+                    self.ws.close()
+                except Exception:
+                    pass
+
+
+def main():
+    """Run sessions forever: a dropped Wi-Fi or OpenAI connection reconnects
+    by itself instead of ending the program. Ctrl+C stops everything."""
+    arm = connect_from_environment()
+    legs = aisana_legs.connect_from_environment()
+    delay = 2
+    try:
+        while True:
+            started = time.monotonic()
+            session = RealtimeAisana()
+            session.arm, session.legs = arm, legs
+            try:
+                session.run(manage_devices=False)
+                problem = 'session ended'
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                problem = str(exc) or exc.__class__.__name__
+            if not KEY or websocket is None:
+                raise RuntimeError(problem)
+            delay = 2 if time.monotonic() - started > 60 else min(30, delay * 2)
+            print('Connection lost ({}); reconnecting in {} s... (Ctrl+C to stop)'.format(problem, delay))
+            time.sleep(delay)
+    finally:
+        if legs is not None:
+            legs.stop()
+        if arm is not None:
+            arm.close()
 
 
 if __name__ == '__main__':
     try:
-        RealtimeAisana().run()
+        main()
     except KeyboardInterrupt:
         print('\nAisana stopped.')
     except Exception as exc:

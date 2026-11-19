@@ -70,6 +70,36 @@ class WakePhraseTests(unittest.TestCase):
         self.assertTrue(rt.is_sleep_phrase('Айсана, отбой'))
 
 
+class ReconnectTests(unittest.TestCase):
+    def test_dropped_connection_reconnects_and_keeps_devices(self):
+        runs, sleeps = [], []
+        arm, legs = FakeArm(), FakeLegs()
+        original = (rt.connect_from_environment, rt.aisana_legs.connect_from_environment,
+                    rt.RealtimeAisana.run, rt.time.sleep, rt.KEY, rt.websocket)
+
+        def fake_run(session, manage_devices=True):
+            runs.append((session.arm, session.legs, manage_devices))
+            if len(runs) == 1:
+                raise IOError('The write operation timed out')
+            raise KeyboardInterrupt
+
+        try:
+            rt.connect_from_environment = lambda: arm
+            rt.aisana_legs.connect_from_environment = lambda: legs
+            rt.RealtimeAisana.run = fake_run
+            rt.time.sleep = sleeps.append
+            rt.KEY, rt.websocket = 'key', object()
+            with self.assertRaises(KeyboardInterrupt):
+                rt.main()
+        finally:
+            (rt.connect_from_environment, rt.aisana_legs.connect_from_environment,
+             rt.RealtimeAisana.run, rt.time.sleep, rt.KEY, rt.websocket) = original
+        self.assertEqual(len(runs), 2)                      # reconnected once
+        self.assertTrue(all(r == (arm, legs, False) for r in runs))   # same devices
+        self.assertEqual(len(sleeps), 1)
+        self.assertEqual(legs.stops, 1)                     # wheels stopped on exit
+
+
 class VoiceStyleTests(unittest.TestCase):
     def test_voice_style_presets(self):
         import os

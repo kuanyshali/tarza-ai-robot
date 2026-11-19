@@ -89,6 +89,12 @@ class ParserTests(unittest.TestCase):
         self.check('Айсана, стоп', 'stop')
         self.check('стой', 'stop')
         self.check('едь быстрее', 'faster')
+        # From the Jetson log: number words and the noun "проезд".
+        self.check('Проезд пять метров', 'forward', meters=5.0)
+        self.check('проедь пять метров', 'forward', meters=5.0)
+        self.check('проехать вперёд две секунды', 'forward', seconds=2.0)
+        self.check('отъедь назад на полметра', 'backward', meters=0.5)
+        self.check('Айсана, вперед 4 секунды', 'forward', seconds=4.0)
 
     def test_not_drive_commands(self):
         for text in ('что у тебя впереди?', 'Айсана, смотри вперёд и скажи что видишь',

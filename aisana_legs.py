@@ -228,7 +228,7 @@ RIGHT = re.compile(r'(?:направо|вправо|право|правее|\bri
 SPIN = re.compile(r'(?:поверн\w*|разверн\w*|крут\w*|разворот\w*|\bturn\b|\bspin\b|бұрыл\w*|لف)', re.I)
 AROUND = re.compile(r'(?:разверн\w*|разворот\w*|turn around|кругом)', re.I)
 DRIVE = re.compile(
-    r'(?:\bедь\b|езжай|поезжай|проедь|подъедь|отъедь|ехай|едем|поехали|двигайся|'
+    r'(?:\bедь\b|езжай|поезжай|прое[дзх]\w*|подъе[дзх]\w*|отъе[дзх]\w*|ехай|едем|поехали|двигайся|'
     r'подвинься|иди\b|пойди|шагай|\bdrive\b|\bgo\b|\bmove\b|\bcome\b|\broll\b|жүр|бар\b|'
     r'وريني|امشي|روح|تعالى)', re.I)
 LEG_STOP = re.compile(r'(?:\bстоп\b|останов\w*|стой|замри|\bstop\b|\bhalt\b|тоқта\w*|وقف|استنى)', re.I)
@@ -254,9 +254,24 @@ def mentions_driving(text):
 
 
 def mentions_amount(text):
-    q = (text or '').casefold()
+    q = _digits((text or '').casefold())
     return bool(SECONDS_RE.search(q) or METERS_RE.search(q) or CM_RE.search(q) or DEGREES_RE.search(q)
                 or METER_WORD.search(q) or A_BIT.search(q))
+
+
+NUMBER_WORDS = (
+    (r'полметра', '0.5 метра'), (r'полсекунды', '0.5 секунды'), (r'пол ?минуты', '10 секунд'),
+    (r'один|одну|одна|one', '1'), (r'два|две|two', '2'), (r'три|three', '3'), (r'четыре|four', '4'),
+    (r'пять|five', '5'), (r'шесть|six', '6'), (r'семь|seven', '7'), (r'восемь|eight', '8'),
+    (r'девять|nine', '9'), (r'десять|ten', '10'),
+)
+
+
+def _digits(text):
+    """'пять метров' -> '5 метров' so the same regexes read both."""
+    for pattern, value in NUMBER_WORDS:
+        text = re.sub(r'(?<!\w)(?:' + pattern + r')(?!\w)', value, text)
+    return text
 
 
 def _number(text):
@@ -265,7 +280,7 @@ def _number(text):
 
 def parse_legs_command(text):
     """{'action', 'seconds', 'meters', 'degrees'} or None if not a drive command."""
-    q = ' '.join((text or '').casefold().split())
+    q = _digits(' '.join((text or '').casefold().split()))
     # The name and fillers do not count as words: "Айсана, вперёд!" is short.
     core = re.sub(r'(?:айсан\w*|эйсан\w*|aisan\w*|aysan\w*|давай|ну|пожалуйста|please)', ' ', q)
     core_words = len(re.findall(r'\w+', core))
@@ -322,6 +337,8 @@ def parse_legs_command(text):
         return _intent('forward', **amount)
     if BACKWARD.search(q) and not FORWARD.search(q):
         return _intent('backward', **amount)
+    if DRIVE.search(q) and amount and ('meters' in amount or seconds):
+        return _intent('forward', **amount)       # "проедь 5 метров"
     return None
 
 
