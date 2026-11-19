@@ -1,6 +1,10 @@
-"""Aisana experimental full-duplex speech-to-speech (Jetson Nano, Python 3.6).
+"""Aisana realtime speech-to-speech (Jetson Nano, Python 3.6).
 
-Separate from robot.py: no camera/Arduino control, no always-on background service.
+Fast path: microphone PCM streams to the OpenAI Realtime API and spoken audio
+streams back, without separate STT / chat / TTS round trips.
+Tools: fresh camera frame, Arm team's Arduino arms over USB, live weather and
+web search. A conversation starts with the name "Aisana" (AISANA_REALTIME_WAKE=1,
+default); follow-ups need no name for AISANA_DIALOG_TIMEOUT seconds.
 Uses websocket-client==1.3.1, arecord, aplay and Realtime GA.
 Ctrl+C stops all subprocesses. Prefer headphones for first interruption tests.
 """
@@ -14,7 +18,13 @@ import subprocess
 import threading
 import time
 
-import websocket
+try:
+    import websocket
+except ImportError:          # tests and robot.py do not need websocket-client
+    websocket = None
+
+from aisana_arm import connect_from_environment
+from sadam_features import WEB_ENABLED, get_weather, search_web
 
 RATE = 24000
 CHUNK = 1440  # 30 ms of mono S16_LE PCM
@@ -25,6 +35,78 @@ SILENCE_MS = int(os.environ.get('AISANA_REALTIME_SILENCE_MS', '850'))
 ECHO_GUARD = os.environ.get('AISANA_ECHO_GUARD', '1') == '1'
 ECHO_TAIL_SECONDS = float(os.environ.get('AISANA_ECHO_TAIL_SECONDS', '1.5'))
 KEY = os.environ.get('OPENAI_API_KEY')
+STT_MODEL = os.environ.get('AISANA_REALTIME_STT_MODEL', 'gpt-4o-mini-transcribe')
+# Respond only after the name "Aisana" (then a timed follow-up window).
+WAKE_GATE = os.environ.get('AISANA_REALTIME_WAKE', '1') == '1'
+DIALOG_TIMEOUT = max(5.0, float(os.environ.get('AISANA_DIALOG_TIMEOUT', '20')))
+
+WAKE_PATTERN = re.compile(
+    r'^\W*(?:(?:ok|okay|окей|ок|эй|hey|привет)\W+)?'
+    r'(?:айсан\w*|айсон\w*|эйсан\w*|aisan\w*|aysan\w*|aissan\w*|'
+    r'آيسان\w*|ايسان\w*|أيسان\w*|عيسان\w*|إيسان\w*)', re.I)
+STOP_PATTERN = re.compile(
+    r'(?:^|\W)(?:стоп|остановись|остановитесь|замри|stop|freeze|тоқта\w*|اسكت|وقف)(?:\W|$)', re.I)
+SLEEP_PATTERN = re.compile(
+    r'(?:^|\W)(?:отбой|спи|хватит слушать|go to sleep|end conversation|болды)(?:\W|$)', re.I)
+
+
+def has_wake_name(text):
+    """True if the utterance starts with Aisana (a short preface is allowed)."""
+    return bool(WAKE_PATTERN.match((text or '').strip().casefold()))
+
+
+def _short(text, words=5):
+    return len((text or '').split()) <= words
+
+
+def is_stop_phrase(text):
+    """Short "стоп" / "stop": freeze the arms and the speaker immediately."""
+    return _short(text) and bool(STOP_PATTERN.search((text or '').casefold()))
+
+
+def is_sleep_phrase(text):
+    return _short(text) and bool(SLEEP_PATTERN.search((text or '').casefold()))
+
+
+def tool_definitions():
+    tools = [
+        {'type': 'function', 'name': 'inspect_camera',
+         'description': 'Look at a fresh Jetson camera image to read or translate visible text, explain a shown formula, identify or compare shown objects, or answer any visual question including implicit this/that/here references.',
+         'parameters': {'type': 'object', 'properties': {
+             'question': {'type': 'string', 'description': 'User visual question in their original language'}},
+             'required': ['question'], 'additionalProperties': False}},
+        {'type': 'function', 'name': 'move_arm',
+         'description': ('Control your two physical 2-DOF robotic arms (shoulder stepper, elbow servo, gripper) '
+                         'on the Arm team Arduino. Use ONLY when the user explicitly asks to move an arm, '
+                         'go to a numbered position, open/close a gripper, stop the arms, or report arm status. '
+                         'Positions are 0..4; 0 is the zero/home position.'),
+         'parameters': {'type': 'object', 'properties': {
+             'action': {'type': 'string', 'enum': ['position', 'gripper_open', 'gripper_close', 'stop', 'status']},
+             'arm': {'type': 'string', 'enum': ['right', 'left', 'both'],
+                     'description': 'Use both when the user does not say which arm'},
+             'position': {'type': 'integer', 'minimum': 0, 'maximum': 4,
+                          'description': 'Required for action=position'},
+             'joint': {'type': 'string', 'enum': ['whole', 'shoulder', 'elbow'],
+                       'description': 'whole = shoulder and elbow together (default)'}},
+             'required': ['action'], 'additionalProperties': False}},
+        {'type': 'function', 'name': 'get_weather',
+         'description': 'Live weather from Open-Meteo. Use for any weather or temperature question; never guess weather.',
+         'parameters': {'type': 'object', 'properties': {
+             'city': {'type': 'string', 'description': 'City name in English; empty means Astana'},
+             'day': {'type': 'string', 'enum': ['now', 'tomorrow']},
+             'language': {'type': 'string', 'enum': ['Russian', 'Kazakh', 'English', 'Egyptian Arabic']}},
+             'required': ['city', 'day', 'language'], 'additionalProperties': False}},
+    ]
+    if WEB_ENABLED:
+        tools.append(
+            {'type': 'function', 'name': 'web_search',
+             'description': 'Live web search for news, elections, results, prices, office holders and other facts that change. Never guess such facts.',
+             'parameters': {'type': 'object', 'properties': {
+                 'query': {'type': 'string', 'description': 'The question, in the user language'},
+                 'language': {'type': 'string', 'enum': ['Russian', 'Kazakh', 'English', 'Egyptian Arabic']}},
+                 'required': ['query', 'language'], 'additionalProperties': False}})
+    return tools
+
 PROMPT = (
     'You are Aisana (Айсана), a concise, intelligent female-voiced voice assistant. '
     'Your job is to answer the actual question directly, not to fill silence. '
@@ -62,7 +144,15 @@ PROMPT = (
     'do not invent objects. '
     'Do not say you have no camera or no visual access unless that tool actually fails. '
     'For other questions do not use the camera. '
-    'Web search and Arduino tools are not connected. '
+    'ARMS: you have two physical arms with grippers, controlled by move_arm. '
+    'Call move_arm only when the user explicitly asks to move an arm, go to a numbered '
+    'position, open or close a gripper, stop the arms or report their status. '
+    'Positions are numbered 0 to 4; 0 is the zero (home) position. If the user does not '
+    'say which arm, use both. If no position number is given, ask one short question '
+    'instead of guessing. When asked to stop the arms, call move_arm with action stop at once. '
+    'After move_arm returns, confirm in a few words; if it failed, say so briefly. '
+    'WEATHER: always call get_weather for weather; never guess. '
+    'LIVE FACTS: call web_search for news, elections, results, prices and other changing facts. '
 )
 
 
@@ -102,6 +192,27 @@ class RealtimeAisana(object):
         # Covers the race between response.done and the playback worker.
         self.echo_guard_active = False
         self.camera_lock = threading.Lock()
+        self.arm = None
+        self.dialog_until = 0.0
+        self.responded_items = set()
+        self.handled_calls = set()
+        self.calls_lock = threading.Lock()
+        self.mic_device = None
+
+    def dialog_active(self):
+        return time.monotonic() < self.dialog_until
+
+    def respond(self, item_id=None):
+        """Answer the latest user turn and keep the follow-up window open."""
+        if item_id:
+            self.responded_items.add(item_id)
+        self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+        self.send({'type': 'response.create'})
+
+    def ignore_item(self, item_id):
+        """Drop unaddressed speech so it does not pollute the conversation."""
+        if item_id:
+            self.send({'type': 'conversation.item.delete', 'item_id': item_id})
 
     def send(self, payload):
         with self.send_lock:
@@ -157,6 +268,9 @@ class RealtimeAisana(object):
                 # Keep capture gated until the acoustic tail has dissipated.
                 self.mute_until = time.monotonic() + ECHO_TAIL_SECONDS
                 self.echo_guard_active = False
+                if self.dialog_until:
+                    # Follow-up window counts from the end of her speech.
+                    self.dialog_until = self.mute_until + DIALOG_TIMEOUT
                 continue
             if kind != 'audio':
                 continue
@@ -248,31 +362,80 @@ class RealtimeAisana(object):
                 choice.get('finish_reason')))
         return content.strip()
 
-    def handle_camera_call(self, event):
-        """Run camera I/O off the websocket receiver; return result as a tool turn."""
-        call_id = event.get('call_id')
-        try:
-            args = json.loads(event.get('arguments') or '{}')
-            question = str(args.get('question', 'What is visible?'))[:500]
+    def run_tool(self, name, args):
+        """Execute one tool call; every result is plain text for the model."""
+        if name == 'inspect_camera':
+            question = str(args.get('question') or 'What is visible?')[:500]
             print('Camera: capturing fresh frame for', question)
-            result = self.inspect_camera(question)
-            print('Camera observation:', result)
+            return self.inspect_camera(question)
+        if name == 'move_arm':
+            if self.arm is None:
+                return ('The arm controller (Arduino Mega) is not connected over USB. '
+                        'Tell the user briefly; do not pretend the arm moved.')
+            return self.arm.execute(args.get('action'), args.get('arm') or 'both',
+                                    args.get('position'), args.get('joint') or 'whole')
+        if name == 'get_weather':
+            city = str(args.get('city') or '').strip()[:60]
+            phrase = 'weather' + (' in ' + city if city else '')
+            if args.get('day') == 'tomorrow':
+                phrase += ' tomorrow'
+            return get_weather(phrase, language=args.get('language') or 'English')
+        if name == 'web_search':
+            return search_web(str(args.get('query') or '')[:500], args.get('language') or 'English',
+                              [], {'Authorization': 'Bearer ' + (KEY or '')})
+        raise ValueError('Unknown tool: ' + str(name))
+
+    def start_tool(self, call_id, name, arguments):
+        """Run each call_id once, off the websocket receiver thread."""
+        if not call_id or not name:
+            return
+        with self.calls_lock:
+            if call_id in self.handled_calls:
+                return
+            self.handled_calls.add(call_id)
+        threading.Thread(target=self.handle_tool_call,
+                         args=(call_id, name, arguments), daemon=True).start()
+
+    def handle_tool_call(self, call_id, name, arguments):
+        try:
+            args = json.loads(arguments or '{}')
+            print('Tool:', name, args)
+            result = self.run_tool(name, args)
+            print('Tool result:', result)
         except Exception as exc:
-            result = 'Camera unavailable: {}. Do not claim to see anything.'.format(exc)
+            result = 'Tool {} failed: {}. Say briefly that it did not work; do not invent a result.'.format(name, exc)
             print(result)
-        if self.stop.is_set() or not call_id:
+        if self.stop.is_set():
             return
         try:
             self.send({'type': 'conversation.item.create', 'item': {
-                'type': 'function_call_output', 'call_id': call_id, 'output': result}})
+                'type': 'function_call_output', 'call_id': call_id, 'output': str(result)[:4000]}})
             self.send({'type': 'response.create', 'response': {'instructions': (
-                'The camera tool has returned. Answer the user NOW, in first person as Aisana, '
-                'using the observation. No commentary about taking photos, tools, or analysis. '
-                'One short sentence in the language of the user question. '
-                'If the tool failed, say briefly that you cannot see right now.') }})
+                'The tool has returned. Answer the user NOW, in first person as Aisana, '
+                'using its result. No commentary about tools, photos or analysis. '
+                'One or two short sentences in the language of the user question. '
+                'If the tool failed, say briefly that it did not work.') }})
         except Exception as exc:
             if not self.stop.is_set():
-                print('Camera tool response error:', exc)
+                print('Tool response error:', exc)
+
+    def handle_transcript(self, item_id, transcript):
+        print('You:', transcript)
+        if is_stop_phrase(transcript):
+            if self.arm is not None:
+                self.arm.emergency_stop()
+            self.stop_playback()
+        if not WAKE_GATE or item_id in self.responded_items:
+            return
+        if is_sleep_phrase(transcript):
+            self.dialog_until = 0.0
+            print('Dialogue closed; say Aisana to begin again.')
+            self.ignore_item(item_id)
+        elif self.dialog_active() or has_wake_name(transcript):
+            self.respond(item_id)
+        else:
+            print('Not addressed to Aisana; ignored.')
+            self.ignore_item(item_id)
 
     def handle(self, e):
         typ = e.get('type', '')
@@ -299,8 +462,20 @@ class RealtimeAisana(object):
             print(e.get('delta', ''), end='', flush=True)
         elif typ == 'response.output_audio_transcript.done':
             print('')
-        elif typ == 'response.function_call_arguments.done' and e.get('name') == 'inspect_camera':
-            threading.Thread(target=self.handle_camera_call, args=(e,), daemon=True).start()
+        elif typ == 'input_audio_buffer.committed':
+            # Inside an open dialogue answer at once, without waiting for STT.
+            if WAKE_GATE and self.dialog_active():
+                self.respond(e.get('item_id'))
+        elif typ == 'conversation.item.input_audio_transcription.completed':
+            self.handle_transcript(e.get('item_id'), (e.get('transcript') or '').strip())
+        elif typ == 'conversation.item.input_audio_transcription.failed':
+            print('Realtime transcription failed:', e.get('error', {}))
+        elif typ == 'response.function_call_arguments.done':
+            self.start_tool(e.get('call_id'), e.get('name'), e.get('arguments'))
+        elif typ == 'response.output_item.done':
+            item = e.get('item') or {}
+            if item.get('type') == 'function_call':
+                self.start_tool(item.get('call_id'), item.get('name'), item.get('arguments'))
         elif typ == 'response.done':
             self.responding = False
             # Do NOT lift echo guard here: playback can lag behind generation.
@@ -311,12 +486,16 @@ class RealtimeAisana(object):
     def run(self):
         if not KEY:
             raise RuntimeError('OPENAI_API_KEY is missing')
+        if websocket is None:
+            raise RuntimeError('Realtime mode needs websocket-client: python3 -m pip install --user "websocket-client==1.3.1"')
         self.mic_device = alsa_device('arecord', 'KT USB Audio', 'KT microphone')
         self.speaker = alsa_device('aplay', 'USB Composite Device', 'Xiaomi speaker')
         print('Input:', self.mic_device, 'Output:', self.speaker)
         print('Model:', MODEL, 'Voice:', VOICE,
               'Barge-in:', 'ON (experimental)' if BARGE_IN else 'OFF',
-              'Echo guard:', 'ON (no interruptions during playback)' if ECHO_GUARD else 'OFF')
+              'Echo guard:', 'ON (no interruptions during playback)' if ECHO_GUARD else 'OFF',
+              'Wake name:', 'required to start' if WAKE_GATE else 'OFF (answers any speech)')
+        self.arm = connect_from_environment()
         self.ws = websocket.create_connection(
             'wss://api.openai.com/v1/realtime?model=' + MODEL,
             timeout=10, header=['Authorization: Bearer ' + KEY])
@@ -327,22 +506,23 @@ class RealtimeAisana(object):
                     'type': 'realtime',
                     'model': MODEL,
                     'instructions': PROMPT,
-                    'tools': [{'type': 'function', 'name': 'inspect_camera',
-                               'description': 'Look at a fresh Jetson camera image to read or translate visible text, explain a shown formula, identify or compare shown objects, or answer any visual question including implicit this/that/here references.',
-                               'parameters': {'type': 'object', 'properties': {
-                                   'question': {'type': 'string', 'description': 'User visual question in their original language'}},
-                                   'required': ['question'], 'additionalProperties': False}}],
+                    'tools': tool_definitions(),
                     'tool_choice': 'auto',
                     'output_modalities': ['audio'],
                     'audio': {
                         'input': {
                             'format': {'type': 'audio/pcm', 'rate': RATE},
+                            # Transcripts drive the wake-name gate and voice "stop".
+                            'transcription': {
+                                'model': STT_MODEL,
+                                'prompt': 'Aisana, Aysana, Айсана, Эйсана, آيسانا. Russian, Kazakh, English, Egyptian Arabic.'
+                            },
                             'turn_detection': {
                                 'type': 'server_vad',
                                 'threshold': 0.5,
                                 'prefix_padding_ms': 500,
                                 'silence_duration_ms': max(500, min(3000, SILENCE_MS)),
-                                'create_response': True,
+                                'create_response': not WAKE_GATE,
                                 'interrupt_response': BARGE_IN
                             }
                         },
@@ -373,6 +553,8 @@ class RealtimeAisana(object):
                     self.mic.kill()
                     self.mic.wait()
             self.stop_playback()
+            if self.arm is not None:
+                self.arm.close()
             if self.ws:
                 self.ws.close()
 

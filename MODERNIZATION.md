@@ -1,5 +1,8 @@
 # Sadam modernization: Jetson Nano validation
 
+> **Partly outdated.** The robot is now called "Aisana" (the name "Sadam" no longer wakes it) and several defaults changed. Current instructions: [README.md](README.md).
+
+
 The wake name is required to **start** a conversation, but not for each follow-up during an active dialogue. The camera is not automatically narrated during ordinary chat.
 
 ## Update and validate

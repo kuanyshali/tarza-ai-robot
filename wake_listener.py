@@ -17,7 +17,7 @@ RATE = 16000
 CHUNK = 3200  # 100 ms of PCM16 mono
 WAKE_WORDS = (
     'айсана', 'эйсана', 'айсанаа', 'aisana', 'aysana',
-    'صدام', 'سدام'
+    'آيسانا', 'ايسانا', 'أيسانا'
 )
 # Strict, word-boundary-matched local activation. No fuzzy matching:
 # incidental background conversations must not wake the robot.
@@ -59,7 +59,7 @@ def record_wake_phrase(model, filename='speech.wav', mic_device='plughw:2,0',
     last_loud = None
     start = None
     noise = 0.0
-    print('Wake listener: offline, waiting for "Sadam"...')
+    print('Wake listener: offline, waiting for "Aisana"...')
     process = subprocess.Popen(
         ['arecord', '-q', '-D', mic_device, '-t', 'raw',
          '-f', 'S16_LE', '-r', str(RATE), '-c', '1'],

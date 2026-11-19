@@ -15,6 +15,7 @@ from aisana_memory import load_history, remember_turn, CONTEXT_MESSAGES
 from aisana_stream import stream_transcribe
 from sadam_features import (weather_intent, WEATHER_ENABLED, get_weather,
                             online_search_intent, search_web, semantic_turn_incomplete)
+from aisana_arm import connect_from_environment, parse_arm_command, arm_reply
 
 API_KEY = os.environ.get('OPENAI_API_KEY')
 if not API_KEY:
@@ -37,6 +38,7 @@ MAX_CONTINUATION_SEGMENTS = max(0, min(3, int(os.environ.get('TARZA_MAX_CONTINUA
 DEBUG_TIMING = os.environ.get('SADAM_DEBUG_TIMING', '1') == '1'
 TTS_PREBUFFER_SECONDS = max(0.7, min(5.0, float(os.environ.get('SADAM_TTS_PREBUFFER_SECONDS', '1.8'))))
 TRANSCRIBE_MODEL = os.environ.get('TARZA_TRANSCRIBE_MODEL', 'gpt-transcribe')
+TRANSCRIBE_KEYWORDS = ('Aisana', 'Aysana', 'Айсана', 'Эйсана', 'آيسانا')
 conversation_history = load_history()
 # A single open microphone next to the speaker hears TTS as its own speech.
 # Disable experimental barge-in by default until proper echo cancellation exists.
@@ -55,6 +57,8 @@ VISION_INTERVAL = max(0.5, float(os.environ.get('TARZA_VISION_INTERVAL', '2')))
 VISION_COOLDOWN = max(10, float(os.environ.get('TARZA_VISION_COOLDOWN', '30')))
 VISION_THRESHOLD = float(os.environ.get('TARZA_VISION_THRESHOLD', '0.12'))
 VISION_DEVICE = os.environ.get('TARZA_VISION_PIPELINE', '')
+# The camera is mounted upside down on the robot (same setting as camera.py).
+CAMERA_ROTATE = os.environ.get('TARZA_CAMERA_ROTATE', '180').strip()
 vision_lock = threading.Lock()
 vision_latest_jpeg = None
 vision_latest_detail_jpeg = None
@@ -101,14 +105,16 @@ elif ROBOT_NAME.casefold() in ('айсана', 'aisana'):
     # Common Russian/Kazakh/English spelling and transcription variants.
     WAKE_WORDS = (
         'айсана', 'эйсана', 'айсанаа',
-        'aisana', 'aysana', 'aissana', 'aisanna', 'aysanna'
+        'aisana', 'aysana', 'aissana', 'aisanna', 'aysanna',
+        # Arabic-script spellings, so Egyptian Arabic speakers can wake her too.
+        'آيسانا', 'ايسانا', 'أيسانا', 'عيسانا', 'إيسانا'
     )
 else:
     WAKE_WORDS = (ROBOT_NAME,)
 if not WAKE_WORDS:
     WAKE_WORDS = (ROBOT_NAME,)
 WAKE_PATTERN = re.compile(r'(?<!\w)(?:' + '|'.join(map(re.escape, sorted(set(WAKE_WORDS), key=len, reverse=True))) + r')(?!\w)', re.IGNORECASE)
-WAKE_CANDIDATES = tuple(set(WAKE_WORDS) | {'айсана', 'айсанаа', 'эйсана', 'айсана'})
+WAKE_CANDIDATES = tuple(set(WAKE_WORDS) | {'айсана', 'айсанаа', 'эйсана'})
 ARABIC_LATIN_HINTS = re.compile(r'\b(?:enta|inta|enti|ezayak|izzayak|shayef|shaif|shif|eih|delwaqt|dilwaqt|ana|mesh|mish|fein|fen|bet|bt)\b', re.I)
 
 def wake_question(heard):
@@ -370,7 +376,7 @@ def wake_audio_prefix(filename='speech.wav', seconds=None):
 def transcribe_audio(filename='speech.wav', first_seconds=None):
     """Multilingual transcription with literal wake-name hints, not forced output."""
     prompt = ('This is a multilingual voice assistant conversation. '
-              'The assistant may be addressed as Aisana, Aysana, Айсана or Эйсана. '
+              'The assistant may be addressed as Aisana, Aysana, Айсана, Эйсана or آيسانا. '
               'Write only what is actually audible, including the first word if spoken. '
               'Never insert a wake name that was not spoken. '
               'Preserve Egyptian Arabic in Arabic script, and do not translate.')
@@ -382,12 +388,12 @@ def transcribe_audio(filename='speech.wav', first_seconds=None):
         audio_bytes = wake_audio_prefix(filename, first_seconds)
         upload_name = 'wake_prefix.wav'
         prompt = ('Transcribe the first audible words exactly as spoken. '
-                  'The first word could be Aisana, Aysana, Айсана or Эйсана. '
+                  'The first word could be Aisana, Aysana, Айсана, Эйсана or آيسانا. '
                   'Only write this name if it is actually audible. '
                   'Do not translate or invent any words.')
     data = [('model', TRANSCRIBE_MODEL), ('prompt', prompt)]
     if TRANSCRIBE_MODEL == 'gpt-transcribe':
-        for keyword in ('Aisana', 'Aysana', 'Айсана', 'Эйсана'):
+        for keyword in TRANSCRIBE_KEYWORDS:
             data.append(('keywords[]', keyword))
         for language in ('ar', 'ru', 'en', 'kk'):
             data.append(('languages[]', language))
@@ -637,6 +643,16 @@ def camera_pipeline():
     )
 
 
+def rotate_frame(frame):
+    """Apply TARZA_CAMERA_ROTATE (0/90/180/270) so the model sees the world upright."""
+    code = {
+        '90': cv2.ROTATE_90_CLOCKWISE,
+        '180': cv2.ROTATE_180,
+        '270': cv2.ROTATE_90_COUNTERCLOCKWISE,
+    }.get(CAMERA_ROTATE)
+    return frame if code is None else cv2.rotate(frame, code)
+
+
 def vision_worker():
     """Single camera owner: local motion detection; cloud calls only for events."""
     global vision_latest_jpeg, vision_latest_detail_jpeg, vision_latest_at, vision_event, vision_event_at
@@ -660,6 +676,7 @@ def vision_worker():
                 vision_stop.wait(0.3)
                 continue
             failures = 0
+            frame = rotate_frame(frame)
             now = time.monotonic()
             # Downscale for low CPU load and for inexpensive low-detail vision calls.
             small = cv2.resize(frame, (320, 180))
@@ -956,10 +973,11 @@ def local_camera_route(text, previous_camera_question=None):
         return True
 
     visual = (
-        r'что (?:ты )?видишь|что (?:у меня|я) (?:в руке|держу)|'
+        r'что (?:ты )?(?:\w+ )?видишь|что (?:у меня|я) (?:\w+ )?(?:в руке|держу)|'
         r'что (?:перед тобой|здесь|тут)|'
         r'посмотри|смотри (?:на|сюда|что)|покажи|какого цвета|'
-        r'что на мне|кто (?:перед тобой|рядом со мной)|'
+        r'что на мне|кто (?:\w+ )?(?:перед тобой|передо мной|рядом со мной)|'
+        r'who is (?:\w+ )*(?:in front of you|next to me|behind me)|'
         r'what (?:am i|i am|i.m) holding|what (?:do|can) you see|'
         r'can you see (?:me|this|that|it)|look at|take (?:a )?photo|'
         r'what is (?:in my hand|this|that|in front of you)|'
@@ -1054,6 +1072,8 @@ def main():
     last_answer = ''
     last_online_request = False
     offline_model = None
+    # Arm team's Arduino Mega over USB; the robot keeps working without it.
+    arm = connect_from_environment()
     if WAKE_MODE == 'vosk':
         # Do not silently fall back to costly cloud wake checks.
         offline_model = load_vosk_model(WAKE_MODEL_PATH)
@@ -1067,6 +1087,7 @@ def main():
                 print('Dialogue timeout; wake name required again.')
                 dialog_until = 0.0
                 last_camera_question = None
+                last_online_request = False
             interrupted = pop_pending_interrupt()
             offline_woke = False
             if interrupted:
@@ -1142,6 +1163,8 @@ def main():
                 r'(?:стоп|перестань|хватит|stop|quiet|سكوت|اسكت|тоқта)[!?.\s]*',
                 question.casefold()
             ):
+                if arm is not None:
+                    arm.emergency_stop()     # "Айсана, стоп" also freezes the arms
                 dialog_until = time.monotonic() + DIALOG_TIMEOUT
                 print('Speech stopped; dialogue remains open.')
                 continue
@@ -1162,7 +1185,22 @@ def main():
                 break
             language = response_language(question)
             answer_started = time.monotonic()
-            if weather_intent(question):
+            arm_intent = parse_arm_command(question)
+            if arm_intent is not None:
+                # Explicit arm command: parsed locally, no model call, fast.
+                print('Tool: arm', arm_intent)
+                try:
+                    if arm is None:
+                        raise RuntimeError('Arm controller not connected')
+                    print(arm.execute(arm_intent['action'], arm_intent['arm'],
+                                      arm_intent['position'], arm_intent['joint']))
+                    answer = arm_reply(arm_intent, language)
+                except Exception as error:
+                    print('Arm command failed:', error)
+                    answer = arm_reply(arm_intent, language, error=error)
+                last_online_request = False
+                last_camera_question = None
+            elif weather_intent(question):
                 print('Tool: live weather')
                 try:
                     if not WEATHER_ENABLED:
@@ -1201,7 +1239,7 @@ def main():
                 last_online_request = False
             if DEBUG_TIMING:
                 print('Answer generation time: {:.2f}s'.format(time.monotonic() - answer_started))
-            if weather_intent(question) or last_online_request:
+            if arm_intent is not None or weather_intent(question) or last_online_request:
                 conversation_history.extend([
                     {'role': 'user', 'content': question},
                     {'role': 'assistant', 'content': answer}
@@ -1214,7 +1252,7 @@ def main():
             dialog_until = time.monotonic() + DIALOG_TIMEOUT
             print('Dialogue: listening for follow-up without wake name.')
         except KeyboardInterrupt:
-            print('\\n' + ROBOT_NAME + ' stopped.')
+            print('\n' + ROBOT_NAME + ' stopped.')
             break
         except AudioPlaybackError as error:
             print('Audio playback unavailable:', error)
