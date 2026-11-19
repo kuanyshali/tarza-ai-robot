@@ -16,7 +16,9 @@ import os
 import queue
 import requests
 import re
+import signal
 import subprocess
+import sys
 import threading
 import time
 
@@ -1859,11 +1861,31 @@ def main():
             camera.stop()
 
 
+def _stop_now(signum, frame):
+    """Second Ctrl+C (or a stuck cleanup): leave at once. The Pi stops the
+    wheels by itself 0.35 s after the last heartbeat."""
+    print('\nAisana stopped (forced).')
+    os._exit(1)
+
+
+def _interrupt(signum, frame):
+    signal.signal(signal.SIGINT, _stop_now)        # Ctrl+C again = leave at once
+    signal.signal(signal.SIGTERM, _stop_now)
+    raise KeyboardInterrupt
+
+
 if __name__ == '__main__':
+    signal.signal(signal.SIGINT, _interrupt)
+    signal.signal(signal.SIGTERM, _interrupt)       # "pkill -f aisana_realtime.py"
+    code = 0
     try:
         main()
     except KeyboardInterrupt:
         print('\nAisana stopped.')
     except Exception as exc:
         print('Aisana realtime error:', exc)
-        raise
+        code = 1
+    # Do not wait for camera/audio threads: GStreamer could block a normal exit
+    # (Jetson, Nov 20: Ctrl+C did not stop her).
+    sys.stdout.flush()
+    os._exit(code)
