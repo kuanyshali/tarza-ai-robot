@@ -59,10 +59,13 @@ class WakePhraseTests(unittest.TestCase):
 class WakeGateTests(unittest.TestCase):
     def setUp(self):
         self.original = rt.WAKE_GATE
+        self.original_fast = rt.FAST_FOLLOWUP
         rt.WAKE_GATE = True
+        rt.FAST_FOLLOWUP = True
 
     def tearDown(self):
         rt.WAKE_GATE = self.original
+        rt.FAST_FOLLOWUP = self.original_fast
 
     def test_unaddressed_speech_is_dropped(self):
         session, sent = make_session()
@@ -72,15 +75,16 @@ class WakeGateTests(unittest.TestCase):
                         'item_id': 'i1', 'transcript': 'ребята, пойдём обедать'})
         self.assertEqual(sent, [{'type': 'conversation.item.delete', 'item_id': 'i1'}])
 
-    def test_name_starts_dialogue_and_followups_wait_for_transcript(self):
+    def test_name_starts_dialogue_and_followups_start_before_transcript(self):
         session, sent = make_session()
         session.handle({'type': 'conversation.item.input_audio_transcription.completed',
                         'item_id': 'i1', 'transcript': 'Айсана, привет'})
         self.assertEqual(types(sent), ['response.create'])
         self.assertTrue(session.dialog_active())
-        # Follow-up inside the window waits for STT before any movement decision.
+        session.handle({'type': 'response.done'})
+        # Response generation starts immediately, but movement must wait for STT.
         session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'i2'})
-        self.assertEqual(types(sent), ['response.create'])
+        self.assertEqual(types(sent), ['response.create', 'response.create'])
         session.handle({'type': 'conversation.item.input_audio_transcription.completed',
                         'item_id': 'i2', 'transcript': 'а как дела?'})
         self.assertEqual(len(sent), 2)            # not answered twice
@@ -104,6 +108,58 @@ class WakeGateTests(unittest.TestCase):
         session.handle({'type': 'conversation.item.input_audio_transcription.completed',
                         'item_id': 'i4', 'transcript': 'Айсана, стоп'})
         self.assertEqual(session.arm.stopped, 1)
+
+
+class FastArmTests(unittest.TestCase):
+    def start_fast(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        session.dialog_until = time.monotonic() + 30
+        session.begin_fast_turn('fast1')
+        return session, sent
+
+    def test_early_wrong_nudge_waits_and_uses_numbered_shoulder_target(self):
+        session, sent = self.start_fast()
+        session.start_tool('arm1', 'move_arm', json.dumps({
+            'action': 'nudge', 'arm': 'right', 'joint': 'shoulder',
+            'direction': 'up', 'degrees': 10}))
+        self.assertEqual(session.arm.calls, [])
+        session.handle_transcript('fast1', 'Айсана, правое плечо в позицию 2')
+        session.handle({'type': 'response.done'})
+        deadline = time.monotonic() + 1
+        while not session.arm.calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(session.arm.calls, [('position', 'right', 2, 'shoulder', None, None)])
+
+    def test_failed_transcript_does_not_send_motion(self):
+        session, sent = self.start_fast()
+        session.start_tool('arm1', 'move_arm', json.dumps({
+            'action': 'position', 'arm': 'both', 'position': 3}))
+        session.handle({'type': 'conversation.item.input_audio_transcription.failed', 'item_id': 'fast1'})
+        session.handle({'type': 'response.done'})
+        deadline = time.monotonic() + 1
+        while len(sent) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(session.arm.calls, [])
+        self.assertTrue(any('No intelligible command' in e.get('item', {}).get('output', '') for e in sent))
+
+    def test_grippers_both(self):
+        session, sent = self.start_fast()
+        session.handle_transcript('fast1', 'Айсана, закрой захваты')
+        self.assertTrue(session.fast_turn['allowed'])
+        self.assertEqual(session.pending_position['action'], 'gripper_close')
+
+    def test_fallback_if_numbered_command_gets_no_tool(self):
+        session, sent = self.start_fast()
+        session.handle_transcript('fast1', 'Айсана, правое плечо в позицию 2')
+        self.assertEqual(types(sent), ['response.create'])
+        session.handle({'type': 'response.done'})
+        self.assertEqual(sent[-1]['response']['tool_choice']['name'], 'move_arm')
+
+    def test_ambiguous_command_not_executed(self):
+        session, sent = self.start_fast()
+        session.handle_transcript('fast1', 'Айсана, плечо в позицию 2')
+        self.assertFalse(session.fast_turn['allowed'])
 
 
 class NumberedPositionTests(unittest.TestCase):
