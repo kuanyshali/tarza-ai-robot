@@ -81,10 +81,10 @@ _POSITION_PATTERNS = []
 for _number, _words in NUMBER_WORDS:
     _POSITION_PATTERNS.append((_number, re.compile(
         POSITION_WORD + r'\s*(?:номер\s*|number\s*|№\s*)?(?:' + _words + r')\b' +
-        r'|\b(?:' + _words + r')\s*' + POSITION_WORD, re.I)))
+        r'|\b(?:' + _words + r')[\s-]*' + POSITION_WORD, re.I)))
 _RIGHT = re.compile(r'\b(?:прав(?:ый|ая|ое|ую|ого|ой|ым|ом|ые|ых)|right|оң)\b', re.I)
 _LEFT = re.compile(r'\b(?:лев(?:ый|ая|ое|ую|ого|ой|ым|ом|ые|ых)|left|сол)\b', re.I)
-_BOTH = re.compile(r'\b(?:оба|обе|обоих|две|два|both|екеуін|екі)\b', re.I)
+_BOTH = re.compile(r'\b(?:оба|обе|обоих|both|екеуін)\b|\b(?:две|два|екі)\s+(?:руки|плеча|локтя|қол|иық|шынтақ)\b', re.I)
 _WHOLE = re.compile(r'\b(?:рук[аиуеой]\w*|руками|arms?|hands?|қол\w*)\b', re.I)
 _PLURAL = re.compile(r'\b(?:руки|плечи|локти|arms|shoulders|elbows)\b', re.I)
 _NEGATED = re.compile(r'\b(?:не\s+(?:двигай|поднимай|опускай|переводи|ставь|надо|нужно|в)|не\s+трогай|don.t|do not|never)\b', re.I)
@@ -105,8 +105,9 @@ def numbered_position_intent(text, previous=None):
         return True, None
     if re.search(r'\b(?:или|or)\b|\d\s*[-–/]\s*\d', q):
         return True, None
-    if not ARM_WORDS.search(q) and previous is None:
-        return True, None
+    if not (ARM_WORDS.search(q) or SHOULDER_WORDS.search(q) or ELBOW_WORDS.search(q)) and previous is None:
+        # Generic questions about a numbered position are not arm commands.
+        return False, None
     # The latest clause takes priority; preceding clauses supply missing context.
     cut = max(q.rfind('.', 0, start), q.rfind(';', 0, start), q.rfind('!', 0, start))
     clause = q[cut + 1:]
@@ -493,6 +494,7 @@ class RealtimeAisana(object):
                 self.position_used = True
                 # The local parser, not model inference, owns explicit numbered requests.
                 args = dict(self.pending_position)
+                print('Arm preset enforced:', args)
             if self.arm is None:
                 return ('The arm controller (Arduino Mega) is not connected over USB. '
                         'Tell the user briefly; do not pretend the arm moved.')
