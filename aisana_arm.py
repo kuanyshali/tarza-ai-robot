@@ -313,8 +313,15 @@ class ArmController(object):
                     raise ArmError('Unknown joint: {!r}'.format(joint))
                 joints = ('shoulder', 'elbow') if joint == 'whole' else (joint,)
                 keys = [(side, j) for side in sides for j in joints]
-                with self._lines_lock:
-                    missing = [key for key in keys if key not in self._table_rows]
+                # READY arrives just before the firmware's boot position table.
+                # Give the reader a brief chance to collect it before requesting it.
+                deadline = time.monotonic() + 0.25
+                while True:
+                    with self._lines_lock:
+                        missing = [key for key in keys if key not in self._table_rows]
+                    if not missing or time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.02)
                 if missing:
                     self.send('t', collect_seconds=0.6)
                 with self._lines_lock:
