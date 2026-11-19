@@ -23,8 +23,7 @@ try:
 except ImportError:          # tests and robot.py do not need websocket-client
     websocket = None
 
-from aisana_arm import (connect_from_environment, parse_arm_command, POSITION_WORD,
-                        NUMBER_WORDS, SHOULDER_WORDS, ELBOW_WORDS, ARM_WORDS)
+from aisana_arm import connect_from_environment
 from sadam_features import WEB_ENABLED, get_weather, search_web
 
 RATE = 24000
@@ -39,7 +38,6 @@ KEY = os.environ.get('OPENAI_API_KEY')
 STT_MODEL = os.environ.get('AISANA_REALTIME_STT_MODEL', 'gpt-4o-mini-transcribe')
 # Respond only after the name "Aisana" (then a timed follow-up window).
 WAKE_GATE = os.environ.get('AISANA_REALTIME_WAKE', '1') == '1'
-FAST_FOLLOWUP = os.environ.get('AISANA_REALTIME_FAST', '1') == '1'
 DIALOG_TIMEOUT = max(5.0, float(os.environ.get('AISANA_DIALOG_TIMEOUT', '20')))
 
 WAKE_PATTERN = re.compile(
@@ -77,85 +75,6 @@ def is_sleep_phrase(text):
     return _short(text) and bool(SLEEP_PATTERN.search((text or '').casefold()))
 
 
-# Numbered presets are absolute firmware positions, not relative degrees.
-# Use the latest explicit target when speech contains a self-correction.
-_POSITION_PATTERNS = []
-for _number, _words in NUMBER_WORDS:
-    _POSITION_PATTERNS.append((_number, re.compile(
-        POSITION_WORD + r'\s*(?:номер\s*|number\s*|№\s*)?(?:' + _words + r')\b' +
-        r'|\b(?:' + _words + r')[\s-]*' + POSITION_WORD, re.I)))
-_RIGHT = re.compile(r'\b(?:прав(?:ый|ая|ое|ую|ого|ой|ым|ом|ые|ых)|right|оң)\b', re.I)
-_LEFT = re.compile(r'\b(?:лев(?:ый|ая|ое|ую|ого|ой|ым|ом|ые|ых)|left|сол)\b', re.I)
-_BOTH = re.compile(r'\b(?:оба|обе|обоих|both|екеуін)\b|\b(?:две|два|екі)\s+(?:руки|плеча|локтя|қол|иық|шынтақ)\b', re.I)
-_WHOLE = re.compile(r'\b(?:рук[аиуеой]\w*|руками|arms?|hands?|қол\w*)\b', re.I)
-_PLURAL = re.compile(r'\b(?:руки|плечи|локти|захваты|клешни|arms|hands|grippers|shoulders|elbows)\b', re.I)
-_NEGATED = re.compile(r'\b(?:не\s+(?:двигай|поднимай|опускай|переводи|ставь|надо|нужно|в)|не\s+(?:трогай|закрывай|открывай|сжимай|разжимай|поднимай|опускай)|don.t|do not|never)\b', re.I)
-_QUESTION = re.compile(r'\b(?:какая|какой|какие|почему|зачем|что значит|расскажи|объясни|what is|which position|why|explain)\b', re.I)
-
-
-def numbered_position_intent(text, previous=None):
-    """Return (matched, intent); a matched but ambiguous request must not move."""
-    q = (text or '').casefold()
-    matches = [(m.start(), m.end(), n) for n, pattern in _POSITION_PATTERNS
-               for m in pattern.finditer(q)]
-    if not matches:
-        return False, None
-    start, end, number = max(matches, key=lambda m: (m[1], m[0]))
-    # Do not move for a question about presets, a negation, or an unaddressed
-    # standalone number with no remembered target.
-    if _NEGATED.search(q) or _QUESTION.search(q):
-        return True, None
-    if re.search(r'\b(?:или|or)\b|\d\s*[-–/]\s*\d', q):
-        return True, None
-    if not (ARM_WORDS.search(q) or SHOULDER_WORDS.search(q) or ELBOW_WORDS.search(q)):
-        # Only a short position-only follow-up can inherit a physical target.
-        rest = WAKE_PATTERN.sub('', q[:start], count=1)
-        if rest.strip(' ,.!?;:') or q[end:].strip(' ,.!?;:'):
-            return False, None
-        if previous is None:
-            return True, None
-    # The latest clause takes priority; preceding clauses supply missing context.
-    cut = max(q.rfind('.', 0, start), q.rfind(';', 0, start), q.rfind('!', 0, start))
-    clause = q[cut + 1:]
-    # A correction may omit side/joint: inherit the nearest explicit context.
-    def side_of(part):
-        r, l, b = bool(_RIGHT.search(part)), bool(_LEFT.search(part)), bool(_BOTH.search(part))
-        if b or (r and l):
-            return 'both'
-        if r:
-            return 'right'
-        if l:
-            return 'left'
-        return 'both' if _PLURAL.search(part) else None
-    def joint_of(part):
-        shoulder, elbow = bool(SHOULDER_WORDS.search(part)), bool(ELBOW_WORDS.search(part))
-        if shoulder and elbow:
-            return None
-        if shoulder:
-            return 'shoulder'
-        if elbow:
-            return 'elbow'
-        return 'whole' if _WHOLE.search(part) else None
-    if SHOULDER_WORDS.search(clause) and ELBOW_WORDS.search(clause):
-        return True, None
-    if _RIGHT.search(clause) and _LEFT.search(clause) and not _BOTH.search(clause):
-        return True, None
-    prev_text = q[:cut + 1] if cut >= 0 else ''
-    # Walk backwards through earlier clauses instead of merging left/right.
-    earlier = list(reversed(re.split(r'[.!;]', prev_text)))
-    side = side_of(clause)
-    joint = joint_of(clause)
-    for part in earlier:
-        side = side or side_of(part)
-        joint = joint or joint_of(part)
-    if previous:
-        side = side or previous.get('arm')
-        joint = joint or previous.get('joint')
-    if side is None or joint is None:
-        return True, None
-    return True, {'action': 'position', 'arm': side, 'joint': joint, 'position': number}
-
-
 def tool_definitions():
     tools = [
         {'type': 'function', 'name': 'inspect_camera',
@@ -167,16 +86,13 @@ def tool_definitions():
          'description': ('Control your two physical 2-DOF robotic arms (shoulder stepper, elbow servo, gripper) '
                          'on the Arm team Arduino. Use ONLY when the user explicitly asks to move an arm, '
                          'go to a numbered position, move a little up or down, open/close a gripper, '
-                         'stop the arms, or report arm status. Any numbered position request MUST use '
-                         'action position, NEVER nudge: right shoulder position 2 means '
-                         'position/right/shoulder/2. A shoulder is the stepper, an elbow is the servo. '
-                         'Presets are 0..4 but some are unset; the controller validates live presets. '
-                         'Use nudge ONLY for explicitly relative movements with a specified direction. '
-                         'Ask for missing side, target or direction instead of guessing.'),
+                         'stop the arms, or report arm status. Positions are 0..4; 0 is the zero/home '
+                         'position. For relative requests (a bit higher, lower, чуть-чуть наверх) use '
+                         'action nudge with direction and degrees.'),
          'parameters': {'type': 'object', 'properties': {
              'action': {'type': 'string', 'enum': ['position', 'nudge', 'gripper_open', 'gripper_close', 'stop', 'status']},
              'arm': {'type': 'string', 'enum': ['right', 'left', 'both'],
-                     'description': 'Use both only if both arms are requested; otherwise use the explicit or conversationally established side'},
+                     'description': 'Use both when the user does not say which arm'},
              'position': {'type': 'integer', 'minimum': 0, 'maximum': 4,
                           'description': 'Required for action=position'},
              'joint': {'type': 'string', 'enum': ['whole', 'shoulder', 'elbow'],
@@ -247,24 +163,14 @@ PROMPT = (
     'never say the arm is moving before move_arm has returned. '
     'Call move_arm only when the user explicitly asks to move an arm, go to a numbered '
     'position, open or close a gripper, stop the arms or report their status. '
-    'POSITION PRIORITY: any numbered position (позиция 2, во вторую позицию, position two, '
-    '2-қалып) means action=position, NOT nudge or degrees. If the user corrects a number, use only '
-    'the latest intended position for that joint. Example: правое плечо в позицию 2 -> '
-    'action position, arm right, joint shoulder, position 2. Left elbow position 3 -> position,left,elbow,3. '
-    'Shoulder/плечо/иық is the stepper; elbow/локоть/шынтақ is the servo. '
-    '0 is home; some presets are not defined; never assume position 4 exists or a number means higher. '
-    'Use both only if the user explicitly asks for both; ambiguous singular side or direction requires clarification. '
-    'For vague подвигай плечом, ask which direction or position, never invent a motion. '
+    'Positions are numbered 0 to 4; 0 is the zero (home) position; a higher number lifts the arm. '
+    'If the user does not say which arm, use both. '
     'RELATIVE MOVES: "подними руку", "чуть-чуть наверх", "немного ниже", "a bit higher", "опусти" '
     'are action nudge, direction up or down, joint shoulder unless the user mentions the elbow '
     '(локоть). Degrees: чуть-чуть/slightly 5, немного/a bit 10, no amount 15, сильно/a lot 30, '
     'or the number the user said (max 45). "Ещё" / "more" repeats the previous nudge. '
     'When asked to stop the arms, call move_arm with action stop at once. '
-    'After move_arm returns, distinguish sent, accepted, rejected, and physically reached. '
-    'Do NOT say I raised/moved/reached/stopped unless the controller has confirmed that fact. '
-    'If only sent or accepted, say the command was sent or the target accepted; movement is unconfirmed. '
-    'If missing acknowledgement, unset preset, limit, fault, or no connection, state the actual problem briefly. '
-    'Never call a second movement automatically to compensate for a failure. '
+    'After move_arm returns, confirm in a few words; if it failed, say so briefly. '
     'WEATHER: always call get_weather for weather; never guess. '
     'LIVE FACTS: call web_search for news, elections, results, prices and other changing facts. '
 )
@@ -313,28 +219,16 @@ class RealtimeAisana(object):
         self.calls_lock = threading.Lock()
         self.mic_device = None
         self.transcript_open = False
-        self.last_position_target = None
-        self.pending_position = None
-        self.position_used = False
-        self.response_idle = threading.Event()
-        self.response_idle.set()
-        self.fast_turn = None
-        self.arm_reply_pending = threading.Event()
-        self.last_nudge_intent = None
 
     def dialog_active(self):
         return time.monotonic() < self.dialog_until
 
-    def respond(self, item_id=None, response=None):
+    def respond(self, item_id=None):
         """Answer the latest user turn and keep the follow-up window open."""
         if item_id:
             self.responded_items.add(item_id)
         self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
-        self.response_idle.clear()
-        payload = {'type': 'response.create'}
-        if response:
-            payload['response'] = response
-        self.send(payload)
+        self.send({'type': 'response.create'})
 
     def ignore_item(self, item_id):
         """Drop unaddressed speech so it does not pollute the conversation."""
@@ -436,12 +330,7 @@ class RealtimeAisana(object):
                 pcm = self.mic.stdout.read(CHUNK)
                 if len(pcm) != CHUNK:
                     raise RuntimeError('Microphone capture ended unexpectedly')
-                fast = self.fast_turn
-                if ECHO_GUARD and (self.echo_guard_active or self.responding or self.playing
-                                   or not self.response_idle.is_set()
-                                   or self.arm_reply_pending.is_set()
-                                   or (fast is not None and not fast['checked'])
-                                   or time.monotonic() < self.mute_until):
+                if ECHO_GUARD and (self.echo_guard_active or self.responding or self.playing or time.monotonic() < self.mute_until):
                     continue
                 self.send({'type': 'input_audio_buffer.append',
                            'audio': base64.b64encode(pcm).decode('ascii')})
@@ -507,23 +396,12 @@ class RealtimeAisana(object):
             question = str(args.get('question') or 'What is visible?')[:500]
             return self.inspect_camera(question)
         if name == 'move_arm':
-            if self.pending_position is not None:
-                if self.position_used:
-                    return 'No new movement: this numbered command was already processed.'
-                self.position_used = True
-                # The local parser, not model inference, owns explicit numbered requests.
-                args = dict(self.pending_position)
-                print('Arm command enforced:', args)
             if self.arm is None:
                 return ('The arm controller (Arduino Mega) is not connected over USB. '
                         'Tell the user briefly; do not pretend the arm moved.')
-            result = self.arm.execute(args.get('action'), args.get('arm') or 'both',
-                                      args.get('position'), args.get('joint') or 'whole',
-                                      args.get('direction'), args.get('degrees'))
-            if args.get('action') != 'status':
-                self.last_nudge_intent = (dict(args) if args.get('action') == 'nudge'
-                                          and 'Arduino accepted command' in str(result) else None)
-            return result
+            return self.arm.execute(args.get('action'), args.get('arm') or 'both',
+                                    args.get('position'), args.get('joint') or 'whole',
+                                    args.get('direction'), args.get('degrees'))
         if name == 'get_weather':
             city = str(args.get('city') or '').strip()[:60]
             phrase = 'weather' + (' in ' + city if city else '')
@@ -536,222 +414,61 @@ class RealtimeAisana(object):
         raise ValueError('Unknown tool: ' + str(name))
 
     def start_tool(self, call_id, name, arguments):
-        """Run each call_id once; fast-turn arm calls wait for verified STT."""
+        """Run each call_id once, off the websocket receiver thread."""
         if not call_id or not name:
             return
-        fast = self.fast_turn
-        blocked = None
-        if name == 'move_arm' and fast is not None:
-            # Ignore callbacks already dispatched by either Realtime event.
-            if call_id in self.handled_calls:
-                return
-            fast['arm_requested'] = True
-            if not fast['checked']:
-                fast['deferred'][call_id] = arguments
-                self.arm_reply_pending.set()
-                return
-            if fast['dispatched']:
-                # Close extra function-call items, without starting another move.
-                with self.calls_lock:
-                    self.handled_calls.add(call_id)
-                self.send({'type': 'conversation.item.create', 'item': {
-                    'type': 'function_call_output', 'call_id': call_id,
-                    'output': 'Additional movement not sent: one physical command per turn.'}})
-                return
-            fast['dispatched'] = True
-            if not fast['allowed']:
-                blocked = fast['reason']
-        if name == 'move_arm':
-            self.arm_reply_pending.set()
         with self.calls_lock:
             if call_id in self.handled_calls:
                 return
             self.handled_calls.add(call_id)
-        worker_args = (call_id, name, arguments)
-        if blocked is not None:
-            worker_args += (blocked,)
         threading.Thread(target=self.handle_tool_call,
-                         args=worker_args, daemon=True).start()
+                         args=(call_id, name, arguments), daemon=True).start()
 
-    def handle_tool_call(self, call_id, name, arguments, blocked_result=None):
+    def handle_tool_call(self, call_id, name, arguments):
         try:
             args = json.loads(arguments or '{}')
-            result = blocked_result if blocked_result is not None else self.run_tool(name, args)
+            result = self.run_tool(name, args)
             print('Tool {} {} -> {}'.format(name, args, ' '.join(str(result).split())[:300]))
         except Exception as exc:
             result = 'Tool {} failed: {}. Say briefly that it did not work; do not invent a result.'.format(name, exc)
             print('Tool {} FAILED: {}'.format(name, exc))
         if self.stop.is_set():
-            self.arm_reply_pending.clear()
             return
         try:
             self.send({'type': 'conversation.item.create', 'item': {
                 'type': 'function_call_output', 'call_id': call_id, 'output': str(result)[:4000]}})
-            response = {'instructions': (
+            self.send({'type': 'response.create', 'response': {'instructions': (
                 'The tool has returned. Answer the user NOW, in first person as Aisana, '
                 'using its result. No commentary about tools, photos or analysis. '
                 'One or two short sentences in the language of the user question. '
                 'No filler, no wishes, no offers of more help, no follow-up questions. '
-                'If the tool failed, say briefly that it did not work. '
-                'For arms, report only the actual controller result: sent or accepted is not proof of movement. '
-                'Never claim a completed move or stop without feedback.')}
-            if name == 'move_arm':
-                response['tool_choice'] = 'none'
-            # A rejected/unset preset can return before the originating
-            # Realtime response is done. Do not create overlapping responses.
-            if not self.response_idle.wait(10):
-                print('Tool reply error: previous response did not finish')
-                return
-            if not self.stop.is_set():
-                self.response_idle.clear()
-                self.send({'type': 'response.create', 'response': response})
+                'If the tool failed, say briefly that it did not work.') }})
         except Exception as exc:
             if not self.stop.is_set():
                 print('Tool response error:', exc)
-        finally:
-            if name == 'move_arm':
-                self.arm_reply_pending.clear()
-
-    def begin_fast_turn(self, item_id):
-        """Start generating from committed audio while STT runs in parallel."""
-        self.pending_position = None
-        self.position_used = False
-        self.fast_turn = {'item_id': item_id, 'checked': False, 'allowed': False,
-                          'done': False, 'arm_requested': False, 'dispatched': False,
-                          'retry_sent': False, 'force_position': False, 'deferred': {}, 'intent': None,
-                          'reason': 'Movement not verified; no Arduino motion sent.'}
-        self.respond(item_id)
-
-    def finish_fast_turn_if_needed(self):
-        fast = self.fast_turn
-        if not fast or not fast['checked'] or not fast['done']:
-            return
-        if fast['force_position'] and fast['allowed'] and not fast['arm_requested'] and not fast['retry_sent']:
-            # The speculative model may have answered without invoking a tool.
-            # Retry only once, after the original response has ended.
-            fast['retry_sent'] = True
-            self.arm_reply_pending.set()
-            self.respond(fast['item_id'], {
-                'tool_choice': {'type': 'function', 'name': 'move_arm'},
-                'instructions': 'Call move_arm once with exactly these verified arguments: ' +
-                                json.dumps(fast['intent']) + '. Do not speak before the tool returns.'})
-
-    def verify_fast_turn(self, transcript):
-        """Accept or reject physical actions using the complete transcript."""
-        fast = self.fast_turn
-        if fast is None or fast['checked']:
-            return
-        intent = None
-        prompt_echo = not transcript or is_prompt_echo(transcript)
-        if prompt_echo:
-            fast['reason'] = 'No intelligible command; no movement sent.'
-        elif is_stop_phrase(transcript):
-            lines = self.arm.emergency_stop() if self.arm is not None else []
-            confirmed = bool(lines and any('EMERGENCY STOP' in line.upper() for line in lines))
-            fast['reason'] = ('Arduino confirmed the stop command.' if confirmed else
-                              'Stop command not confirmed; do not claim that the arms stopped.')
-            self.last_nudge_intent = None
-            self.stop_playback()
-        elif is_sleep_phrase(transcript):
-            self.dialog_until = 0.0
-            self.last_position_target = None
-            self.last_nudge_intent = None
-            fast['reason'] = 'Conversation closed; no movement sent.'
-        else:
-            matched, intent = numbered_position_intent(transcript, self.last_position_target)
-            fast['force_position'] = matched and intent is not None
-            if not matched and not (_NEGATED.search(transcript) or _QUESTION.search(transcript)):
-                intent = parse_arm_command(transcript)
-                repeat = WAKE_PATTERN.sub('', transcript.casefold(), count=1).strip(' ,.!?;:')
-                if intent is None and self.last_nudge_intent is not None and re.fullmatch(
-                        r'(?:ещ[её](?:\s+чуть[- ]чуть)?|more|a bit more|again)', repeat):
-                    intent = dict(self.last_nudge_intent)
-                # A vague singular arm/joint cannot silently become both arms.
-                if intent is not None and intent['action'] not in ('stop', 'status'):
-                    if (intent['arm'] == 'both' and not (_BOTH.search(transcript) or _PLURAL.search(transcript))
-                            and intent != self.last_nudge_intent):
-                        intent = None
-                if intent is None and ARM_WORDS.search(transcript) and re.search(
-                        r'статус|состояни|status|қалпы', transcript, re.I):
-                    intent = {'action': 'status', 'arm': 'both'}
-            if intent is None:
-                fast['reason'] = ('No unambiguous physical action verified in the transcript. '
-                                  'Do not claim movement; clarify the requested action if needed.')
-            else:
-                fast['allowed'] = True
-                fast['intent'] = intent
-                self.pending_position = dict(intent)
-                self.position_used = False
-                if intent['action'] == 'position':
-                    self.last_position_target = dict(intent)
-                print('Arm command verified:', intent)
-        fast['checked'] = True
-        deferred = list(fast['deferred'].items())
-        fast['deferred'].clear()
-        for call_id, arguments in deferred:
-            self.start_tool(call_id, 'move_arm', arguments)
-        self.finish_fast_turn_if_needed()
 
     def handle_transcript(self, item_id, transcript):
         print('You:', transcript)
-        if self.fast_turn is not None and self.fast_turn['item_id'] == item_id:
-            self.verify_fast_turn(transcript)
-            return
-        if item_id in self.responded_items:
-            return
-        if is_prompt_echo(transcript) or not transcript:
-            print('Transcript looks like noise; ignored.')
-            self.ignore_item(item_id)
-            return
-        active = self.dialog_active()
-        if not active:
-            self.last_position_target = None
-            self.last_nudge_intent = None
-        if is_stop_phrase(transcript):
-            self.fast_turn = None
-            self.last_nudge_intent = None
-            # Stop remains available even outside the conversation window.
-            stop_result = self.arm.emergency_stop() if self.arm is not None else []
-            self.pending_position = None
-            self.stop_playback()
-            if not WAKE_GATE or active or has_wake_name(transcript):
-                confirmed = bool(stop_result and any('EMERGENCY STOP' in line.upper() for line in stop_result))
-                self.respond(item_id, {'tool_choice': 'none', 'instructions':
-                    'Reply in the user language. ' + ('Arduino confirmed the stop command.' if confirmed else
-                    'The stop command is not confirmed; do not claim the arms stopped.')})
-            else:
+        if is_prompt_echo(transcript):
+            print('Transcript looks like noise (repeated names); ignored.')
+            if WAKE_GATE and item_id not in self.responded_items:
                 self.ignore_item(item_id)
+            return
+        if is_stop_phrase(transcript):
+            if self.arm is not None:
+                self.arm.emergency_stop()
+            self.stop_playback()
+        if not WAKE_GATE or item_id in self.responded_items:
             return
         if is_sleep_phrase(transcript):
             self.dialog_until = 0.0
-            self.fast_turn = None
-            self.last_position_target = None
-            self.last_nudge_intent = None
-            self.pending_position = None
             print('Dialogue closed; say Aisana to begin again.')
             self.ignore_item(item_id)
-            return
-        if WAKE_GATE and not (active or has_wake_name(transcript)):
+        elif self.dialog_active() or has_wake_name(transcript):
+            self.respond(item_id)
+        else:
             print('Not addressed to Aisana; ignored.')
             self.ignore_item(item_id)
-            return
-        self.fast_turn = None
-        self.pending_position = None
-        self.position_used = False
-        matched, intent = numbered_position_intent(transcript, self.last_position_target)
-        if intent is not None:
-            self.pending_position = intent
-            self.last_position_target = dict(intent)
-            print('Arm preset (transcript):', intent)
-            self.respond(item_id, {'tool_choice': {'type': 'function', 'name': 'move_arm'},
-                                  'instructions': 'Call move_arm once with exactly these arguments: ' +
-                                                  json.dumps(intent) + '. Do not speak first.'})
-        elif matched:
-            self.respond(item_id, {'tool_choice': 'none', 'instructions':
-                'Do not move anything. Answer a question about positions if asked, otherwise ask briefly '
-                'which arm, joint and single numbered position the user means. Do not claim motion.'})
-        else:
-            self.respond(item_id)
 
     def handle(self, e):
         typ = e.get('type', '')
@@ -766,7 +483,6 @@ class RealtimeAisana(object):
                 # cancels the active generation. A second response.cancel races
                 # with response.done and triggers response_cancel_not_active.
         elif typ == 'response.created':
-            self.response_idle.clear()
             self.echo_guard_active = True
             self.responding = True
             self.playback_interrupted = False
@@ -780,18 +496,13 @@ class RealtimeAisana(object):
             if text:
                 print('Aisana:', text)
         elif typ == 'input_audio_buffer.committed':
-            item_id = e.get('item_id')
-            if (FAST_FOLLOWUP and item_id and item_id not in self.responded_items
-                    and (not WAKE_GATE or self.dialog_active())
-                    and self.response_idle.is_set() and not self.arm_reply_pending.is_set()
-                    and (self.fast_turn is None or self.fast_turn['checked'])):
-                self.begin_fast_turn(item_id)
+            # Inside an open dialogue answer at once, without waiting for STT.
+            if WAKE_GATE and self.dialog_active():
+                self.respond(e.get('item_id'))
         elif typ == 'conversation.item.input_audio_transcription.completed':
             self.handle_transcript(e.get('item_id'), (e.get('transcript') or '').strip())
         elif typ == 'conversation.item.input_audio_transcription.failed':
             print('Realtime transcription failed:', e.get('error', {}))
-            if self.fast_turn is not None and self.fast_turn['item_id'] == e.get('item_id'):
-                self.verify_fast_turn('')
         elif typ == 'response.function_call_arguments.done':
             self.start_tool(e.get('call_id'), e.get('name'), e.get('arguments'))
         elif typ == 'response.output_item.done':
@@ -800,15 +511,8 @@ class RealtimeAisana(object):
                 self.start_tool(item.get('call_id'), item.get('name'), item.get('arguments'))
         elif typ == 'response.done':
             self.responding = False
-            self.response_idle.set()
             # Do NOT lift echo guard here: playback can lag behind generation.
             self.queue_audio('done')
-            fast = self.fast_turn
-            if fast is not None and not fast['done']:
-                fast['done'] = True
-                self.finish_fast_turn_if_needed()
-            elif fast is not None and fast['retry_sent'] and not fast['arm_requested']:
-                self.arm_reply_pending.clear()
         elif typ == 'error':
             print('Realtime API error:', e.get('error', {}))
 
@@ -823,8 +527,7 @@ class RealtimeAisana(object):
         print('Model:', MODEL, 'Voice:', VOICE,
               'Barge-in:', 'ON (experimental)' if BARGE_IN else 'OFF',
               'Echo guard:', 'ON (no interruptions during playback)' if ECHO_GUARD else 'OFF',
-              'Wake name:', 'required to start' if WAKE_GATE else 'OFF (answers any speech)',
-              'Fast follow-ups:', 'ON' if FAST_FOLLOWUP else 'OFF')
+              'Wake name:', 'required to start' if WAKE_GATE else 'OFF (answers any speech)')
         self.arm = connect_from_environment()
         self.ws = websocket.create_connection(
             'wss://api.openai.com/v1/realtime?model=' + MODEL,
@@ -853,7 +556,7 @@ class RealtimeAisana(object):
                                 'threshold': 0.5,
                                 'prefix_padding_ms': 500,
                                 'silence_duration_ms': max(500, min(3000, SILENCE_MS)),
-                                'create_response': False,
+                                'create_response': not WAKE_GATE,
                                 'interrupt_response': BARGE_IN
                             }
                         },
