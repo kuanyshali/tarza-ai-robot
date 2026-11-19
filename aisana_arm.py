@@ -18,6 +18,7 @@ Environment:
                              set position0 if the arms move the wrong way
 """
 import collections
+import math
 import os
 import re
 import threading
@@ -29,12 +30,12 @@ ARM_LETTERS = {'right': 'r', 'left': 'l', 'both': 'b'}
 JOINT_LETTERS = {'whole': '', 'shoulder': 'm', 'elbow': 's'}
 ACTIONS = ('position', 'nudge', 'gripper_open', 'gripper_close', 'stop', 'status')
 MAX_NUDGE_DEGREES = 45
-# Pot readings of positions 0..4 from robotic_arms_Niyazbek_3.8.ino. Replaced at
-# runtime by the table the Arduino prints at start-up ("POSITIONS (pot readings)").
+# Reference only: positions in the supplied 4.0 sketch. Actual motion requires
+# the live position table printed by the connected Arduino; None means unset.
 DEFAULT_POSITION_TABLE = {
-    ('right', 'shoulder'): (47, 77, 107, 137, 167),
+    ('right', 'shoulder'): (101.8, 131.8, 161.8, 171, None),
     ('right', 'elbow'): (159, 129, 99, 69, 39),
-    ('left', 'shoulder'): (52, 82, 112, 142, 172),
+    ('left', 'shoulder'): (114, 144, 174, 180, None),
     ('left', 'elbow'): (144, 174, 204, 234, 264),
 }
 TABLE_LINE = re.compile(
@@ -121,7 +122,10 @@ def nudge_commands(arm, joint, direction, degrees, table=None, up_toward_4=True)
     commands = []
     for side in sides:
         positions = table[(side, joint)]
-        sign = 1 if positions[4] > positions[0] else -1
+        valid = [value for value in positions if value is not None]
+        if len(valid) < 2 or positions[0] is None or valid[-1] == valid[0]:
+            raise ArmError('No calibrated movement direction for {} {}'.format(side, joint))
+        sign = 1 if valid[-1] > valid[0] else -1
         if not up_toward_4:
             sign = -sign
         if direction == 'down':
@@ -175,6 +179,9 @@ class ArmController(object):
         self._factory = serial_factory
         self._serial = None
         self._write_lock = threading.Lock()
+        self._command_lock = threading.Lock()
+        self._stop_generation = 0
+        self._table_rows = set()
         self._lines = collections.deque(maxlen=300)
         self._lines_lock = threading.Lock()
         self._sequence = 0
@@ -238,12 +245,20 @@ class ArmController(object):
             values = table.group(3).split()
             joint = 'shoulder' if table.group(2).lower() == 'stepper' else 'elbow'
             try:
-                if '-' not in (values[0], values[4]):
-                    self.position_table[(table.group(1).lower(), joint)] = tuple(float(v) for v in values)
+                key = (table.group(1).lower(), joint)
+                parsed = tuple(None if v == '-' else float(v) for v in values)
+                if len(parsed) == 5 and all(v is None or math.isfinite(v) for v in parsed):
+                    with self._lines_lock:
+                        self.position_table[key] = parsed
+                        self._table_rows.add(key)
             except ValueError:
                 pass
         if self.echo >= 2 or (self.echo == 1 and IMPORTANT_LINE.search(line)):
             self.log('Arduino: ' + line)
+        if line.startswith('Starting both arms'):
+            self.ready.clear()
+            with self._lines_lock:
+                self._table_rows.clear()
         if READY_TEXT in line and not self.ready.is_set():
             self.ready.set()
             self.log('Arm: ready.')
@@ -271,28 +286,89 @@ class ArmController(object):
 
     def execute(self, action, arm='both', position=None, joint='whole',
                 direction=None, degrees=None):
-        """Run an intent; returns a short English summary for the model/logs."""
-        if action == 'nudge':
-            commands = nudge_commands(arm, joint, direction, degrees,
-                                      self.position_table, self.up_toward_4)
-        else:
-            commands = [build_command(action, arm, position, joint)]
-        lines = []
-        for command in commands:
-            lines.extend(self.send(command, collect_seconds=0.6 if action == 'status' else 0.15))
-        problems = [line for line in lines if IMPORTANT_LINE.search(line)]
-        summary = 'Sent {} to the Arduino.'.format(', '.join('"{}"'.format(c) for c in commands))
-        if action == 'status':
-            summary += ' Status: ' + ' | '.join(lines[-6:]) if lines else ' No status reply yet.'
-        elif problems:
-            summary += ' Arduino reported: ' + ' | '.join(problems[-3:])
-        return summary
+        """Validate live presets, send commands and report Arduino feedback, not guesses."""
+        if action == 'stop':
+            lines = self.emergency_stop()
+            if any('EMERGENCY STOP' in line.upper() for line in lines):
+                return 'Arduino confirmed the stop command; joints are commanded to hold.'
+            return 'Stop command sent; Arduino did not confirm it.'
+        with self._command_lock:
+            if not self.ready.wait(self.ready_timeout):
+                raise ArmError('Arduino did not report "{}"'.format(READY_TEXT))
+            generation = self._stop_generation
+            if action == 'status':
+                lines = self.send('p', collect_seconds=0.6)
+                status = [line for line in lines if re.match(r'^(RIGHT|LEFT)\s+(stepper|elbow|gripper):', line, re.I)]
+                return 'Arduino status: ' + ' | '.join(status) if status else 'No Arduino status reply.'
+            if arm not in ARM_LETTERS:
+                raise ArmError('Unknown arm: {!r}'.format(arm))
+            sides = ('right', 'left') if arm == 'both' else (arm,)
+            joint = joint or 'whole'
+            if action == 'nudge' and joint == 'whole':
+                joint = 'shoulder'
+            if action in ('position', 'nudge'):
+                if joint not in JOINT_LETTERS:
+                    raise ArmError('Unknown joint: {!r}'.format(joint))
+                joints = ('shoulder', 'elbow') if joint == 'whole' else (joint,)
+                keys = [(side, j) for side in sides for j in joints]
+                with self._lines_lock:
+                    missing = [key for key in keys if key not in self._table_rows]
+                if missing:
+                    self.send('t', collect_seconds=0.6)
+                with self._lines_lock:
+                    if any(key not in self._table_rows for key in keys):
+                        raise ArmError('Live Arduino position table unavailable; motion not sent.')
+                    table = dict(self.position_table)
+                if action == 'position':
+                    commands = [build_command(action, arm, position, joint)]
+                    if any(table[key][int(position)] is None for key in keys):
+                        unset = ['{} {}'.format(*key) for key in keys if table[key][int(position)] is None]
+                        raise ArmError('Position {} is not set for {}; no movement command sent.'.format(
+                            position, ', '.join(unset)))
+                else:
+                    commands = nudge_commands(arm, joint, direction, degrees, table, self.up_toward_4)
+            else:
+                joints = ('gripper',)
+                commands = [build_command(action, arm, position, joint)]
+            lines = []
+            for command in commands:
+                if generation != self._stop_generation:
+                    return 'Movement cancelled by stop; do not claim success.'
+                lines.extend(self.send(command, collect_seconds=0.6))
+            sent = ', '.join('"{}"'.format(c) for c in commands)
+            print('Arm feedback:', ' | '.join(lines) if lines else '(no Arduino reply)')
+            problems = [line for line in lines if IMPORTANT_LINE.search(line)]
+            expected = [(side, j) for side in sides for j in joints]
+            acknowledged = []
+            for side, j in expected:
+                motor = {'shoulder': 'stepper', 'elbow': 'elbow', 'gripper': 'gripper'}[j]
+                suffix = r'\s+(?:OPEN|CLOSE)\b' if j == 'gripper' else r'\s*->\s*[-+\d.]'
+                if any(re.match(r'^' + side + r'\s+' + motor + suffix, line, re.I) for line in lines):
+                    acknowledged.append((side, j))
+            if generation != self._stop_generation:
+                return 'Movement cancelled by stop; do not claim success.'
+            status = self.send('p', collect_seconds=0.6)
+            status = [line for line in status if re.match(r'^(RIGHT|LEFT)\s+(stepper|elbow|gripper):', line, re.I)]
+            if status:
+                print('Arm status:', ' | '.join(status))
+                problems.extend(line for line in status if ('[STOPPED]' in line or 'feedback OFF' in line))
+            if problems:
+                return 'Command {} sent; Arduino warning/error: {}. Movement not confirmed.'.format(
+                    sent, ' | '.join(problems[-4:]))
+            if len(acknowledged) != len(expected):
+                return 'Command {} sent; missing Arduino acknowledgement for {}. Movement not confirmed.'.format(
+                    sent, ', '.join('{} {}'.format(*key) for key in expected if key not in acknowledged))
+            return ('Arduino accepted command {}. Physical movement completion is NOT confirmed. '
+                    'Say the target was accepted, not that the arm actually moved. Status: {}').format(
+                        sent, ' | '.join(status) if status else 'no readback')
 
     def emergency_stop(self):
+        self._stop_generation += 1
         try:
-            self.send('x')
+            return self.send('x', collect_seconds=0.3)
         except Exception as error:
             self.log('Arm: emergency stop could not be sent: {}'.format(error))
+            return []
 
 
 def connect_from_environment(log=print, environ=None):
