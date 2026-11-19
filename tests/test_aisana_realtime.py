@@ -110,7 +110,7 @@ class LanguageAndSilenceTests(unittest.TestCase):
         session.legs = FakeLegs()
         say(session, 'g1', 'Aisana, go forward for one second.')
         time.sleep(0.2)
-        self.assertTrue(sent[-1]['response']['instructions'].startswith('Reply in English only'))
+        self.assertIn('"Driving forward."', sent[-1]['response']['instructions'])
 
     def test_stay_silent_for_chatter(self):
         session, sent = make_session()
@@ -389,6 +389,17 @@ class LegsToolTests(unittest.TestCase):
             self.assertEqual(session.legs.intents[0]['action'], 'spin_right')
             self.assertEqual(session.legs.intents[0]['seconds'], 10.0)
             self.assertIn('Уииии', sent[-1]['response']['instructions'])
+            # Short fixed phrases for other commands; "Уииииии!" for every turnaround.
+            say(session, 'l7', 'Айсана, вперёд')
+            time.sleep(0.2)
+            self.assertIn('"Еду вперёд."', sent[-1]['response']['instructions'])
+            self.assertIn('nothing else', sent[-1]['response']['instructions'])
+            say(session, 'l8', 'Айсана, развернись')
+            time.sleep(0.2)
+            self.assertIn('"Уииииии!"', sent[-1]['response']['instructions'])
+            say(session, 'l9', 'Aisana, turn around')
+            time.sleep(0.2)
+            self.assertIn('"Wheeeee!"', sent[-1]['response']['instructions'])
         finally:
             rt.WAKE_GATE = original
 

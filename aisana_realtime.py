@@ -28,7 +28,8 @@ from aisana_arm import (connect_from_environment, parse_arm_commands, make_inten
                         MOVE_WORDS, OPEN_WORDS, CLOSE_WORDS)
 from sadam_features import WEB_ENABLED, get_weather, search_web
 import aisana_legs
-from aisana_legs import parse_legs_command, LEGS_ACTIONS
+from aisana_legs import parse_legs_command, LEGS_ACTIONS, legs_reply
+from aisana_arm import arm_reply
 
 RATE = 24000
 CHUNK = 1440  # 30 ms of mono S16_LE PCM
@@ -473,8 +474,10 @@ class RealtimeAisana(object):
             return ('Legs are not connected (AISANA_LEGS_URL is not set or the Pi is off); nothing moved. '
                     'Say so in a few words.')
         result = self.legs.execute(intent, self.report_legs_problem)
-        return ('{} Say ONLY a few words that you are doing it (Russian: "Еду вперёд." '
-                'English: "Driving forward.").'.format(result))
+        if result.startswith('NOT driving'):
+            return result
+        return '{} Say exactly this and nothing else: "{}"'.format(
+            result, legs_reply(intent, self.user_language))
 
     def run_pending_legs(self, item_id):
         """Safety net: a clear drive command the model ignored."""
@@ -865,11 +868,15 @@ class RealtimeAisana(object):
                     'type': 'message', 'role': 'system', 'content': [{'type': 'input_text', 'text': (
                         'Robot report: the user\'s command was executed by the robot itself. ' + result)}]}})
                 self.expect_tool_response = True
-                self.send({'type': 'response.create', 'response': {'instructions': self.reply_language() + (
-                    'In a few words, confirm what you are doing now, based ONLY on the robot report '
-                    '(if it says NOT done, say that briefly instead). If the user also asked for '
-                    'something you can just say or exclaim, for example to shout "Уииии!", do that too, '
-                    'playfully and stretched out. No questions, no other words.')}})
+                if result.startswith('NOT done'):
+                    instructions = self.reply_language() + (
+                        'In ONE short sentence say what is not working, from the robot report. Nothing else.')
+                else:
+                    # A fixed short phrase: commands get "Еду вперёд.", turnarounds "Уииииии!".
+                    phrase = (arm_reply(arm_intents[-1], self.user_language) if arm_intents
+                              else legs_reply(drive, self.user_language))
+                    instructions = ('Say exactly this and nothing else, with lively intonation: "{}"'.format(phrase))
+                self.send({'type': 'response.create', 'response': {'instructions': instructions}})
             except Exception as exc:
                 if not self.stop.is_set():
                     print('Command report error:', exc)

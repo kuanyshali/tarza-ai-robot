@@ -364,11 +364,21 @@ def parse_legs_command(text):
     return None
 
 
+WHEE = {'Russian': 'Уииииии!', 'Kazakh': 'Уииииии!', 'Egyptian Arabic': 'ييييييه!', 'English': 'Wheeeee!'}
+
+
+def is_whirl(intent):
+    """Turning around or spinning: 180 degrees or more, or spinning for a time."""
+    return (intent.get('action') in ('spin_left', 'spin_right')
+            and (bool(intent.get('seconds')) or (intent.get('degrees') or 90) >= 180))
+
+
 def legs_reply(intent, language='Russian', error=None):
-    """Short spoken confirmation without a model call (robot.py)."""
+    """Short spoken confirmation without a model call."""
     if language not in ('Russian', 'Kazakh', 'Egyptian Arabic'):
         language = 'English'
-    if error is not None:
+    if error is None and is_whirl(intent):
+        return WHEE[language]               # she always shouts when asked to turn around
         return {'Russian': 'Не могу поехать: ' + str(error), 'Kazakh': 'Жүре алмаймын.',
                 'Egyptian Arabic': 'مش قادرة أتحرك دلوقتي.',
                 'English': 'I cannot drive right now.'}[language]

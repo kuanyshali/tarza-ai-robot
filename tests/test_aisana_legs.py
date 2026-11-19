@@ -204,6 +204,10 @@ class ControllerTests(unittest.TestCase):
     def test_replies(self):
         self.assertEqual(legs.legs_reply(legs.make_intent('forward'), 'Russian'), 'Еду вперёд.')
         self.assertEqual(legs.legs_reply(legs.make_intent('spin_left'), 'English'), 'Turning left.')
+        self.assertEqual(legs.legs_reply(legs.parse_legs_command('развернись'), 'Russian'), 'Уииииии!')
+        self.assertEqual(legs.legs_reply(legs.parse_legs_command('покрутись 10 секунд'), 'Russian'), 'Уииииии!')
+        self.assertEqual(legs.legs_reply(legs.parse_legs_command('повернись налево'), 'Russian'),
+                         'Поворачиваюсь налево.')
 
 
 if __name__ == '__main__':
