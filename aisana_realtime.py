@@ -23,7 +23,8 @@ try:
 except ImportError:          # tests and robot.py do not need websocket-client
     websocket = None
 
-from aisana_arm import connect_from_environment, POSITION_WORD, NUMBER_WORDS, SHOULDER_WORDS, ELBOW_WORDS, ARM_WORDS
+from aisana_arm import (connect_from_environment, parse_arm_command, POSITION_WORD,
+                        NUMBER_WORDS, SHOULDER_WORDS, ELBOW_WORDS, ARM_WORDS)
 from sadam_features import WEB_ENABLED, get_weather, search_web
 
 RATE = 24000
@@ -38,6 +39,7 @@ KEY = os.environ.get('OPENAI_API_KEY')
 STT_MODEL = os.environ.get('AISANA_REALTIME_STT_MODEL', 'gpt-4o-mini-transcribe')
 # Respond only after the name "Aisana" (then a timed follow-up window).
 WAKE_GATE = os.environ.get('AISANA_REALTIME_WAKE', '1') == '1'
+FAST_FOLLOWUP = os.environ.get('AISANA_REALTIME_FAST', '1') == '1'
 DIALOG_TIMEOUT = max(5.0, float(os.environ.get('AISANA_DIALOG_TIMEOUT', '20')))
 
 WAKE_PATTERN = re.compile(
@@ -316,6 +318,8 @@ class RealtimeAisana(object):
         self.position_used = False
         self.response_idle = threading.Event()
         self.response_idle.set()
+        self.fast_turn = None
+        self.arm_reply_pending = threading.Event()
 
     def dialog_active(self):
         return time.monotonic() < self.dialog_until
@@ -431,7 +435,11 @@ class RealtimeAisana(object):
                 pcm = self.mic.stdout.read(CHUNK)
                 if len(pcm) != CHUNK:
                     raise RuntimeError('Microphone capture ended unexpectedly')
-                if ECHO_GUARD and (self.echo_guard_active or self.responding or self.playing or time.monotonic() < self.mute_until):
+                fast = self.fast_turn
+                if ECHO_GUARD and (self.echo_guard_active or self.responding or self.playing
+                                   or self.arm_reply_pending.is_set()
+                                   or (fast is not None and not fast['checked'])
+                                   or time.monotonic() < self.mute_until):
                     continue
                 self.send({'type': 'input_audio_buffer.append',
                            'audio': base64.b64encode(pcm).decode('ascii')})
@@ -522,25 +530,47 @@ class RealtimeAisana(object):
         raise ValueError('Unknown tool: ' + str(name))
 
     def start_tool(self, call_id, name, arguments):
-        """Run each call_id once, off the websocket receiver thread."""
+        """Run each call_id once; fast-turn arm calls wait for verified STT."""
         if not call_id or not name:
             return
+        fast = self.fast_turn
+        blocked = None
+        if name == 'move_arm' and fast is not None:
+            # Ignore callbacks already dispatched by either Realtime event.
+            if call_id in self.handled_calls:
+                return
+            fast['arm_requested'] = True
+            if not fast['checked']:
+                fast['deferred'][call_id] = arguments
+                self.arm_reply_pending.set()
+                return
+            if not fast['allowed']:
+                blocked = fast['reason']
+            elif fast['dispatched']:
+                return  # at most one physical tool invocation per verified turn
+            else:
+                fast['dispatched'] = True
+            self.arm_reply_pending.set()
         with self.calls_lock:
             if call_id in self.handled_calls:
                 return
             self.handled_calls.add(call_id)
+        worker_args = (call_id, name, arguments)
+        if blocked is not None:
+            worker_args += (blocked,)
         threading.Thread(target=self.handle_tool_call,
-                         args=(call_id, name, arguments), daemon=True).start()
+                         args=worker_args, daemon=True).start()
 
-    def handle_tool_call(self, call_id, name, arguments):
+    def handle_tool_call(self, call_id, name, arguments, blocked_result=None):
         try:
             args = json.loads(arguments or '{}')
-            result = self.run_tool(name, args)
+            result = blocked_result if blocked_result is not None else self.run_tool(name, args)
             print('Tool {} {} -> {}'.format(name, args, ' '.join(str(result).split())[:300]))
         except Exception as exc:
             result = 'Tool {} failed: {}. Say briefly that it did not work; do not invent a result.'.format(name, exc)
             print('Tool {} FAILED: {}'.format(name, exc))
         if self.stop.is_set():
+            self.arm_reply_pending.clear()
             return
         try:
             self.send({'type': 'conversation.item.create', 'item': {
@@ -566,9 +596,87 @@ class RealtimeAisana(object):
         except Exception as exc:
             if not self.stop.is_set():
                 print('Tool response error:', exc)
+        finally:
+            if name == 'move_arm':
+                self.arm_reply_pending.clear()
+
+    def begin_fast_turn(self, item_id):
+        """Start generating from committed audio while STT runs in parallel."""
+        self.pending_position = None
+        self.position_used = False
+        self.fast_turn = {'item_id': item_id, 'checked': False, 'allowed': False,
+                          'done': False, 'arm_requested': False, 'dispatched': False,
+                          'retry_sent': False, 'deferred': {}, 'intent': None,
+                          'reason': 'Movement not verified; no Arduino motion sent.'}
+        self.respond(item_id)
+
+    def finish_fast_turn_if_needed(self):
+        fast = self.fast_turn
+        if not fast or not fast['checked'] or not fast['done']:
+            return
+        if fast['intent'] is not None and fast['allowed'] and not fast['arm_requested'] and not fast['retry_sent']:
+            # The speculative model may have answered without invoking a tool.
+            # Retry only once, after the original response has ended.
+            fast['retry_sent'] = True
+            self.arm_reply_pending.set()
+            self.respond(fast['item_id'], {
+                'tool_choice': {'type': 'function', 'name': 'move_arm'},
+                'instructions': 'Call move_arm once with exactly these verified arguments: ' +
+                                json.dumps(fast['intent']) + '. Do not speak before the tool returns.'})
+
+    def verify_fast_turn(self, transcript):
+        """Accept or reject physical actions using the complete transcript."""
+        fast = self.fast_turn
+        if fast is None or fast['checked']:
+            return
+        intent = None
+        prompt_echo = not transcript or is_prompt_echo(transcript)
+        if prompt_echo:
+            fast['reason'] = 'No intelligible command; no movement sent.'
+        elif is_stop_phrase(transcript):
+            lines = self.arm.emergency_stop() if self.arm is not None else []
+            confirmed = bool(lines and any('EMERGENCY STOP' in line.upper() for line in lines))
+            fast['reason'] = ('Arduino confirmed the stop command.' if confirmed else
+                              'Stop command not confirmed; do not claim that the arms stopped.')
+            self.stop_playback()
+        elif is_sleep_phrase(transcript):
+            self.dialog_until = 0.0
+            self.last_position_target = None
+            fast['reason'] = 'Conversation closed; no movement sent.'
+        else:
+            matched, intent = numbered_position_intent(transcript, self.last_position_target)
+            if not matched and not (_NEGATED.search(transcript) or _QUESTION.search(transcript)):
+                intent = parse_arm_command(transcript)
+                # A vague singular arm/joint cannot silently become both arms.
+                if intent is not None and intent['action'] not in ('stop', 'status'):
+                    if intent['arm'] == 'both' and not (_BOTH.search(transcript) or _PLURAL.search(transcript)):
+                        intent = None
+                if intent is None and ARM_WORDS.search(transcript) and re.search(
+                        r'статус|состояни|status|қалпы', transcript, re.I):
+                    intent = {'action': 'status', 'arm': 'both'}
+            if intent is None:
+                fast['reason'] = ('No unambiguous physical action verified in the transcript. '
+                                  'Do not claim movement; clarify the requested action if needed.')
+            else:
+                fast['allowed'] = True
+                fast['intent'] = intent
+                self.pending_position = dict(intent)
+                self.position_used = False
+                if intent['action'] == 'position':
+                    self.last_position_target = dict(intent)
+                print('Arm command verified:', intent)
+        fast['checked'] = True
+        deferred = list(fast['deferred'].items())
+        fast['deferred'].clear()
+        for call_id, arguments in deferred:
+            self.start_tool(call_id, 'move_arm', arguments)
+        self.finish_fast_turn_if_needed()
 
     def handle_transcript(self, item_id, transcript):
         print('You:', transcript)
+        if self.fast_turn is not None and self.fast_turn['item_id'] == item_id:
+            self.verify_fast_turn(transcript)
+            return
         if item_id in self.responded_items:
             return
         if is_prompt_echo(transcript) or not transcript:
@@ -602,6 +710,7 @@ class RealtimeAisana(object):
             print('Not addressed to Aisana; ignored.')
             self.ignore_item(item_id)
             return
+        self.fast_turn = None
         self.pending_position = None
         self.position_used = False
         matched, intent = numbered_position_intent(transcript, self.last_position_target)
@@ -646,13 +755,17 @@ class RealtimeAisana(object):
             if text:
                 print('Aisana:', text)
         elif typ == 'input_audio_buffer.committed':
-            # Always wait for the transcript: responding to raw audio early can
-            # move the wrong joint before a correction or a number is understood.
-            pass
+            item_id = e.get('item_id')
+            if (FAST_FOLLOWUP and item_id and item_id not in self.responded_items
+                    and (not WAKE_GATE or self.dialog_active())
+                    and self.response_idle.is_set() and not self.arm_reply_pending.is_set()):
+                self.begin_fast_turn(item_id)
         elif typ == 'conversation.item.input_audio_transcription.completed':
             self.handle_transcript(e.get('item_id'), (e.get('transcript') or '').strip())
         elif typ == 'conversation.item.input_audio_transcription.failed':
             print('Realtime transcription failed:', e.get('error', {}))
+            if self.fast_turn is not None and self.fast_turn['item_id'] == e.get('item_id'):
+                self.verify_fast_turn('')
         elif typ == 'response.function_call_arguments.done':
             self.start_tool(e.get('call_id'), e.get('name'), e.get('arguments'))
         elif typ == 'response.output_item.done':
@@ -664,6 +777,10 @@ class RealtimeAisana(object):
             self.response_idle.set()
             # Do NOT lift echo guard here: playback can lag behind generation.
             self.queue_audio('done')
+            fast = self.fast_turn
+            if fast is not None and not fast['done']:
+                fast['done'] = True
+                self.finish_fast_turn_if_needed()
         elif typ == 'error':
             print('Realtime API error:', e.get('error', {}))
 
@@ -678,7 +795,8 @@ class RealtimeAisana(object):
         print('Model:', MODEL, 'Voice:', VOICE,
               'Barge-in:', 'ON (experimental)' if BARGE_IN else 'OFF',
               'Echo guard:', 'ON (no interruptions during playback)' if ECHO_GUARD else 'OFF',
-              'Wake name:', 'required to start' if WAKE_GATE else 'OFF (answers any speech)')
+              'Wake name:', 'required to start' if WAKE_GATE else 'OFF (answers any speech)',
+              'Fast follow-ups:', 'ON' if FAST_FOLLOWUP else 'OFF')
         self.arm = connect_from_environment()
         self.ws = websocket.create_connection(
             'wss://api.openai.com/v1/realtime?model=' + MODEL,
