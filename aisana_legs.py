@@ -34,7 +34,8 @@ LEGS_ACTIONS = DRIVE_COMMANDS + ('stop', 'faster', 'slower')
 DEFAULT_SECONDS = 2.0
 SHORT_SECONDS = 1.0
 MAX_SECONDS = 10.0
-HEARTBEAT_SECONDS = 0.12          # the Pi stops after 0.35 s without one
+HEARTBEAT_SECONDS = 0.08          # fixed rate; the Pi stops after 0.35 s without one
+MAX_RESUMES = 5                   # silent restarts after a Pi stop that was NOT an obstacle
 ENABLE_TIMEOUT = 12.0             # odrive.find_any() can take a while the first time
 
 
@@ -73,7 +74,7 @@ class LegsController(object):
     def __init__(self, base_url, http=None, log=print, spin_90=1.5):
         if http is None:
             import requests
-            http = requests
+            http = requests.Session()        # keep-alive: no new TCP connection per heartbeat
         self.base_url = base_url.rstrip('/')
         self.http = http
         self.log = log
@@ -116,6 +117,18 @@ class LegsController(object):
         raise LegsError('motors did not enable in time (is the ODrive powered?)')
 
     # --- drives ------------------------------------------------------------
+    def obstacle(self):
+        """Describe an obstacle the Pi's ultrasonic sensors see, or '' if none."""
+        try:
+            data = self.http.get(self.base_url + '/sensor-data', timeout=0.5).json()
+        except Exception:
+            return ''
+        if not data.get('obstacle_stop'):
+            return ''
+        distances = [d for d in (data.get('distance_1'), data.get('distance_2')) if d is not None]
+        return '{} cm away ({})'.format(int(min(distances)), data.get('obstacle_status', '')) if distances \
+            else str(data.get('obstacle_status', 'obstacle'))
+
     def stop(self):
         """Stop now. Safe to call any time; never raises."""
         self._cancel.set()
@@ -162,18 +175,37 @@ class LegsController(object):
         self.log('Legs: {} for {:.1f} s'.format(action, seconds))
 
         def worker():
+            resumes = 0
             try:
                 end = time.monotonic() + seconds
+                next_beat = time.monotonic()
                 while time.monotonic() < end and not cancel.is_set():
-                    code, data = self._post('/motor/heartbeat', timeout=0.3)
-                    if code != 200 or data.get('command') == 'stop':
-                        # The Pi stopped on its own (obstacle closer than 40 cm).
-                        raise LegsError('stopped by the robot: obstacle ahead or link problem')
-                    cancel.wait(HEARTBEAT_SECONDS)
+                    try:
+                        code, data = self._post('/motor/heartbeat', timeout=0.25)
+                        stopped = code != 200 or data.get('command') == 'stop'
+                    except Exception as error:
+                        self.log('Legs: heartbeat failed ({})'.format(error))
+                        stopped = True
+                    if stopped and not cancel.is_set():
+                        obstacle = self.obstacle()
+                        if obstacle:
+                            raise LegsError('obstacle ahead: ' + obstacle)
+                        if resumes >= MAX_RESUMES:
+                            self.log('Legs: the Pi keeps stopping without an obstacle; drive ended.')
+                            return
+                        resumes += 1
+                        # Not an obstacle (a late heartbeat): continue silently.
+                        self.log('Legs: Pi stopped without an obstacle; resuming ({}).'.format(resumes))
+                        self.ensure_enabled()
+                        self._post('/motor/command', {'command': action})
+                    # Fixed rate: the next heartbeat does not wait for a slow answer.
+                    next_beat += HEARTBEAT_SECONDS
+                    cancel.wait(max(0.0, next_beat - time.monotonic()))
             except Exception as error:
                 if not cancel.is_set():
                     self.log('Legs problem: {}'.format(error))
-                    report(str(error))
+                    if 'obstacle' in str(error):
+                        report(str(error))       # only real obstacles are spoken
             finally:
                 try:
                     self._post('/motor/command', {'command': 'stop'}, timeout=0.5)
@@ -228,11 +260,13 @@ BACKWARD = re.compile(r'(?:назад|\bback(?:wards?)?\b|артқа|لورا|و
 LEFT = re.compile(r'(?:налево|влево|лево|левее|\bleft\b|солға|شمال|يسار)', re.I)
 RIGHT = re.compile(r'(?:направо|вправо|право|правее|\bright\b|оңға|يمين)', re.I)
 # "поведи/повели" is how STT often hears "поверни" (Jetson log, Nov 19).
-SPIN = re.compile(r'(?:поверн\w*|повед[иь]\w*|повели\b|разверн\w*|крут\w*|разворот\w*|\bturn\b|\bspin\b|'
+SPIN = re.compile(r'(?:поверн\w*|повед[иь]\w*|повели\b|разверн\w*|развед[иь]с\w*|разверт\w*|крут\w*|'
+                  r'разворот\w*|\bturn\b|\bspin\b|'
                   r'бұрыл\w*|لف)', re.I)
 TIMES_RE = re.compile(r'(\d+)\s*(?:раз\w*|times|рет|مرات|مرة)', re.I)
 FEW_TIMES = re.compile(r'(?:несколько раз|пару раз|много раз|a few times|several times|бірнеше рет)', re.I)
-AROUND = re.compile(r'(?:разверн\w*|разворот\w*|turn around|кругом)', re.I)
+# "разведись", "развертись" are how STT hears "развернись" (Jetson log, Nov 19).
+AROUND = re.compile(r'(?:разверн\w*|развед[иь]с\w*|разверт\w*|разворот\w*|turn around|кругом)', re.I)
 DRIVE = re.compile(
     r'(?:\bедь\b|езжай|поезжай|прое[дзхй]\w*|подъе[дзхй]\w*|отъе[дзхй]\w*|ехай|едем|поехали|двигайся|'
     r'подвинься|иди\b|пойди|шагай|\bdrive\b|\bgo\b|\bmove\b|\bcome\b|\broll\b|жүр|бар\b|'
@@ -287,6 +321,11 @@ def _number(text):
 def parse_legs_command(text):
     """{'action', 'seconds', 'meters', 'degrees'} or None if not a drive command."""
     q = _digits(' '.join((text or '').casefold().split()))
+    # "... и крикни «We»": what to shout is not part of the drive command.
+    q = re.sub(r'\s*(?:,|\bи\b|\band\b)?\s*(?:крикни|кричи|прокричи|покричи|заори|'
+               r'shout|yell|scream|айқайла\w*)\b.*$', '', q)
+    if re.search(r'(?:смотр\w*|видишь|\blook\b|\bsee\b|қара\w*)', q) and not DRIVE.search(q):
+        return None                      # "смотри вперёд" is about the camera, not the wheels
     # The name and fillers do not count as words: "Айсана, вперёд!" is short.
     core = re.sub(r'(?:айсан\w*|эйсан\w*|aisan\w*|aysan\w*|давай|ну|пожалуйста|please)', ' ', q)
     core_words = len(re.findall(r'\w+', core))

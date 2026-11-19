@@ -49,7 +49,7 @@ DIALOG_TIMEOUT = max(5.0, float(os.environ.get('AISANA_DIALOG_TIMEOUT', '12')))
 
 WAKE_PATTERN = re.compile(
     r'^\W*(?:(?:ok|okay|окей|ок|эй|hey|привет)\W+)?'
-    r'(?:айсан\w*|айсон\w*|эйсан\w*|aisan\w*|aysan\w*|aissan\w*|'
+    r'(?:айсан\w*|айсон\w*|эйсан\w*|асан[аеуы]\b|асама\b|айсама\b|асына\b|aisan\w*|aysan\w*|aissan\w*|'
     r'آيسان\w*|ايسان\w*|أيسان\w*|عيسان\w*|إيسان\w*)', re.I)
 STOP_PATTERN = re.compile(
     r'(?:^|\W)(?:стоп|остановись|остановитесь|замри|stop|freeze|тоқта\w*|اسكت|وقف)(?:\W|$)', re.I)
@@ -60,7 +60,7 @@ SLEEP_PATTERN = re.compile(
 # The name as a form of address anywhere in the phrase: "Позицию ноль верни.
 # Айсана, позиция ноль." Inflected forms ("про Айсану", "Айсане") do not count.
 WAKE_ANYWHERE = re.compile(
-    r'(?<!\w)(?:айсана|айсанна|айсанаа|эйсана|айсона|aisana|aysana|aissana|aisanna|'
+    r'(?<!\w)(?:айсана|айсанна|айсанаа|эйсана|айсона|асана|асама|айсама|асына|aisana|aysana|aissana|aisanna|'
     r'آيسانا|ايسانا|أيسانا|عيسانا|إيسانا)(?!\w)', re.I)
 
 
@@ -76,6 +76,29 @@ def voice_style_instructions():
     """AISANA_VOICE_STYLE=cute|calm|<your own text>; empty = neutral."""
     style = os.environ.get('AISANA_VOICE_STYLE', '').strip()
     return VOICE_STYLES.get(style, ('VOICE STYLE: ' + style + ' ') if style else '')
+
+
+SHOUT_RE = re.compile(
+    r'(?:крикни|кричи|прокричи|покричи|заори|скажи|произнеси|\bshout\b|\byell\b|\bscream\b|\bsay\b|айқайла\w*)'
+    r'\s*[:,]?\s*[«"„“\']?([^»"“”\']{1,40})', re.I)
+
+
+def shout_request(text):
+    """'вперёд 2 секунды и крикни «We»' -> 'We'; None if nothing to shout."""
+    match = SHOUT_RE.search(text or '')
+    if not match:
+        return None
+    words = match.group(1).strip(' .!?,')
+    return words or None
+
+
+def confirm_instruction(phrase, transcript):
+    """The fixed short confirmation, plus whatever the user asked her to shout."""
+    shout = shout_request(transcript)
+    if shout:
+        return ('Say "{}" and then shout "{}!" loudly, stretched and playful. Nothing else.'.format(
+            phrase.rstrip('.'), shout))
+    return 'Say exactly this and nothing else, with lively intonation: "{}"'.format(phrase)
 
 
 def language_of(text):
@@ -476,8 +499,8 @@ class RealtimeAisana(object):
         result = self.legs.execute(intent, self.report_legs_problem)
         if result.startswith('NOT driving'):
             return result
-        return '{} Say exactly this and nothing else: "{}"'.format(
-            result, legs_reply(intent, self.user_language))
+        return '{} {}'.format(result, confirm_instruction(legs_reply(intent, self.user_language),
+                                                           transcript or ''))
 
     def run_pending_legs(self, item_id):
         """Safety net: a clear drive command the model ignored."""
@@ -875,7 +898,7 @@ class RealtimeAisana(object):
                     # A fixed short phrase: commands get "Еду вперёд.", turnarounds "Уииииии!".
                     phrase = (arm_reply(arm_intents[-1], self.user_language) if arm_intents
                               else legs_reply(drive, self.user_language))
-                    instructions = ('Say exactly this and nothing else, with lively intonation: "{}"'.format(phrase))
+                    instructions = confirm_instruction(phrase, self.transcripts.get(item_id, ''))
                 self.send({'type': 'response.create', 'response': {'instructions': instructions}})
             except Exception as exc:
                 if not self.stop.is_set():

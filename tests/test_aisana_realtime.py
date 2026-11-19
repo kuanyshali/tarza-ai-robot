@@ -127,6 +127,15 @@ class LanguageAndSilenceTests(unittest.TestCase):
                         'name': 'stay_silent', 'arguments': '{}'})
         self.assertEqual(sent[-1]['type'], 'response.create')
 
+    def test_shout_request_with_command(self):
+        # Jetson log: "Вперёд 2 секунды и крикни «We»" only got "Еду вперёд."
+        self.assertEqual(rt.shout_request('Вперёд 2 секунды и крикни «We».'), 'We')
+        text = rt.confirm_instruction('Еду вперёд.', 'Вперёд 2 секунды и крикни «We».')
+        self.assertIn('"Еду вперёд"', text)
+        self.assertIn('"We!"', text)
+        self.assertIsNone(rt.shout_request('Айсана, вперёд'))
+        self.assertTrue(rt.has_wake_name('Асама, разведись.'))
+
     def test_tools_include_stay_silent(self):
         self.assertIn('stay_silent', [tool['name'] for tool in rt.tool_definitions()])
 

@@ -101,6 +101,10 @@ class ParserTests(unittest.TestCase):
         self.check('повели направо', 'spin_right', degrees=90)
         self.check('развернись на 360', 'spin_right', degrees=360)
         self.check('крутись на 270', 'spin_right', degrees=270)
+        # Jetson log: "Асама, разведись" (= Айсана, развернись); shout tail must not break parsing.
+        self.check('Асама, разведись.', 'spin_right', degrees=180)
+        self.check('Вперёд 2 секунды и крикни «We».', 'forward', seconds=2.0)
+        self.check('Айсана, развернись и кричи: «Вии!»', 'spin_right', degrees=180)
         self.check('поверни налево на 360 градусов', 'spin_left', degrees=360)
 
     def test_not_drive_commands(self):
@@ -170,11 +174,46 @@ class ControllerTests(unittest.TestCase):
 
     def test_obstacle_stop_is_reported(self):
         pi = FakePi(obstacle_after=0.2)
+        pi.get = lambda url, timeout=None: FakeResponse(
+            200, {'obstacle_stop': True, 'distance_1': 20.0} if 'sensor' in url else pi.status())
         problems = []
         legs_ctrl = controller(pi)
         legs_ctrl.drive(legs.make_intent('forward', seconds=3), problems.append)
         legs_ctrl._drive.join(3)
         self.assertIn('obstacle', problems[0])
+
+    def test_late_heartbeat_stop_resumes_silently(self):
+        # The Pi stops when a heartbeat is late; without an obstacle the drive continues.
+        pi = FakePi()
+        original = pi.post
+        state = {'beats': 0}
+
+        def flaky(url, json=None, timeout=None):
+            if url.endswith('/motor/heartbeat'):
+                state['beats'] += 1
+                if state['beats'] == 3:
+                    pi.command = 'stop'                       # Pi safety monitor fired
+            return original(url, json, timeout)
+        pi.post = flaky
+        pi.get = lambda url, timeout=None: FakeResponse(200, {'obstacle_stop': False} if 'sensor' in url
+                                                         else pi.status())
+        problems = []
+        legs_ctrl = controller(pi)
+        legs_ctrl.drive(legs.make_intent('forward', seconds=1.5), problems.append)
+        legs_ctrl._drive.join(4)
+        self.assertEqual(problems, [])                        # nothing spoken
+        self.assertEqual(pi.commands, ['forward', 'forward', 'stop'])   # resumed once
+
+    def test_real_obstacle_is_spoken_with_distance(self):
+        pi = FakePi(obstacle_after=0.2)
+        pi.get = lambda url, timeout=None: FakeResponse(
+            200, {'obstacle_stop': True, 'distance_1': 31.4, 'distance_2': None,
+                  'obstacle_status': 'STOP - OBSTACLE TOO CLOSE'} if 'sensor' in url else pi.status())
+        problems = []
+        legs_ctrl = controller(pi)
+        legs_ctrl.drive(legs.make_intent('forward', seconds=3), problems.append)
+        legs_ctrl._drive.join(4)
+        self.assertIn('obstacle ahead: 31 cm away', problems[0])
 
     def test_unreachable_pi_does_not_crash_execute(self):
         class DeadPi(object):
