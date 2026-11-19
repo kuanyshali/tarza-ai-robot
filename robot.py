@@ -1192,8 +1192,7 @@ def main():
                 try:
                     if arm is None:
                         raise RuntimeError('Arm controller not connected')
-                    print(arm.execute(arm_intent['action'], arm_intent['arm'],
-                                      arm_intent['position'], arm_intent['joint']))
+                    print(arm.execute(**arm_intent))
                     answer = arm_reply(arm_intent, language)
                 except Exception as error:
                     print('Arm command failed:', error)

@@ -11,8 +11,9 @@ class FakeArm(object):
         self.calls = []
         self.stopped = 0
 
-    def execute(self, action, arm='both', position=None, joint='whole'):
-        self.calls.append((action, arm, position, joint))
+    def execute(self, action, arm='both', position=None, joint='whole',
+                direction=None, degrees=None):
+        self.calls.append((action, arm, position, joint, direction, degrees))
         return 'Sent to the Arduino.'
 
     def emergency_stop(self):
@@ -111,13 +112,18 @@ class ToolTests(unittest.TestCase):
         for name in ('inspect_camera', 'move_arm', 'get_weather'):
             self.assertIn(name, names)
         arm_tool = [tool for tool in rt.tool_definitions() if tool['name'] == 'move_arm'][0]
-        self.assertEqual(arm_tool['parameters']['properties']['position']['maximum'], 4)
+        properties = arm_tool['parameters']['properties']
+        self.assertEqual(properties['position']['maximum'], 4)
+        self.assertIn('nudge', properties['action']['enum'])
+        self.assertEqual(properties['degrees']['maximum'], 45)
 
     def test_move_arm_goes_through_controller(self):
         session, _ = make_session()
         session.arm = FakeArm()
         result = session.run_tool('move_arm', {'action': 'position', 'arm': 'left', 'position': 3})
-        self.assertEqual(session.arm.calls, [('position', 'left', 3, 'whole')])
+        self.assertEqual(session.arm.calls, [('position', 'left', 3, 'whole', None, None)])
+        session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'direction': 'up', 'degrees': 5})
+        self.assertEqual(session.arm.calls[-1], ('nudge', 'right', None, 'whole', 'up', 5))
         self.assertIn('Arduino', result)
 
     def test_move_arm_without_usb_is_reported_not_faked(self):

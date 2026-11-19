@@ -42,7 +42,15 @@ class FakeSerial(object):
 def open_controller(fake):
     logs = []
     controller = arm.ArmController('/dev/ttyACM0', serial_factory=lambda port: fake,
-                                   ready_timeout=2, echo=False, log=logs.append)
+                                   ready_timeout=2, echo=0, log=logs.append)
+    controller.open()
+    return controller, logs
+
+
+def open_controller_with_echo(fake, echo):
+    logs = []
+    controller = arm.ArmController('/dev/ttyACM0', serial_factory=lambda port: fake,
+                                   ready_timeout=2, echo=echo, log=logs.append)
     controller.open()
     return controller, logs
 
@@ -66,6 +74,28 @@ class BuildCommandTests(unittest.TestCase):
             with self.subTest(args=args):
                 with self.assertRaises(arm.ArmError):
                     arm.build_command(*args)
+
+
+class NudgeCommandTests(unittest.TestCase):
+    def test_up_follows_each_joints_position_direction(self):
+        # Shoulders count up toward position 4; the right elbow counts DOWN.
+        self.assertEqual(arm.nudge_commands('right', 'shoulder', 'up', 5), ['r m r 5'])
+        self.assertEqual(arm.nudge_commands('left', 'shoulder', 'down', 10), ['l m r -10'])
+        self.assertEqual(arm.nudge_commands('right', 'elbow', 'up', 5), ['r s r -5'])
+        self.assertEqual(arm.nudge_commands('left', 'elbow', 'up', 5), ['l s r 5'])
+        self.assertEqual(arm.nudge_commands('both', 'elbow', 'up', 10), ['r s r -10', 'l s r 10'])
+        self.assertEqual(arm.nudge_commands('both', 'whole', 'up', 10), ['r m r 10', 'l m r 10'])
+
+    def test_direction_can_be_flipped(self):
+        self.assertEqual(arm.nudge_commands('right', 'shoulder', 'up', 5, up_toward_4=False), ['r m r -5'])
+
+    def test_nudge_limits(self):
+        for args in (('right', 'shoulder', 'up', 0), ('right', 'shoulder', 'up', 46),
+                     ('right', 'shoulder', 'sideways', 5), ('right', 'wrist', 'up', 5),
+                     ('right', 'shoulder', 'up', '5; x'), ('middle', 'shoulder', 'up', 5)):
+            with self.subTest(args=args):
+                with self.assertRaises(arm.ArmError):
+                    arm.nudge_commands(*args)
 
 
 class PortDetectionTests(unittest.TestCase):
@@ -132,6 +162,41 @@ class ControllerTests(unittest.TestCase):
         finally:
             controller.close()
 
+    def test_nudge_sends_one_command_per_arm(self):
+        fake = FakeSerial()
+        controller, _ = open_controller(fake)
+        try:
+            summary = controller.execute('nudge', 'both', None, 'elbow', 'up', 5)
+            self.assertEqual(fake.written, [b'r s r -5\n', b'l s r 5\n'])
+            self.assertIn('"r s r -5"', summary)
+        finally:
+            controller.close()
+
+    def test_positions_table_from_arduino_replaces_default(self):
+        fake = FakeSerial(boot_lines=(
+            b'Both arms ready.\n',
+            b'RIGHT stepper           \t167\t137\t107\t77\t47\tlimits 10-178\n'))
+        controller, _ = open_controller(fake)
+        try:
+            time.sleep(0.1)
+            self.assertEqual(controller.position_table[('right', 'shoulder')][0], 167.0)
+            controller.execute('nudge', 'right', None, 'shoulder', 'up', 5)
+            self.assertEqual(fake.written, [b'r m r -5\n'])
+        finally:
+            controller.close()
+
+    def test_console_shows_only_important_arduino_lines(self):
+        fake = FakeSerial(boot_lines=(
+            b'Both arms ready.\n', b'RIGHT stepper reached 77.48\n',
+            b'LEFT STEPPER STOPPED: joint outside limits.\n', b'RIGHT elbow -> 129.00\n'))
+        controller, logs = open_controller_with_echo(fake, 1)
+        try:
+            time.sleep(0.2)
+            arduino = [line for line in logs if line.startswith('Arduino:')]
+            self.assertEqual(arduino, ['Arduino: LEFT STEPPER STOPPED: joint outside limits.'])
+        finally:
+            controller.close()
+
     def test_status_reply_is_collected(self):
         fake = FakeSerial()
         controller, _ = open_controller(fake)
@@ -156,9 +221,11 @@ class ControllerTests(unittest.TestCase):
 
 
 class VoiceParserTests(unittest.TestCase):
-    def check(self, text, action, side='both', position=None, joint='whole'):
+    def check(self, text, action, side='both', position=None, joint='whole',
+              direction=None, degrees=None):
         self.assertEqual(arm.parse_arm_command(text),
-                         {'action': action, 'arm': side, 'position': position, 'joint': joint},
+                         {'action': action, 'arm': side, 'position': position, 'joint': joint,
+                          'direction': direction, 'degrees': degrees},
                          text)
 
     def test_positions(self):
@@ -177,12 +244,28 @@ class VoiceParserTests(unittest.TestCase):
         self.check('останови руки', 'stop')
         self.check('stop the arms', 'stop')
 
+    def test_relative_moves(self):
+        self.check('айсана рука чуть-чуть наверх', 'nudge', 'both', None, 'shoulder', 'up', 5)
+        self.check('подними правую руку немного', 'nudge', 'right', None, 'shoulder', 'up', 10)
+        self.check('опусти левую руку', 'nudge', 'left', None, 'shoulder', 'down', 15)
+        self.check('левый локоть чуть ниже', 'nudge', 'left', None, 'elbow', 'down', 5)
+        self.check('правую руку выше на 20 градусов', 'nudge', 'right', None, 'shoulder', 'up', 20)
+        self.check('raise the right arm a lot', 'nudge', 'right', None, 'shoulder', 'up', 30)
+        self.check('руки вверх на 90 градусов', 'nudge', 'both', None, 'shoulder', 'up', 45)
+        # A position number wins over "подними".
+        self.check('подними правую руку, позиция один', 'position', 'right', 1)
+
     def test_not_arm_commands(self):
         for text in ('что у меня в руке?', 'what am I holding in my hand?',
                      'открой окно', 'какая погода в Астане?', 'қолымда не бар?',
                      'расскажи про руки человека', ''):
             with self.subTest(text=text):
                 self.assertIsNone(arm.parse_arm_command(text))
+
+    def test_nudge_reply(self):
+        intent = arm.parse_arm_command('подними правую руку чуть-чуть')
+        self.assertEqual(arm.arm_reply(intent, 'Russian'), 'Поднимаю правую руку на 5°.')
+        self.assertIn('Lowering', arm.arm_reply(dict(intent, direction='down'), 'English'))
 
     def test_spoken_replies_in_all_languages(self):
         intent = {'action': 'position', 'arm': 'both', 'position': 2, 'joint': 'whole'}

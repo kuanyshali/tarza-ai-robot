@@ -85,16 +85,23 @@ def tool_definitions():
         {'type': 'function', 'name': 'move_arm',
          'description': ('Control your two physical 2-DOF robotic arms (shoulder stepper, elbow servo, gripper) '
                          'on the Arm team Arduino. Use ONLY when the user explicitly asks to move an arm, '
-                         'go to a numbered position, open/close a gripper, stop the arms, or report arm status. '
-                         'Positions are 0..4; 0 is the zero/home position.'),
+                         'go to a numbered position, move a little up or down, open/close a gripper, '
+                         'stop the arms, or report arm status. Positions are 0..4; 0 is the zero/home '
+                         'position. For relative requests (a bit higher, lower, чуть-чуть наверх) use '
+                         'action nudge with direction and degrees.'),
          'parameters': {'type': 'object', 'properties': {
-             'action': {'type': 'string', 'enum': ['position', 'gripper_open', 'gripper_close', 'stop', 'status']},
+             'action': {'type': 'string', 'enum': ['position', 'nudge', 'gripper_open', 'gripper_close', 'stop', 'status']},
              'arm': {'type': 'string', 'enum': ['right', 'left', 'both'],
                      'description': 'Use both when the user does not say which arm'},
              'position': {'type': 'integer', 'minimum': 0, 'maximum': 4,
                           'description': 'Required for action=position'},
              'joint': {'type': 'string', 'enum': ['whole', 'shoulder', 'elbow'],
-                       'description': 'whole = shoulder and elbow together (default)'}},
+                       'description': 'position: whole = shoulder and elbow together (default). '
+                                      'nudge: shoulder (default) or elbow'},
+             'direction': {'type': 'string', 'enum': ['up', 'down'], 'description': 'Required for action=nudge'},
+             'degrees': {'type': 'integer', 'minimum': 1, 'maximum': 45,
+                         'description': 'For nudge: чуть-чуть/slightly 5, немного/a bit 10, no amount 15, '
+                                        'сильно/a lot 30, or the number of degrees the user said'}},
              'required': ['action'], 'additionalProperties': False}},
         {'type': 'function', 'name': 'get_weather',
          'description': 'Live weather from Open-Meteo. Use for any weather or temperature question; never guess weather.',
@@ -156,9 +163,13 @@ PROMPT = (
     'never say the arm is moving before move_arm has returned. '
     'Call move_arm only when the user explicitly asks to move an arm, go to a numbered '
     'position, open or close a gripper, stop the arms or report their status. '
-    'Positions are numbered 0 to 4; 0 is the zero (home) position. If the user does not '
-    'say which arm, use both. If no position number is given, ask one short question '
-    'instead of guessing. When asked to stop the arms, call move_arm with action stop at once. '
+    'Positions are numbered 0 to 4; 0 is the zero (home) position; a higher number lifts the arm. '
+    'If the user does not say which arm, use both. '
+    'RELATIVE MOVES: "подними руку", "чуть-чуть наверх", "немного ниже", "a bit higher", "опусти" '
+    'are action nudge, direction up or down, joint shoulder unless the user mentions the elbow '
+    '(локоть). Degrees: чуть-чуть/slightly 5, немного/a bit 10, no amount 15, сильно/a lot 30, '
+    'or the number the user said (max 45). "Ещё" / "more" repeats the previous nudge. '
+    'When asked to stop the arms, call move_arm with action stop at once. '
     'After move_arm returns, confirm in a few words; if it failed, say so briefly. '
     'WEATHER: always call get_weather for weather; never guess. '
     'LIVE FACTS: call web_search for news, elections, results, prices and other changing facts. '
@@ -335,10 +346,15 @@ class RealtimeAisana(object):
             # Fail closed rather than analyzing a stale image if capture fails.
             if os.path.exists('photo.jpg'):
                 os.remove('photo.jpg')
-            subprocess.check_call(['/usr/bin/python3', 'camera.py'], timeout=20)
+            started = time.monotonic()
+            # GStreamer/Argus print ~30 lines per photo; show them only on failure.
+            capture = subprocess.run(['/usr/bin/python3', 'camera.py'], stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, timeout=20)
+            if capture.returncode != 0 or not os.path.exists('photo.jpg'):
+                tail = capture.stdout.decode('utf-8', 'replace').strip().splitlines()[-8:]
+                raise RuntimeError('camera.py failed: ' + ' | '.join(tail))
             with open('photo.jpg', 'rb') as photo:
                 encoded = base64.b64encode(photo.read()).decode('ascii')
-        print('Vision: sending JPEG ({} KB)'.format(len(encoded) * 3 // 4 // 1024))
         response = requests.post(
             'https://api.openai.com/v1/chat/completions',
             headers={'Authorization': 'Bearer ' + KEY},
@@ -349,6 +365,8 @@ class RealtimeAisana(object):
                           'Inspect the attached image and describe only what is visible. '
                           'Do not claim you cannot access images or ask the user to describe it. '
                           'If the image is dark, blurry or unclear, describe what you can see and note the limitation. '
+                          'Answer in at most two short sentences, most noticeable things first. '
+                          'Never ask the user questions and never offer further help. '
                           'Answer in the language of the user question.')},
                       {'role': 'user', 'content': [
                       {'type': 'text', 'text': (
@@ -363,8 +381,9 @@ class RealtimeAisana(object):
         response.raise_for_status()
         data = response.json()
         choice = data['choices'][0]
-        print('Vision: finish_reason={}, usage={}'.format(
-            choice.get('finish_reason'), data.get('usage', {})))
+        print('Camera: photo {} KB, answered in {:.1f}s ({} tokens)'.format(
+            len(encoded) * 3 // 4 // 1024, time.monotonic() - started,
+            data.get('usage', {}).get('total_tokens', '?')))
         content = choice.get('message', {}).get('content')
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError('Vision returned empty content (finish_reason={})'.format(
@@ -375,14 +394,14 @@ class RealtimeAisana(object):
         """Execute one tool call; every result is plain text for the model."""
         if name == 'inspect_camera':
             question = str(args.get('question') or 'What is visible?')[:500]
-            print('Camera: capturing fresh frame for', question)
             return self.inspect_camera(question)
         if name == 'move_arm':
             if self.arm is None:
                 return ('The arm controller (Arduino Mega) is not connected over USB. '
                         'Tell the user briefly; do not pretend the arm moved.')
             return self.arm.execute(args.get('action'), args.get('arm') or 'both',
-                                    args.get('position'), args.get('joint') or 'whole')
+                                    args.get('position'), args.get('joint') or 'whole',
+                                    args.get('direction'), args.get('degrees'))
         if name == 'get_weather':
             city = str(args.get('city') or '').strip()[:60]
             phrase = 'weather' + (' in ' + city if city else '')
@@ -408,12 +427,11 @@ class RealtimeAisana(object):
     def handle_tool_call(self, call_id, name, arguments):
         try:
             args = json.loads(arguments or '{}')
-            print('Tool:', name, args)
             result = self.run_tool(name, args)
-            print('Tool result:', result)
+            print('Tool {} {} -> {}'.format(name, args, ' '.join(str(result).split())[:300]))
         except Exception as exc:
             result = 'Tool {} failed: {}. Say briefly that it did not work; do not invent a result.'.format(name, exc)
-            print(result)
+            print('Tool {} FAILED: {}'.format(name, exc))
         if self.stop.is_set():
             return
         try:
@@ -423,6 +441,7 @@ class RealtimeAisana(object):
                 'The tool has returned. Answer the user NOW, in first person as Aisana, '
                 'using its result. No commentary about tools, photos or analysis. '
                 'One or two short sentences in the language of the user question. '
+                'No filler, no wishes, no offers of more help, no follow-up questions. '
                 'If the tool failed, say briefly that it did not work.') }})
         except Exception as exc:
             if not self.stop.is_set():
@@ -457,7 +476,6 @@ class RealtimeAisana(object):
             print('Realtime session ready. Talk to Aisana (Ctrl+C to stop).')
         elif typ == 'input_audio_buffer.speech_started':
             self.speech_started_at = time.monotonic()
-            print('You: speaking...')
             if BARGE_IN and (self.responding or self.playing):
                 self.playback_interrupted = True
                 self.stop_playback()
@@ -472,14 +490,11 @@ class RealtimeAisana(object):
             self.echo_guard_active = True
             if not self.playback_interrupted:
                 self.queue_audio('audio', base64.b64decode(e.get('delta', '')))
-        elif typ == 'response.output_audio_transcript.delta':
-            if not self.transcript_open:
-                self.transcript_open = True
-                print('Aisana: ', end='', flush=True)
-            print(e.get('delta', ''), end='', flush=True)
         elif typ == 'response.output_audio_transcript.done':
-            self.transcript_open = False
-            print('')
+            # One clean console line per reply (audio itself still streams).
+            text = ' '.join((e.get('transcript') or '').split())
+            if text:
+                print('Aisana:', text)
         elif typ == 'input_audio_buffer.committed':
             # Inside an open dialogue answer at once, without waiting for STT.
             if WAKE_GATE and self.dialog_active():

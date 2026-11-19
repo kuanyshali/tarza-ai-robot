@@ -12,7 +12,10 @@ and the user must be in the dialout group (sudo usermod -aG dialout $USER).
 Environment:
     AISANA_ARM=0             disable the arm link completely (default 1)
     AISANA_ARM_PORT=/dev/... use this serial port instead of auto-detection
-    AISANA_ARM_ECHO=0        do not print Arduino output to the console
+    AISANA_ARM_ECHO=1        print only important Arduino lines (default);
+                             0 = nothing, 2 = everything (debugging)
+    AISANA_ARM_UP=position4  "up" means toward position 4 (default);
+                             set position0 if the arms move the wrong way
 """
 import collections
 import os
@@ -24,7 +27,22 @@ BAUD = 115200
 READY_TEXT = 'Both arms ready'
 ARM_LETTERS = {'right': 'r', 'left': 'l', 'both': 'b'}
 JOINT_LETTERS = {'whole': '', 'shoulder': 'm', 'elbow': 's'}
-ACTIONS = ('position', 'gripper_open', 'gripper_close', 'stop', 'status')
+ACTIONS = ('position', 'nudge', 'gripper_open', 'gripper_close', 'stop', 'status')
+MAX_NUDGE_DEGREES = 45
+# Pot readings of positions 0..4 from robotic_arms_Niyazbek_3.8.ino. Replaced at
+# runtime by the table the Arduino prints at start-up ("POSITIONS (pot readings)").
+DEFAULT_POSITION_TABLE = {
+    ('right', 'shoulder'): (47, 77, 107, 137, 167),
+    ('right', 'elbow'): (159, 129, 99, 69, 39),
+    ('left', 'shoulder'): (52, 82, 112, 142, 172),
+    ('left', 'elbow'): (144, 174, 204, 234, 264),
+}
+TABLE_LINE = re.compile(
+    r'^(RIGHT|LEFT)\s+(stepper|elbow)\s+((?:\S+\s+){5})limits', re.I)
+# Arduino lines worth showing at AISANA_ARM_ECHO=1 (errors and safety only).
+IMPORTANT_LINE = re.compile(
+    r'STOPPED|EMERGENCY|limit|not set|feedback is OFF|can\'t|cannot|calibrat|'
+    r'wrong way|outside|!!|doesn\'t match', re.I)
 # USB vendor IDs: genuine Arduino boards, then common clone USB-serial chips.
 GENUINE_ARDUINO_VIDS = (0x2341, 0x2A03)
 CLONE_SERIAL_VIDS = (0x1A86, 0x0403, 0x10C4)
@@ -75,6 +93,44 @@ def _describe(port):
         ', VID {:04x}'.format(vid) if vid is not None else '')
 
 
+def nudge_commands(arm, joint, direction, degrees, table=None, up_toward_4=True):
+    """Relative move of one joint: "up" = toward position 4 of that joint.
+
+    The firmware's "m r <deg>" / "s r <deg>" move a joint relative to its
+    target in pot degrees and clamp to its limits. Elbows are mirrored
+    (right counts down, left up), so each arm gets its own sign.
+    """
+    table = table or DEFAULT_POSITION_TABLE
+    if direction not in ('up', 'down'):
+        raise ArmError('Direction must be up or down, got {!r}'.format(direction))
+    joint = 'shoulder' if joint in (None, '', 'whole') else joint
+    if joint not in ('shoulder', 'elbow'):
+        raise ArmError('Unknown joint: {!r}'.format(joint))
+    try:
+        amount = int(degrees)
+    except (TypeError, ValueError):
+        raise ArmError('Degrees must be 1..{}, got {!r}'.format(MAX_NUDGE_DEGREES, degrees))
+    if amount < 1 or amount > MAX_NUDGE_DEGREES or str(amount) != str(degrees).strip():
+        raise ArmError('Degrees must be 1..{}, got {!r}'.format(MAX_NUDGE_DEGREES, degrees))
+    if arm == 'both':
+        sides = ('right', 'left')
+    elif arm in ('right', 'left'):
+        sides = (arm,)
+    else:
+        raise ArmError('Unknown arm: {!r}'.format(arm))
+    commands = []
+    for side in sides:
+        positions = table[(side, joint)]
+        sign = 1 if positions[4] > positions[0] else -1
+        if not up_toward_4:
+            sign = -sign
+        if direction == 'down':
+            sign = -sign
+        commands.append('{} {} r {}'.format(ARM_LETTERS[side], 'm' if joint == 'shoulder' else 's',
+                                            sign * amount))
+    return commands
+
+
 def find_arduino_port(ports=None, environ=None):
     """Return exactly one Arduino serial port; never guess between equals.
 
@@ -114,7 +170,7 @@ class ArmController(object):
     """Owns the serial port; a background thread reads Arduino output."""
 
     def __init__(self, port, serial_factory=None, ready_timeout=15.0,
-                 echo=True, log=print):
+                 echo=1, log=print, up_toward_4=True):
         self.port = port
         self._factory = serial_factory
         self._serial = None
@@ -126,7 +182,9 @@ class ArmController(object):
         self._stop = threading.Event()
         self._reader = None
         self.ready_timeout = ready_timeout
-        self.echo = echo
+        self.echo = int(echo)
+        self.up_toward_4 = up_toward_4
+        self.position_table = dict(DEFAULT_POSITION_TABLE)
         self.log = log
 
     def open(self):
@@ -175,7 +233,16 @@ class ArmController(object):
         with self._lines_lock:
             self._sequence += 1
             self._lines.append((self._sequence, line))
-        if self.echo:
+        table = TABLE_LINE.match(line)
+        if table:
+            values = table.group(3).split()
+            joint = 'shoulder' if table.group(2).lower() == 'stepper' else 'elbow'
+            try:
+                if '-' not in (values[0], values[4]):
+                    self.position_table[(table.group(1).lower(), joint)] = tuple(float(v) for v in values)
+            except ValueError:
+                pass
+        if self.echo >= 2 or (self.echo == 1 and IMPORTANT_LINE.search(line)):
             self.log('Arduino: ' + line)
         if READY_TEXT in line and not self.ready.is_set():
             self.ready.set()
@@ -196,18 +263,25 @@ class ArmController(object):
         with self._write_lock:
             self._serial.write((command + '\n').encode('ascii'))
             self._serial.flush()
-        self.log('Arm command: ' + command)
+        if self.echo >= 2:
+            self.log('Arm command: ' + command)
         if collect_seconds > 0:
             time.sleep(collect_seconds)
         return self._lines_after(start)
 
-    def execute(self, action, arm='both', position=None, joint='whole'):
+    def execute(self, action, arm='both', position=None, joint='whole',
+                direction=None, degrees=None):
         """Run an intent; returns a short English summary for the model/logs."""
-        command = build_command(action, arm, position, joint)
-        lines = self.send(command, collect_seconds=0.6 if action == 'status' else 0.15)
-        problems = [line for line in lines if re.search(
-            r'STOPPED|not set|OFF|limit|can\'t|cannot', line, re.I)]
-        summary = 'Sent "{}" to the Arduino.'.format(command)
+        if action == 'nudge':
+            commands = nudge_commands(arm, joint, direction, degrees,
+                                      self.position_table, self.up_toward_4)
+        else:
+            commands = [build_command(action, arm, position, joint)]
+        lines = []
+        for command in commands:
+            lines.extend(self.send(command, collect_seconds=0.6 if action == 'status' else 0.15))
+        problems = [line for line in lines if IMPORTANT_LINE.search(line)]
+        summary = 'Sent {} to the Arduino.'.format(', '.join('"{}"'.format(c) for c in commands))
         if action == 'status':
             summary += ' Status: ' + ' | '.join(lines[-6:]) if lines else ' No status reply yet.'
         elif problems:
@@ -229,7 +303,12 @@ def connect_from_environment(log=print, environ=None):
         return None
     try:
         port = find_arduino_port(environ=environ)
-        controller = ArmController(port, echo=environ.get('AISANA_ARM_ECHO', '1') == '1', log=log)
+        try:
+            echo = int(environ.get('AISANA_ARM_ECHO', '1'))
+        except ValueError:
+            echo = 1
+        controller = ArmController(port, echo=echo, log=log,
+                                   up_toward_4=environ.get('AISANA_ARM_UP', 'position4') != 'position0')
         return controller.open()
     except ImportError:
         log('Arm: pyserial is missing; run python3 -m pip install --user "pyserial==3.5".')
@@ -264,6 +343,29 @@ RIGHT_WORDS = re.compile(r'(?:прав\w*|\bright\b|\bоң\w*|يمين|اليم�
 LEFT_WORDS = re.compile(r'(?:лев\w*|\bleft\b|\bсол\b|شمال|يسار|اليسار)', re.I)
 SHOULDER_WORDS = re.compile(r'(?:плеч\w*|shoulder|stepper|шаговик\w*|иық\w*)', re.I)
 ELBOW_WORDS = re.compile(r'(?:локт\w*|локоть|elbow|шынтақ\w*|كوع)', re.I)
+UP_WORDS = re.compile(
+    r'(?:наверх|вверх|выше|подними|подыми|приподними|подняй|\bup\b|\braise\b|\bhigher\b|'
+    r'\blift\b|жоғары|көтер\w*|فوق|ارفع)', re.I)
+DOWN_WORDS = re.compile(
+    r'(?:вниз|ниже|опусти|\bdown\b|\blower\b|төмен|түсір\w*|تحت|نزل)', re.I)
+DEGREES = re.compile(r'(\d{1,2})\s*(?:градус\w*|°|degrees?|deg\b|درج\w*)', re.I)
+TINY = re.compile(r'(?:чуть|слегка|капельку|чуточку|slightly|a little|a tiny|tiny|кішкене|сәл|شوية صغيرين)', re.I)
+SMALL = re.compile(r'(?:немного|немножко|a bit|bit\b|аздап|شوية)', re.I)
+LARGE = re.compile(r'(?:сильно|намного|гораздо|максимально|a lot|much|far|қатты|كتير)', re.I)
+
+
+def nudge_amount(text):
+    """чуть-чуть = 5, немного = 10, no amount = 15, сильно = 30; explicit degrees win."""
+    explicit = DEGREES.search(text)
+    if explicit:
+        return max(1, min(MAX_NUDGE_DEGREES, int(explicit.group(1))))
+    if TINY.search(text):
+        return 5
+    if SMALL.search(text):
+        return 10
+    if LARGE.search(text):
+        return 30
+    return 15
 
 
 def _position_number(text):
@@ -277,8 +379,13 @@ def _position_number(text):
     return None
 
 
+def _intent(action, arm='both', position=None, joint='whole', direction=None, degrees=None):
+    return {'action': action, 'arm': arm, 'position': position, 'joint': joint,
+            'direction': direction, 'degrees': degrees}
+
+
 def parse_arm_command(text):
-    """Return {'action', 'arm', 'position', 'joint'} or None if not an arm command."""
+    """Return an intent dict (action, arm, position, joint, direction, degrees) or None."""
     q = ' '.join((text or '').casefold().split())
     if not q or not ARM_WORDS.search(q):
         return None
@@ -289,7 +396,7 @@ def parse_arm_command(text):
     else:
         arm = 'both'                    # "руки", "обе руки", or both sides named
     if STOP_WORDS.search(q):
-        return {'action': 'stop', 'arm': 'both', 'position': None, 'joint': 'whole'}
+        return _intent('stop')
     number = _position_number(q)
     if number is not None:
         joint = 'whole'
@@ -297,11 +404,15 @@ def parse_arm_command(text):
             joint = 'shoulder'
         elif ELBOW_WORDS.search(q) and not SHOULDER_WORDS.search(q):
             joint = 'elbow'
-        return {'action': 'position', 'arm': arm, 'position': number, 'joint': joint}
+        return _intent('position', arm, number, joint)
     if OPEN_WORDS.search(q):
-        return {'action': 'gripper_open', 'arm': arm, 'position': None, 'joint': 'whole'}
+        return _intent('gripper_open', arm)
     if CLOSE_WORDS.search(q):
-        return {'action': 'gripper_close', 'arm': arm, 'position': None, 'joint': 'whole'}
+        return _intent('gripper_close', arm)
+    up, down = UP_WORDS.search(q), DOWN_WORDS.search(q)
+    if bool(up) != bool(down):
+        joint = 'elbow' if ELBOW_WORDS.search(q) and not SHOULDER_WORDS.search(q) else 'shoulder'
+        return _intent('nudge', arm, None, joint, 'up' if up else 'down', nudge_amount(q))
     return None
 
 
@@ -331,6 +442,15 @@ def arm_reply(intent, language='Russian', error=None):
     if action == 'status':
         return {'Russian': 'Статус рук выведен в консоль.', 'Kazakh': 'Қолдардың күйі консольде.',
                 'Egyptian Arabic': 'حالة الإيدين في الكونسول.', 'English': 'Arm status is in the console.'}[language]
+    if action == 'nudge':
+        up = intent.get('direction') == 'up'
+        degrees = intent.get('degrees')
+        return {
+            'Russian': '{} {} на {}°.'.format('Поднимаю' if up else 'Опускаю', side, degrees),
+            'Kazakh': '{} {}° {}.'.format(side.capitalize(), degrees, 'көтеремін' if up else 'түсіремін'),
+            'Egyptian Arabic': '{} {} {} درجات.'.format('بعلّي' if up else 'بنزّل', side, degrees),
+            'English': '{} {} by {} degrees.'.format('Raising' if up else 'Lowering', side, degrees),
+        }[language]
     if action == 'position':
         number = intent['position']
         return {
