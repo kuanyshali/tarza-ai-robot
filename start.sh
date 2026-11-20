@@ -18,4 +18,19 @@ if pgrep -f "$PATTERN" >/dev/null; then
     exit 1
 fi
 
+# One command for the day: if the wheels need calibrating (ODrive was just
+# powered on), offer it first; it still asks to lift the robot.
+legs="$(curl -s --max-time 3 "$AISANA_LEGS_URL/motor/status")"
+case "$legs" in
+    *alibrat*)
+        echo "The wheels need calibrating."
+        if ./calibrate_legs.sh; then
+            read -r -p "Robot back on the floor? Press Enter to start Aisana. " _
+        else
+            echo "Starting without wheels; run ./calibrate_legs.sh later."
+        fi ;;
+    "")
+        echo "Legs Pi at $AISANA_LEGS_URL does not answer; starting without wheels." ;;
+esac
+
 .venv/bin/python -u aisana_realtime.py 2>&1 | tee realtime.log
