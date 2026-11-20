@@ -604,11 +604,17 @@ class FaceMemoryRealtimeTests(unittest.TestCase):
         session.inspect_camera = lambda question, detail=None, quiet=False: looks.append(question) or 'Вижу человека.'
         session.handle({'type': 'input_audio_buffer.speech_started'})
         time.sleep(0.1)
+        self.assertEqual(looks, [])                          # strangers talking: no paid look
+        session.dialog_until = time.monotonic() + 10
+        session.prefetch_at = 0
+        session.handle({'type': 'input_audio_buffer.speech_started'})
+        time.sleep(0.1)
         self.assertEqual(len(looks), 1)                      # started before the words arrived
         say(session, 'pf1', 'Айсана, кто перед тобой?')
         self.wait_for(sent, 'FIRST PERSON')
         self.assertEqual(len(looks), 1)                      # no second look
         session.prefetch_at = 0
+        session.dialog_until = time.monotonic() + 10
         session.handle({'type': 'input_audio_buffer.speech_started'})
         time.sleep(0.1)
         say(session, 'pf2', 'Айсана, прочитай что тут написано')

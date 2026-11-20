@@ -1188,8 +1188,10 @@ class RealtimeAisana(object):
         """Look while the user is still speaking: "кто перед тобой?" is then
         answered about 2.5 s sooner (the vision call is already done)."""
         now = time.monotonic()
+        # Only inside a conversation: in a noisy room every stranger's sentence
+        # started a paid vision call (~3100 tokens) that nobody used.
         if (not CAMERA_PREFETCH or self.camera_stream is None or self.motion_active()
-                or now - self.prefetch_at < 3):
+                or not self.dialog_active() or now - self.prefetch_at < 3):
             return
         self.prefetch_at = now
         box = {'done': threading.Event(), 'text': None}
