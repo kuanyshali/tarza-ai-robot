@@ -537,6 +537,8 @@ class RealtimeAisana(object):
         self.pending_face = None            # "запомни меня" without a name: waits for it
         self.ready = False                  # session.updated received
         self.stt_model = STT_MODEL
+        self.arm_retry_at = -1e9
+        self.on_arm_connected = None        # main() keeps a reconnected arm for later sessions
         self.spotter = None                 # wake_listener.WakeSpotter (AISANA_LOCAL_WAKE=1)
         self.stream_until = 0.0
         self.history = aisana_memory if aisana_memory.ENABLED else None   # tests set None
@@ -1416,6 +1418,19 @@ class RealtimeAisana(object):
                     self.say_phrase('{} (you know them) just came into view.'.format(name), 'greet', name)
                     break
 
+    def reconnect_arm(self):
+        """The Arduino was missing or busy at start (Jetson log, Nov 20: "the arm
+        controller is not connected"): try again when an arm command comes,
+        at most every 15 s. Opening the port resets the board (~3 s)."""
+        now = time.monotonic()
+        if now - self.arm_retry_at < 15:
+            return
+        self.arm_retry_at = now
+        print('Arm: not connected; trying again...')
+        self.arm = connect_from_environment()
+        if self.arm is not None and self.on_arm_connected is not None:
+            self.on_arm_connected(self.arm)
+
     def motion_active(self):
         return time.monotonic() < self.motion_until
 
@@ -1578,6 +1593,8 @@ class RealtimeAisana(object):
             try:
                 if arm_intents:
                     if self.arm is None:
+                        self.reconnect_arm()
+                    if self.arm is None:
                         result = 'NOT done: the arm controller is not connected over USB.'
                     else:
                         self.arm.execute_many(arm_intents, verify=False)
@@ -1735,6 +1752,8 @@ class RealtimeAisana(object):
                 self.queue_audio('done')
         elif typ == 'error':
             error = e.get('error', {}) or {}
+            if error.get('code') == 'response_cancel_not_active':
+                return                          # harmless: the reply had already ended
             print('Realtime API error:', error)
             if re.search(r'transcri', str(error), re.I):
                 self.stt_fallback(str(error))
@@ -1855,6 +1874,8 @@ def main():
             started = time.monotonic()
             session = RealtimeAisana()
             session.arm, session.legs = arm, legs
+            holder = {}
+            session.on_arm_connected = lambda link: holder.setdefault('arm', link)
             session.camera_stream, session.faces = camera, faces
             session.spotter = spotter
             try:
@@ -1864,6 +1885,7 @@ def main():
                 raise
             except Exception as exc:
                 problem = str(exc) or exc.__class__.__name__
+            arm = holder.get('arm', arm)
             if not KEY or websocket is None:
                 raise RuntimeError(problem)
             delay = 2 if time.monotonic() - started > 60 else min(30, delay * 2)

@@ -453,6 +453,43 @@ class FakeHistory(object):
         self.cleared = True
 
 
+class ArmReconnectTests(unittest.TestCase):
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_arm_link_is_retried_when_a_command_comes(self):
+        # Jetson log, Nov 20: "NOT done: the arm controller is not connected over USB."
+        session, sent = make_session()
+        session.arm = None
+        arm = FakeArm()
+        kept = []
+        session.on_arm_connected = kept.append
+        original = rt.connect_from_environment
+        rt.connect_from_environment = lambda: arm
+        try:
+            say(session, 'a1', 'Айсана, правую руку, позиция один.')
+            deadline = time.time() + 3
+            while not arm.calls and time.time() < deadline:
+                time.sleep(0.02)
+        finally:
+            rt.connect_from_environment = original
+        self.assertIs(session.arm, arm)
+        self.assertEqual(kept, [arm])
+        self.assertTrue(arm.calls)
+
+    def test_harmless_cancel_error_is_not_printed(self):
+        session, _ = make_session()
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            session.handle({'type': 'error', 'error': {'code': 'response_cancel_not_active', 'message': 'x'}})
+        self.assertEqual(out.getvalue(), '')
+
+
 class LocalWakeTests(unittest.TestCase):
     def test_cloud_hears_only_after_the_name_or_inside_a_conversation(self):
         session, _ = make_session()
