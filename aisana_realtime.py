@@ -261,6 +261,28 @@ def language_of(text):
 SANA_START = re.compile(r'(?:^|[.!?…]\s*)\W*сана(?:\s*[,!]|\s+(?=\w))', re.I)
 
 
+NAME_AT = re.compile(
+    r'(?<!\w)(?:айсан\w*|айсон\w*|эйсан\w*|асан[аеуы]\b|асама\b|айсама\b|айсам\b|асына\b|сана\b|'
+    r'aisan\w*|aysan\w*|aissan\w*|آيسان\w*|ايسان\w*|أيسان\w*|عيسان\w*|إيسان\w*)', re.I)
+
+
+def request_part(text):
+    """Only the words from her name on, when other talk came before it.
+
+    Jetson log, Nov 20: "Сегодня тачку пригнал с кореи. Айсана, как у тебя дела?"
+    and she answered the car story too. Cut only at a sentence end before the
+    name and only if words follow it: "Скажи, Айсана, ..." and "Как дела, Айсана?"
+    stay whole."""
+    text = text or ''
+    for match in NAME_AT.finditer(text):
+        before, after = text[:match.start()], text[match.end():]
+        if not re.search(r'\w', before):
+            return text                              # the name is already first
+        if re.search(r'[.!?…]\s*$', before) and re.search(r'\w', after) and has_wake_name(text[match.start():]):
+            return text[match.start():]
+    return text
+
+
 def has_wake_name(text):
     """True if the user addresses Aisana: at the start or anywhere as "Айсана"."""
     text = (text or '').strip().casefold()
@@ -570,6 +592,29 @@ class RealtimeAisana(object):
                 'tool_choice': {'type': 'function', 'name': force_tool or 'move_arm'}}})
         else:
             self.send({'type': 'response.create'})
+
+    def answer_request_only(self, item_id, request):
+        """Replace the heard audio (with other people's talk before her name) by
+        just the request as text, then answer that."""
+        with self.arm_lock:
+            self.local_items.add(item_id)            # any reply to the full audio is cut
+            self.responded_items.add(item_id)
+        self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+        self.cancel_reply()
+
+        def worker():
+            deadline = time.monotonic() + 4
+            while self.responding and time.monotonic() < deadline and not self.stop.is_set():
+                time.sleep(0.05)
+            try:
+                self.send({'type': 'conversation.item.delete', 'item_id': item_id})
+                self.send({'type': 'conversation.item.create', 'item': {
+                    'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': request}]}})
+                self.send({'type': 'response.create', 'response': {'metadata': OWN}})
+            except Exception as exc:
+                if not self.stop.is_set():
+                    print('Reply error:', exc)
+        threading.Thread(target=worker, daemon=True).start()
 
     def wait_transcript(self, item_id, timeout=3.0):
         """Transcript of a user turn; None if STT did not deliver in time."""
@@ -1486,6 +1531,11 @@ class RealtimeAisana(object):
                 self.cancel_reply()
             self.ignore_item(item_id)
             return
+        full = transcript
+        transcript = request_part(transcript)
+        trimmed = transcript != full
+        if trimmed:
+            print('Before her name (ignored): ' + full[:len(full) - len(transcript)].strip())
         arm_intents = parse_arm_commands(transcript)
         drive = None if arm_intents else parse_legs_command(transcript)
         if not arm_intents and drive is None and REPEAT_RE.search(transcript) and self.last_drive \
@@ -1559,6 +1609,11 @@ class RealtimeAisana(object):
             if held:
                 self.release_hold(drop=True)
             self.run_camera_locally(item_id, transcript)
+            return
+        if trimmed and addressed and not stop:
+            if held:
+                self.release_hold(drop=True)
+            self.answer_request_only(item_id, transcript)
             return
         if held:
             self.release_hold(drop=False)              # an ordinary question: play the answer

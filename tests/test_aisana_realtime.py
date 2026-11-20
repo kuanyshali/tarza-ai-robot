@@ -453,6 +453,44 @@ class FakeHistory(object):
         self.cleared = True
 
 
+class BackgroundTalkTests(unittest.TestCase):
+    """Jetson log, Nov 20: Сегодня тачку пригнал с кореи. Айсана, как у тебя дела?"""
+
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_only_words_from_her_name_on(self):
+        self.assertEqual(rt.request_part('Сегодня тачку пригнал с кореи. Айсана, как у тебя дела?'),
+                         'Айсана, как у тебя дела?')
+        for text in ('Скажи, Айсана, какая погода', 'Как у тебя дела, Айсана?', 'Окей, Айсана, вперёд',
+                     'Ну короче. Айсана.', 'Это моя подруга Сана из группы. Пошли.'):
+            self.assertEqual(rt.request_part(text), text)
+
+    def test_she_answers_only_the_request(self):
+        session, sent = make_session()
+        say(session, 'b1', 'Сегодня тачку пригнал с кореи. Айсана, как у тебя дела?')
+        deadline = time.time() + 3
+        while not any(m.get('type') == 'response.create' for m in sent) and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertIn({'type': 'conversation.item.delete', 'item_id': 'b1'}, sent)
+        text = [m for m in sent if m['type'] == 'conversation.item.create'][-1]['item']['content'][0]['text']
+        self.assertEqual(text, 'Айсана, как у тебя дела?')
+        self.assertEqual(sent[-1]['response']['metadata'], rt.OWN)
+        self.assertNotIn('tool_choice', sent[-1]['response'])     # weather/camera tools still allowed
+
+    def test_command_after_background_talk_ignores_the_talk(self):
+        session, sent = make_session()
+        legs = FakeLegs()
+        session.legs = legs
+        say(session, 'b2', 'Вчера поворот проехали. Айсана, как дела?')
+        time.sleep(0.2)
+        self.assertEqual(legs.intents, [])                           # "поворот" before her name never drives
+
+
 class ArmReconnectTests(unittest.TestCase):
     def setUp(self):
         self.original = rt.WAKE_GATE
