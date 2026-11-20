@@ -182,6 +182,7 @@ wget -c https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip && unzi
 | `AISANA_REALTIME_MODEL` | `gpt-realtime-2.1-mini` | Модель realtime |
 | `AISANA_REALTIME_VOICE` | `marin` | Голос: `shimmer`, `coral`, `sage`, `marin` — женские; `alloy`, `ballad`, `verse`, `ash`, `echo`, `cedar` |
 | `AISANA_REALTIME_STT_MODEL` | `gpt-transcribe` | Распознавание речи; если ключ его не поддерживает, сама переходит на `gpt-4o-mini-transcribe` |
+| `AISANA_MIC_LABEL` | `KT USB Audio` | Имя микрофона из `arecord -l`; для ReSpeaker: `ReSpeaker` |
 | `AISANA_MIC_GAIN` | `1.0` | Программное усиление микрофона (например `2.0`) |
 | `AISANA_MIC_LEVEL` | `0` | `1` — раз в секунду печатать громкость микрофона |
 | `AISANA_VAD_THRESHOLD` | `0.5` | Ниже (0.3–0.4) — слышит тише, но и шум тоже |

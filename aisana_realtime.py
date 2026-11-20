@@ -54,6 +54,9 @@ KEY = os.environ.get('OPENAI_API_KEY')
 # transcription (uses earlier turns as context). Falls back by itself if refused.
 STT_MODEL = os.environ.get('AISANA_REALTIME_STT_MODEL', 'gpt-transcribe')
 STT_FALLBACK = 'gpt-4o-mini-transcribe'
+# ALSA label of the microphone (arecord -l); still exactly one device, no fallback.
+# For the ReSpeaker USB Mic Array: AISANA_MIC_LABEL=ReSpeaker
+MIC_LABEL = os.environ.get('AISANA_MIC_LABEL', 'KT USB Audio')
 MIC_GAIN = float(os.environ.get('AISANA_MIC_GAIN', '1.0'))          # software gain, e.g. 2.0
 MIC_LEVEL = os.environ.get('AISANA_MIC_LEVEL', '0') == '1'           # print loudness once a second
 VAD_THRESHOLD = float(os.environ.get('AISANA_VAD_THRESHOLD', '0.5'))  # lower = hears quieter speech
@@ -1771,7 +1774,7 @@ class RealtimeAisana(object):
             raise RuntimeError('OPENAI_API_KEY is missing')
         if websocket is None:
             raise RuntimeError('Realtime mode needs websocket-client: python3 -m pip install --user "websocket-client==1.3.1"')
-        self.mic_device = alsa_device('arecord', 'KT USB Audio', 'KT microphone')
+        self.mic_device = alsa_device('arecord', MIC_LABEL, 'microphone ' + MIC_LABEL)
         self.speaker = alsa_device('aplay', 'USB Composite Device', 'Xiaomi speaker')
         self.shouts.speaker = self.speaker
         print('Input:', self.mic_device, 'Output:', self.speaker)
