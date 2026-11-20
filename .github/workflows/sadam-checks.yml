@@ -1,4 +1,4 @@
-name: Sadam code checks
+name: Aisana code checks
 on:
   push:
     branches: [main]
@@ -11,7 +11,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt vermin numpy
       - name: Compile robot code
-        run: python -m py_compile robot.py sadam_features.py wake_listener.py
+        run: python -m py_compile *.py
+      - name: Jetson Nano runs Python 3.6 - no newer syntax allowed
+        run: vermin -t=3.6- --no-tips --violations *.py tests/*.py
       - name: Offline unit tests
         run: python -m unittest discover -s tests -v

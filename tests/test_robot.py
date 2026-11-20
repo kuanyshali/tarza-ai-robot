@@ -43,13 +43,15 @@ class FakeResponse:
 
 class RobotTests(unittest.TestCase):
     def setUp(self):
-        words = ('садам', 'саддам', 'sadam', 'saddam', 'صدام', 'سدام', 'садом', 'саднам', 'سعدتم')
+        words = ('айсана', 'эйсана', 'айсанаа', 'aisana', 'aysana', 'aissana',
+                 'aisanna', 'aysanna', 'آيسانا', 'ايسانا', 'أيسانا', 'عيسانا', 'إيسانا')
         self.wake = isolated('wake_question', re=re, WAKE_CANDIDATES=words)
 
     def test_wake_name_variants(self):
-        for phrase in ('Садам, что ты видишь?', 'Садом, что ты видишь?',
-                       'Саднам, что у меня в руке?', 'صدام، شايف إيه؟',
-                       'سعدتم، تقدر تقولي؟', 'Sadam, can you see me?'):
+        for phrase in ('Айсана, что ты видишь?', 'Эйсана, что ты видишь?',
+                       'Айсанна, что у меня в руке?', 'آيسانا، شايف إيه؟',
+                       'ايسانا، تقدر تقولي؟', 'Aisana, can you see me?',
+                       'Окей, Айсана, привет'):
             with self.subTest(phrase=phrase):
                 self.assertIsNotNone(self.wake(phrase))
 
@@ -67,6 +69,14 @@ class RobotTests(unittest.TestCase):
         self.assertEqual(language('что ты видишь'), 'Russian')
         self.assertEqual(language('не көріп тұрсың'), 'Kazakh')
         self.assertEqual(language('what do you see'), 'English')
+
+    def test_main_routes_arm_commands_and_stop_to_arduino(self):
+        main = FUNCTIONS['main']
+        called = {node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, 'id', None)
+                  for node in ast.walk(main) if isinstance(node, ast.Call)}
+        for name in ('connect_from_environment', 'parse_arm_commands', 'execute_many',
+                     'emergency_stop', 'arm_reply'):
+            self.assertIn(name, called)
 
     def test_wake_audio_prefix_keeps_first_2_7_seconds(self):
         prefix = isolated('wake_audio_prefix', wave=wave, io=io, os=os)
@@ -86,7 +96,7 @@ class RobotTests(unittest.TestCase):
         normal_question = 'تقدر تقول لي مين فاز بالانتخابات؟'
         recovered = isolated(
             'recover_wake_question',
-            transcribe_audio=lambda **kwargs: 'صدام، تقدر تقول لي؟',
+            transcribe_audio=lambda **kwargs: 'آيسانا، تقدر تقول لي؟',
             wake_question=self.wake, os=os
         )
         self.assertEqual(recovered(normal_question), normal_question)
@@ -104,23 +114,25 @@ class RobotTests(unittest.TestCase):
             def raise_for_status(self):
                 pass
             def json(self):
-                return {'text': 'صدام، تقدر تقول لي؟'}
+                return {'text': 'آيسانا، تقدر تقول لي؟'}
         def post(url, **kwargs):
             captured.append(kwargs)
             return TranscriptResponse()
         transcribe = isolated(
             'transcribe_audio', requests=SimpleNamespace(post=post),
             HEADERS={}, TRANSCRIBE_MODEL='gpt-transcribe', DEBUG_TIMING=False,
+            TRANSCRIBE_KEYWORDS=('Aisana', 'Aysana', 'Айсана', 'Эйсана', 'آيسانا'),
             time=time, wake_audio_prefix=lambda filename, seconds: b'WAVE'
         )
         with tempfile.TemporaryDirectory() as directory:
             filename = str(pathlib.Path(directory) / 'example.wav')
             pathlib.Path(filename).write_bytes(b'WAVE')
-            self.assertEqual(transcribe(filename), 'صدام، تقدر تقول لي؟')
+            self.assertEqual(transcribe(filename), 'آيسانا، تقدر تقول لي؟')
             self.assertEqual(transcribe(filename, first_seconds=2.7),
-                             'صدام، تقدر تقول لي؟')
+                             'آيسانا، تقدر تقول لي؟')
         self.assertEqual(len(captured), 2)
-        self.assertIn(('keywords[]', 'صدام'), captured[0]['data'])
+        self.assertIn(('keywords[]', 'Aisana'), captured[0]['data'])
+        self.assertIn(('keywords[]', 'آيسانا'), captured[0]['data'])
         self.assertIn(('languages[]', 'ar'), captured[0]['data'])
         self.assertEqual(captured[1]['files']['file'][0], 'wake_prefix.wav')
         self.assertEqual(captured[1]['files']['file'][1], b'WAVE')
@@ -247,7 +259,7 @@ class RobotTests(unittest.TestCase):
             return device
         speaker = isolated(
             'speak', requests=SimpleNamespace(post=post), HEADERS={},
-            ROBOT_NAME='Садам', time=time,
+            ROBOT_NAME='Айсана', time=time, os=os,
             xiaomi_speaker_device=lambda: 'plughw:5,0',
             stream_tts_to_xiaomi=stream
         )
@@ -262,7 +274,7 @@ class RobotTests(unittest.TestCase):
         speaker = isolated(
             'speak',
             requests=SimpleNamespace(post=no_request),
-            HEADERS={}, ROBOT_NAME='Садам',
+            HEADERS={}, ROBOT_NAME='Айсана', os=os,
             time=time, xiaomi_speaker_device=no_xiaomi,
             AudioPlaybackError=RuntimeError,
         )
@@ -280,6 +292,11 @@ class RobotTests(unittest.TestCase):
             with self.subTest(question=question):
                 self.assertIs(local(question), True)
         self.assertIsNone(local('какая погода сегодня?'))
+        # A filler word such as "сейчас" must not hide a visual question.
+        for question in ('что ты сейчас видишь?', 'что у меня сейчас в руке?',
+                         'кто сейчас передо мной?', 'who is in front of you?'):
+            with self.subTest(question=question):
+                self.assertIs(local(question), True)
         self.assertIs(local('а теперь?', previous_camera_question='Что видишь?'), True)
 
     def test_unfinished_sentence_rules(self):
@@ -299,19 +316,19 @@ class RobotTests(unittest.TestCase):
                 self.assertFalse(unfinished(sample))
 
     def test_listen_complete_joins_incomplete_fragments(self):
-        responses = iter(['Sadam, I wanted to ask because', 'I have a question.', ''])
+        responses = iter(['Aisana, I wanted to ask because', 'I have a question.', ''])
         wait_calls = []
         def listen(wait_seconds=None, beep=True):
             wait_calls.append(wait_seconds)
             return next(responses)
         joiner = isolated(
-            'listen_complete', listen=listen,
+            'listen_complete', listen=listen, wake_question=self.wake,
             utterance_may_continue=isolated('utterance_may_continue', re=re),
             MAX_CONTINUATION_SEGMENTS=2, CONTINUATION_WAIT=2.5,
             SEMANTIC_END_ENABLED=False
         )
         self.assertEqual(joiner(wait_seconds=15), 
-                         'Sadam, I wanted to ask because I have a question.')
+                         'Aisana, I wanted to ask because I have a question.')
         self.assertEqual(wait_calls, [15, 2.5])
 
     def test_followup_intent_rejects_ambient_and_keeps_short_answer(self):
@@ -344,7 +361,7 @@ class RobotTests(unittest.TestCase):
         worker = isolated(
             'barge_in_worker',
             record_until_silence=lambda **kwargs: True,
-            transcribe_audio=lambda **kwargs: 'Садам, стоп',
+            transcribe_audio=lambda **kwargs: 'Айсана, стоп',
             wake_question=self.wake,
             interrupt_lock=threading.Lock(),
             pending_interrupt=None
@@ -352,7 +369,7 @@ class RobotTests(unittest.TestCase):
         worker(player, stop, cancelled, 'Today is sunny.')
         self.assertTrue(cancelled.is_set())
         self.assertTrue(player.stopped)
-        self.assertEqual(worker.__globals__['pending_interrupt'], 'Садам, стоп')
+        self.assertEqual(worker.__globals__['pending_interrupt'], 'Айсана, стоп')
 
     def test_barge_in_ignores_unaddressed_background_voice(self):
         import threading

@@ -40,6 +40,17 @@ def load_history():
     return result
 
 
+def recent_turns(limit=12):
+    """[(created_at, user_text, assistant_text)], oldest first."""
+    if not ENABLED:
+        return []
+    with _LOCK:
+        with _connect() as db:
+            rows = db.execute('SELECT created_at, user_text, assistant_text FROM turns ORDER BY id DESC LIMIT ?',
+                              (max(1, limit),)).fetchall()
+    return list(reversed(rows))
+
+
 def remember_turn(question, answer):
     if not ENABLED or not question or not answer:
         return
