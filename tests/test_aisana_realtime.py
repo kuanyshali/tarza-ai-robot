@@ -401,6 +401,18 @@ class LogFixesTests(unittest.TestCase):
         for text in ('Да', 'спасибо', 'Почему?', 'Айсана'):
             self.assertFalse(rt.is_stray_word(text) and not rt.has_wake_name(text), text)
 
+    def test_sana_at_the_start_of_a_sentence_is_her_name(self):
+        # Jetson log (Nov 20, noisy room): "...конкретно. Сана, какая погода у нас?" was ignored.
+        for text in ('Нет, у нас видоса-то вот этого нету конкретно. Сана, какая погода у нас?',
+                     'Сана, развернись', 'Сана какая погода'):
+            self.assertTrue(rt.has_wake_name(text), text)
+        for text in ('Это моя подруга сана из группы', 'сана', 'Мы с Санами пойдём'):
+            self.assertFalse(rt.has_wake_name(text), text)
+
+    def test_stt_hint_echo_is_never_a_request(self):
+        self.assertTrue(rt.is_prompt_echo(rt.STT_PROMPT))
+        self.assertNotIn('развернись', rt.STT_PROMPT)            # no command can be echoed
+
     def test_misheard_turnaround(self):
         self.assertTrue(rt.has_wake_name('Айсам, развелись.'))
         for text in ('Айсана, развелись.', 'Айсана, разберись.'):

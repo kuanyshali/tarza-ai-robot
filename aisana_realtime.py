@@ -252,10 +252,16 @@ def language_of(text):
     return None
 
 
+# "Сана" (a clipped "Айсана" in noise) counts only at the start of a sentence,
+# followed by a comma or more words: "...конкретно. Сана, какая погода у нас?"
+# ("сана" inside a sentence is a word or another girl's name).
+SANA_START = re.compile(r'(?:^|[.!?…]\s*)\W*сана(?:\s*[,!]|\s+(?=\w))', re.I)
+
+
 def has_wake_name(text):
     """True if the user addresses Aisana: at the start or anywhere as "Айсана"."""
     text = (text or '').strip().casefold()
-    return bool(WAKE_PATTERN.match(text) or WAKE_ANYWHERE.search(text))
+    return bool(WAKE_PATTERN.match(text) or WAKE_ANYWHERE.search(text) or SANA_START.search(text))
 
 
 def _short(text, words=5):
@@ -267,10 +273,15 @@ def is_stop_phrase(text):
     return _short(text) and bool(STOP_PATTERN.search((text or '').casefold()))
 
 
-STT_PROMPT = 'Speech may be Russian, Kazakh, English or Egyptian Arabic. The robot is called Aisana.'
+# Prose with the name only, no command list: on noise STT sometimes returns its
+# hint verbatim, and an echoed command once opened the grippers. An echoed name
+# alone is harmless. Jetson log, Nov 20: in a noisy room "Айсана" came out as "Сана".
+STT_PROMPT = ('Разговор в университете с роботом по имени Айсана (Aisana). К ней обращаются по имени: '
+              'Айсана, ... Speech may be Russian, Kazakh, English or Egyptian Arabic.')
 # Hints used now or earlier; STT may still return them verbatim on noise.
 KNOWN_HINTS = (
     STT_PROMPT,
+    'Speech may be Russian, Kazakh, English or Egyptian Arabic. The robot is called Aisana.',
     'Aisana, Aysana, Айсана, Эйсана, آيسانا. Russian, Kazakh, English, Egyptian Arabic.',
     'поверни налево, поверни направо, развернись, развернись на 360, проедь вперёд, езжай назад, '
     'стой, руки в позицию, открой захват, turn left, go forward.',

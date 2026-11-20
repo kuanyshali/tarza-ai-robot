@@ -2,6 +2,17 @@
 
 Айсана слышит (микрофон KT USB Audio), говорит (колонка Xiaomi, в ALSA — «USB Composite Device»), видит (камера CSI на Jetson) и управляет двумя руками Arm team (Arduino Mega по USB). Понимает русский, казахский, английский и египетский арабский.
 
+## Быстрый запуск на Джетсоне
+
+```bash
+cd ~/ai_robot
+git pull --ff-only     # обновиться
+./start.sh             # запустить Айсану (лог пишется в realtime.log)
+./stop.sh              # остановить из любого терминала (или Ctrl+C)
+```
+
+Настройки по умолчанию в `start.sh`: IP ног `http://10.42.0.148:5000`, `AISANA_ECHO_TAIL_SECONDS=0.4`, `AISANA_PLAYBACK_LEAD_MS=150`. Любую можно поменять на один запуск: `AISANA_HUMOR=70 ./start.sh`.
+
 ## Два режима
 
 | | `aisana_realtime.py` — **быстрый, рекомендуемый** | `robot.py` — классический |
