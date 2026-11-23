@@ -226,7 +226,7 @@ WAVE_SECONDS = float(os.environ.get('AISANA_WAVE_SECONDS', '6'))
 # "Айсана, танцуй": arms up, right hand waves, she spins with her shouts, then arms down.
 DANCE_RE = re.compile(r'(?:\bтанцу\w*|потанцу\w*|станцу\w*|затанцу\w*|\bdance\b|\bdancing\b|'
                       r'билеші\w*|биле\b|ارقص\w*)', re.I)
-DANCE_SECONDS = float(os.environ.get('AISANA_DANCE_SECONDS', '6'))
+DANCE_SECONDS = float(os.environ.get('AISANA_DANCE_SECONDS', '8'))
 WAVE_FOR = re.compile(r'(\d{1,2})\s*(?:сек\w*|с\b|seconds?|secs?|s\b)', re.I)
 
 
