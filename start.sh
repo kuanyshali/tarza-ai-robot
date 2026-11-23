@@ -25,10 +25,11 @@ case "$legs" in
     *alibrat*|*DISCONNECTED*)
         # After the ODrive is powered on it needs a calibration (that also connects it).
         echo "The wheels need calibrating (ODrive just switched on)."
-        if ./calibrate_legs.sh; then
-            read -r -p "Robot back on the floor? Press Enter to start Aisana. " _
+        # Automatic, no questions; one retry (a failed try is often fixed by the second).
+        if ./calibrate_legs.sh --yes || ./calibrate_legs.sh --yes; then
+            echo "Wheels ready."
         else
-            echo "Starting without wheels; run ./calibrate_legs.sh later."
+            echo "Starting without wheels; run ./calibrate_legs.sh --yes later."
         fi ;;
     "")
         echo "Legs Pi at $AISANA_LEGS_URL does not answer; starting without wheels." ;;

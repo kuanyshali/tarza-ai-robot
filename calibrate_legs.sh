@@ -1,6 +1,7 @@
 #!/bin/bash
 # Calibrate the wheel motors (ODrive) after the ODrive was powered on:
-#   ./calibrate_legs.sh
+#   ./calibrate_legs.sh          (asks first)
+#   ./calibrate_legs.sh --yes    (no question, 3 s warning)
 # The wheels spin during calibration, so the robot MUST be lifted: wheels off
 # the floor. Aisana herself never calibrates (not by voice, not on her own).
 URL="${AISANA_LEGS_URL:-http://10.42.0.148:5000}"
@@ -13,11 +14,18 @@ if ! status >/dev/null; then
 fi
 echo "Legs now: $(status)"
 echo
-echo "!!! The wheels WILL SPIN. Lift the robot so both wheels are off the floor."
-read -r -p "Wheels are off the floor? Type yes: " answer
-if [ "$answer" != "yes" ] && [ "$answer" != "да" ]; then
-    echo "Cancelled."
-    exit 1
+if [ "$1" = "--yes" ]; then
+    # No question (Nov 23: the owner calibrates on the floor). The wheels still
+    # spin a little: 3 s to step away.
+    echo "!!! Calibrating the wheels in 3 s: they will spin a little. Step away from the robot."
+    sleep 3
+else
+    echo "!!! The wheels WILL SPIN. Lift the robot so both wheels are off the floor."
+    read -r -p "Wheels are off the floor? Type yes: " answer
+    if [ "$answer" != "yes" ] && [ "$answer" != "да" ]; then
+        echo "Cancelled."
+        exit 1
+    fi
 fi
 
 curl -s --max-time 5 -X POST -H "Content-Type: application/json" -d '{"calibrate": true}' "$URL/motor/enable" >/dev/null
@@ -28,7 +36,7 @@ for _ in $(seq 1 60); do
     case "$now" in
         *'"enabled": true'*|*'"enabled":true'*)
             echo "Done: $now"
-            echo "Put the robot back on the floor. Aisana can drive now."
+            echo "Done. Aisana can drive now."
             exit 0 ;;
         *'"connecting": false'*|*'"connecting":false'*)
             case "$now" in *'"error": null'*|*'"error":null'*) ;; *)
