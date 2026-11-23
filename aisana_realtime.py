@@ -1607,9 +1607,12 @@ class RealtimeAisana(object):
                 self.motion_until = time.monotonic() + float(moving.group(1)) + 1.0
                 self.shouts.play_for(float(moving.group(1)))
             elif done:
-                self.speak_report('Robot report: dancing with the arms only (no wheels).',
-                                  confirm_instruction('Танцую!' if self.user_language == 'Russian'
-                                                      else "I'm dancing!", ''))
+                # Nov 23: the wheels were not calibrated and she only said "I'm dancing!".
+                wheels = 'my wheels are not ready' if spun else 'my wheels are not connected'
+                phrase = ('Танцую руками: колёса пока не готовы.' if self.user_language == 'Russian'
+                          else 'Dancing with my arms only, {}.'.format(wheels))
+                self.speak_report('Robot report: dancing with the arms only. ' + (spun or ''),
+                                  confirm_instruction(phrase, ''))
             else:
                 self.speak_report('Robot report: neither arms nor wheels are connected, no dance.',
                                   self.reply_language() + 'In ONE short sentence say that you cannot dance now.')

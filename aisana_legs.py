@@ -282,7 +282,7 @@ BACKWARD = re.compile(r'(?:назад|\bback(?:wards?)?\b|артқа|لورا|و
 LEFT = re.compile(r'(?:налево|влево|лево|левее|\bleft\b|солға|شمال|يسار)', re.I)
 RIGHT = re.compile(r'(?:направо|вправо|право|правее|\bright\b|оңға|يمين)', re.I)
 # "поведи/повели" is how STT often hears "поверни" (Jetson log, Nov 19).
-SPIN = re.compile(r'(?:поверн\w*|повед[иь]\w*|повели\b|разверн\w*|развед[иь]с\w*|развел[иь]с\w*|(?:^|,\s*)разбер[иь]сь[.!]?\s*$|разверт\w*|крут\w*|'
+SPIN = re.compile(r'(?:поверн\w*|повед[иь]\w*|повели\b|разверн\w*|развед[иь]с\w*|развел[иь]с\w*|(?:^|,\s*)разбер[иь]сь[.!]?\s*$|разверт\w*|крут\w*|кружи\w*|покружи\w*|закружи\w*|вращай\w*|'
                   r'разворот\w*|\bturn\b|\bspin\b|'
                   r'бұрыл\w*|لف)', re.I)
 TIMES_RE = re.compile(r'(\d+)\s*(?:раз\w*|times|рет|مرات|مرة)', re.I)
@@ -402,6 +402,8 @@ def parse_legs_command(text):
                 # "развернись", "развернись на 360", "крутись на 270": no side said -> right
                 turn = int(degrees.group(1)) if degrees else 180
                 return _intent('spin_right', degrees=max(10, min(3600, turn)))
+            if re.search(r'(?:кружи|крут|вращай|\bspin\b)', q):
+                return _intent('spin_right', degrees=360)      # "кружись", "покрутись": one full turn
         if LEFT.search(q) or RIGHT.search(q):
             action = 'spin_left' if LEFT.search(q) and not RIGHT.search(q) else 'spin_right'
             if SPIN.search(q):

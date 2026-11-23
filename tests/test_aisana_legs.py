@@ -253,5 +253,14 @@ class ControllerTests(unittest.TestCase):
                          'Поворачиваюсь налево.')
 
 
+
+class SpinWordsTests(unittest.TestCase):
+    def test_kruzhis(self):
+        # Jetson log, Nov 23: "Айсана, покружись вокруг себя восемь секунд." did nothing.
+        self.assertEqual(legs.parse_legs_command('Айсана, покружись вокруг себя восемь секунд.'),
+                         legs.make_intent('spin_right', seconds=8.0))
+        self.assertEqual(legs.parse_legs_command('Айсана, кружись')['degrees'], 360)
+        self.assertIsNone(legs.parse_legs_command('Айсана, у меня голова кружится?'))
+
 if __name__ == '__main__':
     unittest.main()
