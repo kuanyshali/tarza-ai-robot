@@ -74,7 +74,7 @@ NOISE_REDUCTION = os.environ.get('AISANA_NOISE_REDUCTION', 'off')   # far_field 
 WAKE_GATE = os.environ.get('AISANA_REALTIME_WAKE', '1') == '1'
 DIALOG_TIMEOUT = max(5.0, float(os.environ.get('AISANA_DIALOG_TIMEOUT', '12')))
 # iPhone microphone from the panel page: while it sends, the USB mic is muted.
-PHONE_TIMEOUT = 1.5                      # seconds without a packet = phone gone, USB mic again
+PHONE_TIMEOUT = 2.5                      # seconds without a packet = phone gone, USB mic again (Funnel adds ~0.8 s)
 PHONE_MAX_BYTES = RATE * 2 * 2           # at most 2 s of audio per packet
 PHONE_MODES = ('live', 'ptt')            # always on / push to talk
 
@@ -601,6 +601,9 @@ class RealtimeAisana(object):
         self.audio_generation = 0
         self.mute_until = 0.0
         self.heard_at = 0.0                 # end of the user's last turn (latency log)
+        self.usb_level = 0                  # USB mic loudness for the panel (RMS peak, last second)
+        self.usb_level_peak = 0
+        self.usb_level_at = 0.0
         self.first_audio_pending = False
         self.slow_send_note = 0.0
         self.phone_until = 0.0              # iPhone mic (panel) sending until then
@@ -1038,6 +1041,7 @@ class RealtimeAisana(object):
     def capture(self):
         try:
             levels = []
+            phone_was_on = False
             # Vosk confirms the name at the next pause: replay the whole phrase.
             preroll = collections.deque(maxlen=int(6 * RATE * 2 / CHUNK))
             self.mic = subprocess.Popen(
@@ -1050,6 +1054,7 @@ class RealtimeAisana(object):
                     raise RuntimeError('Microphone capture ended unexpectedly')
                 if MIC_GAIN != 1.0:
                     pcm = audioop.mul(pcm, 2, MIC_GAIN)      # clips instead of wrapping around
+                self.note_usb_level(audioop.rms(pcm, 2))
                 if MIC_LEVEL:
                     levels.append(audioop.rms(pcm, 2))
                     if len(levels) >= 33:
@@ -1060,7 +1065,11 @@ class RealtimeAisana(object):
                         levels = []
                 if self.phone_active():
                     preroll.clear()                     # the iPhone is the microphone now
+                    phone_was_on = True
                     continue
+                if phone_was_on:
+                    phone_was_on = False
+                    print('Microphone: USB again (iPhone stopped); say "Aisana, ..." to begin.')
                 if self.echo_guarded():
                     continue
                 if not self.streaming():
@@ -1082,6 +1091,14 @@ class RealtimeAisana(object):
             if not self.stop.is_set():
                 print('Microphone/connection error:', exc)
                 self.stop.set()
+
+    def note_usb_level(self, rms):
+        """Loudest 30 ms of the USB mic in the last second, for the panel."""
+        now = time.monotonic()
+        if now - self.usb_level_at > 1.0:
+            self.usb_level, self.usb_level_at = self.usb_level_peak, now
+            self.usb_level_peak = 0
+        self.usb_level_peak = max(self.usb_level_peak, rms)
 
     def echo_guarded(self):
         """Mute the mic while she can be heard. A reply that is still held (nothing
@@ -1809,6 +1826,8 @@ class RealtimeAisana(object):
             'speaking': bool(self.responding),
             'mic': ('iPhone (button)' if self.phone_mode == 'ptt' else 'iPhone') if self.phone_active() else 'USB',
             'ptt': self.phone_active() and self.phone_pressed,
+            'usb_level': self.usb_level,
+            'muted': bool(self.echo_guarded()),
             'moving': self.motion_active(),
         }
 

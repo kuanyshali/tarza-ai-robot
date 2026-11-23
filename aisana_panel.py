@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get('AISANA_PANEL_PORT', '8080'))
 LOG = os.path.join(HERE, 'realtime.log')
 PATTERN = 'python[0-9.]* -u aisana_realtime[.]py'
-NOISE = re.compile(r'GST_ARGUS|CONSUMER|Exposure Range|Camera (?:index|mode)|Output Stream|seconds to Run|'
+NOISE = re.compile(r'Mic level|GST_ARGUS|CONSUMER|Exposure Range|Camera (?:index|mode)|Output Stream|seconds to Run|'
                    r'Frame Rate|WARN:0|^\s*$')
 
 
@@ -287,6 +287,8 @@ function up(e){e.preventDefault();if(!pressed)return;pressed=false;$('ptt').clas
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&mic)micStop('Экран был выключен: микрофон iPhone остановлен, включи снова')});
 function act(a){post('/api/action',{action:a})}
 let hTouch=0,vTouch=0;
+function usbLevel(a){if(a.muted)return 'не слушает, пока говорит';const v=a.usb_level||0;
+ const bars=v<300?'▁':v<800?'▂▃':v<2000?'▂▃▅':'▂▃▅▇';return bars+' '+(v<300?'тишина':v<800?'тихо':v<2000?'слышит голос':'громко')}
 async function setV(v){vTouch=Date.now();$('vol').value=v;$('vv').textContent=v+'%';
  try{const j=await (await fetch('/api/volume',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({volume:Number(v)})})).json();
   msg(j.ok?'Громкость '+j.volume+'%':'Ошибка: '+j.error)}catch(e){msg('Нет связи с роботом')}}
@@ -299,7 +301,7 @@ async function refresh(){try{const s=await (await fetch('/api/status')).json();
  document.getElementById('net').textContent='интернет: '+s.internet;
  let h=R('Айсана',s.running?'работает':'выключена');
  const a=s.aisana;
- if(a&&a.ok){h+=R('OpenAI',a.connected?'на связи':'подключается')+R('Руки',a.arms)+R('Ноги',a.legs)+R('Камера',a.camera)+R('Лиц в памяти',a.faces)+R('Язык',a.language)+R('Юмор',a.humor+'%')+R('Микрофон',a.mic||'USB')+R('Сейчас',a.moving?'двигается':(a.speaking?'говорит':'слушает'))}
+ if(a&&a.ok){h+=R('OpenAI',a.connected?'на связи':'подключается')+R('Руки',a.arms)+R('Ноги',a.legs)+R('Камера',a.camera)+R('Лиц в памяти',a.faces)+R('Язык',a.language)+R('Юмор',a.humor+'%')+R('Микрофон',(a.mic||'USB')+(a.mic==='USB'||!a.mic?' · '+usbLevel(a):''))+R('Сейчас',a.moving?'двигается':(a.speaking?'говорит':'слушает'))}
  else if(s.running){h+=R('Статус',(a&&a.error)||'запускается…')}
  document.getElementById('state').innerHTML=h;
  if(Date.now()-vTouch>5000){if(s.volume==null){$('vv').textContent='нет колонки'}else{$('vol').value=s.volume;$('vv').textContent=s.volume+'%'}}

@@ -304,6 +304,13 @@ class HumorAndCameraTests(unittest.TestCase):
         self.assertFalse(session.phone_audio('karaoke', False, b'')['ok'])
         self.assertFalse(session.phone_audio('live', False, b'\x01')['ok'])
 
+    def test_panel_shows_usb_mic_level(self):
+        session, sent = make_session()
+        session.note_usb_level(1500)
+        session.usb_level_at = time.monotonic() - 2           # a second has passed
+        session.note_usb_level(100)
+        self.assertEqual(session.panel_status()['usb_level'], 1500)
+
     def test_usb_mic_back_when_phone_stops(self):
         session, sent = make_session()
         session.phone_audio('live', False, b'')
