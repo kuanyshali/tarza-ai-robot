@@ -14,11 +14,20 @@ browser page /control:
     GET  /motor/status
 
 Safety built on the Pi's own interlocks:
-- every drive has a time limit (default 2 s, max 10 s); Aisana sends the
-  heartbeat only while driving, so the Pi stops by itself if the Jetson,
-  Wi-Fi or this program dies;
+- every drive has a time limit (default 2 s, max 10 s);
+- the Pi stops motion 0.35 s and switches the motors OFF 0.75 s after the last
+  heartbeat (odrive_controller.py LINK_TIMEOUT_S), so if the Jetson, the LAN
+  or this program dies the wheels stop by themselves;
 - the Pi's obstacle stop (< 40 cm) answers 409 and the drive ends;
-- motors are NEVER calibrated by voice (needs the robot lifted).
+- motors are never calibrated by voice.
+
+Keep-alive (Nov 23, owner: "everything automatic"): like the Pi's own /control
+page, a background thread sends a heartbeat every 0.15 s while the motors are
+on, so they stay on between commands (before, they switched off 0.75 s after
+each drive: "the wheels only work while the /control page is open"). If they
+are off it enables them again without calibration (nothing moves), and if the
+ODrive needs calibration it calibrates on its own (the wheels spin a little,
+announced first; owner's choice), at most twice per 10 minutes.
 
 Python 3.6 compatible. Environment:
     AISANA_LEGS_URL=http://192.168.1.50:5000   the Pi (unset = legs disabled)
@@ -35,6 +44,9 @@ DEFAULT_SECONDS = 2.0
 SHORT_SECONDS = 1.0
 MAX_SECONDS = 10.0
 HEARTBEAT_SECONDS = 0.08          # fixed rate; the Pi stops after 0.35 s without one
+KEEPALIVE_SECONDS = 0.15         # like the Pi's /control page (150 ms)
+AUTO_CALIBRATIONS = 2             # at most this many automatic calibrations ...
+AUTO_CALIBRATION_WINDOW = 600.0   # ... per 10 minutes (a broken encoder must not loop)
 MAX_RESUMES = 5                   # silent restarts after a Pi stop that was NOT an obstacle
 ENABLE_TIMEOUT = 12.0             # odrive.find_any() can take a while the first time
 
@@ -105,6 +117,14 @@ class LegsController(object):
         self._cancel = threading.Event()
         self._drive = None
         self._lock = threading.Lock()
+        self._closed = threading.Event()
+        self._keepalive = None
+        self.auto_calibrate = True
+        self.on_calibrate = None             # called before an automatic calibration (Aisana warns)
+        self.calibrations = []               # times of automatic calibrations
+        self.alive_on = False                # motors on and kept on by the keep-alive
+        self._next_check = 0.0
+        self._last_note = ''
 
     # --- raw API -----------------------------------------------------------
     def _post(self, path, payload=None, timeout=1.0):
@@ -138,6 +158,84 @@ class LegsController(object):
                 raise LegsError('motors could not be enabled: {}'.format(status.get('error')))
             time.sleep(0.2)
         raise LegsError('motors did not enable in time (is the ODrive powered?)')
+
+    # --- keep-alive ----------------------------------------------------------
+    def start_keepalive(self, auto_calibrate=True):
+        if self._keepalive is not None:
+            return self
+        self.auto_calibrate = auto_calibrate
+        self._keepalive = threading.Thread(target=self._keepalive_loop, daemon=True)
+        self._keepalive.start()
+        return self
+
+    def close(self):
+        self._closed.set()
+
+    def _note(self, text):
+        if text != self._last_note:          # each new situation once, not every 3 s
+            self._last_note = text
+            self.log('Legs: ' + text)
+
+    def _keepalive_loop(self):
+        while not self._closed.is_set():
+            try:
+                wait = self.keepalive_step()
+            except Exception as error:
+                self.alive_on = False
+                self._note('Pi not reachable ({}); retrying.'.format(short_error(error)))
+                wait = 3.0
+            self._closed.wait(wait)
+
+    def keepalive_step(self, now=None):
+        """One step; returns seconds to wait. Never moves the wheels except for
+        an automatic calibration."""
+        now = time.monotonic() if now is None else now
+        if self.alive_on:
+            code, data = self._post('/motor/heartbeat', timeout=0.3)
+            if data.get('enabled'):
+                return KEEPALIVE_SECONDS
+            self.alive_on = False
+            self._next_check = 0.0
+            self._note('motors went off ({}); switching them on again.'.format(data.get('state', '?')))
+        if now < self._next_check:
+            return 0.2
+        self._next_check = now + 3.0
+        status = self.status()
+        if status.get('enabled'):
+            self.alive_on = True
+            self._note('motors on; keeping them on.')
+            return KEEPALIVE_SECONDS
+        if status.get('connecting'):
+            self._note('the Pi is connecting to the ODrive ({}).'.format(status.get('state', '?')))
+            return 0.5
+        state = str(status.get('state', ''))
+        error = str(status.get('error') or '')
+        if 'NEEDS CALIBRATION' in state or (state == 'ERROR' and 'calibration failed' in error):
+            if not self.auto_calibrate:
+                self._note('motors need calibration: press "Колёса" on the panel.')
+                return 0.5
+            self.calibrations = [t for t in self.calibrations if now - t < AUTO_CALIBRATION_WINDOW]
+            if len(self.calibrations) >= AUTO_CALIBRATIONS:
+                self._note('calibration keeps failing ({}); check the encoder wiring. '
+                           'Press "Колёса" on the panel to try again.'.format(error or state))
+                return 0.5
+            self.calibrations.append(now)
+            self._note('calibrating the wheels (they spin a little).')
+            if self.on_calibrate is not None:
+                try:
+                    self.on_calibrate()
+                except Exception:
+                    pass
+            self._closed.wait(3.0)            # time to step away
+            self._post('/motor/enable', {'calibrate': True}, timeout=2.0)
+            self._next_check = now + 5.0
+            return 0.5
+        # DISCONNECTED, CONTROL LINK LOST, DISABLED or another error: switch on
+        # without calibration (keeps the old calibration, nothing moves).
+        self._note('switching the motors on ({}).'.format(state or '?'))
+        self._post('/motor/enable', {'calibrate': False}, timeout=2.0)
+        self._next_check = now + (3.0 if state != 'ERROR' else 15.0)
+        return 0.5
 
     # --- drives ------------------------------------------------------------
     def obstacle(self):
@@ -271,6 +369,8 @@ def connect_from_environment(log=print, environ=None, http=None):
         log('Legs: Pi at {} answers, motors {}.'.format(url, status.get('state', '?')))
     except Exception as error:
         log('Legs: Pi at {} not reachable ({}); will retry on each command.'.format(url, short_error(error)))
+    if environ.get('AISANA_LEGS_KEEPALIVE', '1') == '1':
+        legs.start_keepalive(auto_calibrate=environ.get('AISANA_LEGS_AUTO_CALIBRATE', '1') == '1')
     return legs
 
 

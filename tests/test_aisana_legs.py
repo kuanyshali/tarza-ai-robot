@@ -262,5 +262,75 @@ class SpinWordsTests(unittest.TestCase):
         self.assertEqual(legs.parse_legs_command('Айсана, кружись')['degrees'], 360)
         self.assertIsNone(legs.parse_legs_command('Айсана, у меня голова кружится?'))
 
+class StatePi(object):
+    """The Pi's /motor API as odrive_controller.py answers it, state by state."""
+
+    def __init__(self, state, enabled=False, error=None, connecting=False):
+        self.state, self.enabled, self.error, self.connecting = state, enabled, error, connecting
+        self.posts = []
+
+    def status(self):
+        return {'state': self.state, 'enabled': self.enabled, 'error': self.error,
+                'connecting': self.connecting, 'command': 'stop', 'speed_kmh': 2.0}
+
+    def get(self, url, timeout=None):
+        return FakeResponse(200, self.status())
+
+    def post(self, url, json=None, timeout=None):
+        path = url.split(':5000', 1)[1]
+        self.posts.append((path, json))
+        return FakeResponse(200, self.status())
+
+
+class KeepAliveTests(unittest.TestCase):
+    """Nov 23: "the wheels only work while the Pi /control page is open"."""
+
+    def controller(self, pi):
+        c = legs.LegsController('http://pi:5000', http=pi, log=lambda text: None)
+        c._closed.wait = lambda seconds: None          # no real sleeping in tests
+        return c
+
+    def test_keeps_enabled_motors_on_with_heartbeats(self):
+        pi = StatePi('ENABLED', enabled=True)
+        c = self.controller(pi)
+        self.assertEqual(c.keepalive_step(now=0), legs.KEEPALIVE_SECONDS)
+        c.keepalive_step(now=0.15)
+        c.keepalive_step(now=0.30)
+        self.assertEqual([p for p, _ in pi.posts], ['/motor/heartbeat', '/motor/heartbeat'])
+        self.assertLess(legs.KEEPALIVE_SECONDS, 0.35)    # faster than the Pi's stop timeout
+
+    def test_switches_motors_on_again_without_calibration(self):
+        pi = StatePi('CONTROL LINK LOST', enabled=False)
+        c = self.controller(pi)
+        c.keepalive_step(now=0)
+        self.assertEqual(pi.posts, [('/motor/enable', {'calibrate': False})])
+
+    def test_waits_while_the_pi_connects(self):
+        pi = StatePi('CONNECTING / ENABLING', connecting=True)
+        c = self.controller(pi)
+        c.keepalive_step(now=0)
+        self.assertEqual(pi.posts, [])                    # no second enable or calibration on top
+
+    def test_calibrates_by_itself_at_most_twice(self):
+        pi = StatePi('ERROR', error='M0 (Left) calibration failed; axis.error=256')
+        c = self.controller(pi)
+        warned = []
+        c.on_calibrate = lambda: warned.append(True)
+        for t in (0, 10, 20, 30, 40):
+            c.keepalive_step(now=t)
+        self.assertEqual(pi.posts, [('/motor/enable', {'calibrate': True})] * 2)   # a broken encoder must not loop
+        self.assertEqual(len(warned), 2)                   # Aisana warns before the wheels spin
+        c.keepalive_step(now=10 + legs.AUTO_CALIBRATION_WINDOW + 1)
+        self.assertEqual(len(pi.posts), 3)                 # tries again after 10 minutes
+
+    def test_no_auto_calibration_when_switched_off(self):
+        pi = StatePi('NEEDS CALIBRATION')
+        c = self.controller(pi)
+        c.auto_calibrate = False
+        c.keepalive_step(now=0)
+        self.assertEqual(pi.posts, [])
+
+
+
 if __name__ == '__main__':
     unittest.main()

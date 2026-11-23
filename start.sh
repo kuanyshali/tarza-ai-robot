@@ -36,12 +36,12 @@ if pgrep -f "$PATTERN" >/dev/null; then
 fi
 restart_camera_service
 
-# Wheels: wait for the Pi to connect to the ODrive, enable, calibrate only if
-# needed (no questions). Aisana starts anyway; the panel has a "Колёса" button.
+# Wheels: Aisana switches the motors on and keeps them on by herself (keep-alive
+# in aisana_legs.py), calibrating only if the ODrive needs it. Nothing to wait for here.
 if [ -n "$(curl -s --max-time 3 "$AISANA_LEGS_URL/motor/status")" ]; then
-    { ./legs_ready.sh || echo "Starting without wheels; press \"Колёса\" on the panel or run ./legs_ready.sh later."; } 2>&1 | tee realtime.log
+    echo "Legs Pi answers; Aisana will switch the motors on by herself." | tee realtime.log
 else
-    echo "Legs Pi at $AISANA_LEGS_URL does not answer; starting without wheels." | tee realtime.log
+    echo "Legs Pi at $AISANA_LEGS_URL does not answer; Aisana keeps trying." | tee realtime.log
 fi
 
 .venv/bin/python -u aisana_realtime.py 2>&1 | tee -a realtime.log   # after the wheel lines

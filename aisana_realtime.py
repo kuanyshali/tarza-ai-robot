@@ -2365,6 +2365,16 @@ def main():
     camera, faces = aisana_faces.connect_from_environment()     # camera stays on across reconnects
     spotter = wake_listener.spotter_from_environment()
     current = {'session': None}
+    if legs is not None:
+        def warn_calibration():
+            session = current['session']
+            if session is not None and session.ready:
+                phrase = {'Russian': 'Калибрую колёса, отойдите на шаг.'}.get(
+                    FIXED_LANGUAGE or session.user_language, 'Calibrating my wheels, please step back.')
+                threading.Thread(target=session.speak_report, daemon=True, args=(
+                    'Robot report: the wheels are about to calibrate and will spin a little.',
+                    confirm_instruction(phrase, ''))).start()
+        legs.on_calibrate = warn_calibration
     try:
         control = aisana_control.ControlServer(lambda: current['session']).start()   # phone panel
     except OSError as exc:
@@ -2398,6 +2408,8 @@ def main():
         if camera is not None:
             camera.stop()               # waits for the camera release (Argus must close cleanly)
         if legs is not None:
+            if hasattr(legs, "close"):
+                legs.close()            # no more keep-alive: the Pi switches the motors off
             legs.stop()
         if arm is not None:
             arm.close()
