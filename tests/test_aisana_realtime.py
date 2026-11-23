@@ -526,6 +526,26 @@ class StopAndGreetTests(unittest.TestCase):
         self.assertEqual(session.arm.calls[0][0], 'hand_shake')
         session.stop.set()                              # ends the wave timer early
 
+    def test_wave_ends_by_itself_and_lowers_the_arm(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        say(session, 'w1', 'Айсана, помаши рукой 1 секунду')
+        deadline = time.time() + 4
+        while ('position', 'right', 0, 'whole', None, None) not in session.arm.calls and time.time() < deadline:
+            time.sleep(0.05)
+        actions = [c[0] for c in session.arm.calls]
+        self.assertEqual(actions, ['hand_shake', 'hand_still', 'position'])
+
+    def test_a_new_arm_command_cancels_the_wave_timer(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        say(session, 'w2', 'Айсана, помаши рукой 1 секунду')
+        time.sleep(0.3)
+        say(session, 'w3', 'Айсана, левая рука позиция два')
+        time.sleep(1.5)
+        self.assertNotIn('hand_still', [c[0] for c in session.arm.calls])
+        self.assertEqual(rt.wave_seconds('помаши рукой'), rt.WAVE_SECONDS)
+
     def test_short_legs_errors(self):
         self.assertIn('no answer', rt.aisana_legs.short_error(Exception('Connection to 10.42.0.148 timed out.')))
 

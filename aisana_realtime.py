@@ -222,7 +222,17 @@ FACE_GREET_MINUTES = float(os.environ.get('AISANA_FACE_GREET_MINUTES', '30'))
 POSSESSIVE_RE = re.compile(r'\b(?:мой|моя|моё|мое|мои|my)\b', re.I)
 THING_FILLER_RE = re.compile(r'\b(?:мой|моя|моё|мое|мои|наш|наша|наше|этот|эту|эта|это|вот|my|our|this|the)\b', re.I)
 
-# "Айсана, поздоровайся": she says hello AND waves the right hand for 3 s.
+WAVE_SECONDS = float(os.environ.get('AISANA_WAVE_SECONDS', '6'))
+WAVE_FOR = re.compile(r'(\d{1,2})\s*(?:сек\w*|с\b|seconds?|secs?|s\b)', re.I)
+
+
+def wave_seconds(text):
+    """'помаши рукой 10 секунд' gives 10 (at most 30); otherwise the default."""
+    found = WAVE_FOR.search(text or '')
+    return min(30.0, max(1.0, float(found.group(1)))) if found else WAVE_SECONDS
+
+
+# "Айсана, поздоровайся": she says hello AND waves (arm up, hand waves, arm down).
 GREET_RE = re.compile(r'(?:поздоровайся|поприветствуй|поздоровай|say hello|greet (?:us|them|him|her)|'
                       r'wave hello|сәлемдес\w*)', re.I)
 
@@ -571,6 +581,7 @@ class RealtimeAisana(object):
         self.pending_face = None            # "запомни меня" without a name: waits for it
         self.ready = False                  # session.updated received
         self.stt_model = STT_MODEL
+        self.wave_id = 0                    # a newer arm command cancels the wave timer
         self.arm_retry_at = -1e9
         self.on_arm_connected = None        # main() keeps a reconnected arm for later sessions
         self.spotter = None                 # wake_listener.WakeSpotter (AISANA_LOCAL_WAKE=1)
@@ -676,8 +687,11 @@ class RealtimeAisana(object):
             return 'Arm controller is not connected over USB; nothing moved. Say so in a few words.'
         if intents[0]['action'] == 'status':
             return self.arm.execute_many(intents)
+        self.wave_id += 1
         result = self.arm.execute_many(intents, verify=False)
         self.last_arm_at = time.monotonic()
+        if intents[-1]['action'] == 'hand_shake':
+            self.end_wave_after(wave_seconds(transcript))
         if intents[0]['action'] != 'stop':
             self.arm.watch(intents, self.report_arm_problem)
         problem = ' Arduino said: ' + result.split('Arduino reported: ', 1)[1] if 'Arduino reported: ' in result else ''
@@ -1477,7 +1491,7 @@ class RealtimeAisana(object):
                     self.say_phrase('{} (you know them) just came into view.'.format(name), 'greet', name)
                     break
 
-    def wave_hello(self, seconds=4.0):
+    def wave_hello(self, seconds=None):
         """Greeting gesture: right arm up, hand waves, then the arm goes back down."""
         arm = self.arm
 
@@ -1485,11 +1499,29 @@ class RealtimeAisana(object):
             try:
                 arm.execute_many([make_intent('hand_shake', 'right')], verify=False)
                 print('Arms: waving hello.')
-                if not self.stop.wait(seconds):
-                    arm.execute_many([make_intent('hand_still', 'right'),
-                                      make_intent('position', 'right', 0)], verify=False)   # arm down again
+                self.end_wave_after(seconds)
             except Exception as exc:
                 print('Arms: wave failed:', exc)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def end_wave_after(self, seconds=None):
+        """Stop waving and lower the right arm after a while, unless another arm
+        command (or a stop) came first. Nov 23: the wave had no timer and the
+        greeting ended too early; default 6 s, a spoken time works too."""
+        self.wave_id += 1
+        mine = self.wave_id
+        seconds = WAVE_SECONDS if seconds is None else seconds
+        arm = self.arm
+
+        def worker():
+            if self.stop.wait(seconds) or mine != self.wave_id or arm is None:
+                return
+            try:
+                arm.execute_many([make_intent('hand_still', 'right'),
+                                  make_intent('position', 'right', 0)], verify=False)   # arm down again
+                print('Arms: waving done, right arm down.')
+            except Exception as exc:
+                print('Arms: could not end the wave:', exc)
         threading.Thread(target=worker, daemon=True).start()
 
     def reconnect_arm(self):
@@ -1580,6 +1612,7 @@ class RealtimeAisana(object):
                 if self.legs is not None:
                     self.legs.stop()
                 if self.arm is not None:
+                    self.wave_id += 1           # no arm move after a stop
                     self.arm.emergency_stop()
                 print('Stopped during motion.')
             if held:
@@ -1593,6 +1626,7 @@ class RealtimeAisana(object):
             if self.legs is not None:
                 self.legs.stop()            # wheels first: they can run into people
             if self.arm is not None:
+                self.wave_id += 1           # no arm move after a stop
                 self.arm.emergency_stop()
             self.stop_playback()
         addressed = (not WAKE_GATE or item_id in self.responded_items
@@ -1697,8 +1731,11 @@ class RealtimeAisana(object):
                     if self.arm is None:
                         result = 'NOT done: the arm controller is not connected over USB.'
                     else:
+                        self.wave_id += 1                   # any arm command cancels a wave timer
                         self.arm.execute_many(arm_intents, verify=False)
                         self.arm.watch(arm_intents, self.report_arm_problem)
+                        if arm_intents[-1]['action'] == 'hand_shake':
+                            self.end_wave_after(wave_seconds(self.transcripts.get(item_id, '')))
                         self.last_arm_at = time.monotonic()
                         result = 'Arms: ' + describe(arm_intents) + '.'
                 elif self.legs is None:
