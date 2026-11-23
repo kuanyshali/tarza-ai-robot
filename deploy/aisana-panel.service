@@ -1,0 +1,20 @@
+# Phone control panel for Aisana (aisana_panel.py, port 8080).
+# Starts on boot. Aisana herself is NOT started: press "Включить" on the panel.
+# KillMode=process: restarting the panel does not kill a running Aisana.
+[Unit]
+Description=Aisana phone control panel
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+Environment=HOME=__HOME__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -u aisana_panel.py
+Restart=always
+RestartSec=3
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
