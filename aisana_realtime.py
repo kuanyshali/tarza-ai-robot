@@ -36,6 +36,7 @@ from aisana_legs import parse_legs_command, LEGS_ACTIONS, legs_reply
 from aisana_arm import arm_reply
 import aisana_faces
 import aisana_memory
+import aisana_control
 import wake_listener
 from aisana_faces import parse_memory_command
 
@@ -1654,6 +1655,72 @@ class RealtimeAisana(object):
     def motion_active(self):
         return time.monotonic() < self.motion_until
 
+    def panel_status(self):
+        """What the phone panel shows."""
+        legs = 'not connected'
+        if self.legs is not None:
+            try:
+                status = self.legs.status()
+                legs = status.get('state') or ('ready' if status.get('enabled') else 'not ready')
+                if status.get('error'):
+                    legs += ': ' + str(status['error'])[:80]
+            except Exception as exc:
+                legs = 'no answer'
+        camera = 'off'
+        if self.camera_stream is not None:
+            camera = 'ok' if self.camera_stream.latest(max_age=2.0, wait=0) is not None else 'no picture'
+        return {
+            'connected': bool(self.ready),
+            'arms': 'ready' if self.arm is not None else 'not connected',
+            'legs': legs,
+            'camera': camera,
+            'faces': len(self.faces.names()) if self.faces is not None else 0,
+            'language': FIXED_LANGUAGE or 'auto',
+            'humor': self.humor,
+            'speaking': bool(self.responding),
+            'moving': self.motion_active(),
+        }
+
+    def panel_action(self, action, text=''):
+        """Buttons of the phone panel (aisana_control)."""
+        print('Panel: {}{}'.format(action, (' "' + text + '"') if text else ''))
+        if action == 'stop':
+            self.stop_motion()
+            self.wave_id += 1
+            if self.legs is not None:
+                self.legs.stop()
+            if self.arm is not None:
+                self.arm.emergency_stop()
+            return {'ok': True}
+        if action == 'wave':
+            if self.arm is None:
+                self.reconnect_arm()
+            if self.arm is None:
+                return {'ok': False, 'error': 'arms not connected'}
+            self.wave_hello()
+            return {'ok': True}
+        if action == 'dance':
+            self.run_dance_locally('panel-{}'.format(time.monotonic()), '')
+            return {'ok': True}
+        if action == 'say':
+            threading.Thread(target=self.speak_report, daemon=True, args=(
+                'Robot report: the operator asked you to say a line.',
+                confirm_instruction(text, ''))).start()
+            return {'ok': True}
+        if action == 'ask':
+            self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+
+            def worker():
+                deadline = time.monotonic() + 8
+                while self.responding and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.send({'type': 'conversation.item.create', 'item': {
+                    'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': text}]}})
+                self.send({'type': 'response.create', 'response': {'metadata': OWN}})
+            threading.Thread(target=worker, daemon=True).start()
+            return {'ok': True}
+        return {'ok': False, 'error': 'unknown action'}
+
     def stop_motion(self):
         self.motion_until = 0.0
         self.shouts.stop()
@@ -2127,6 +2194,12 @@ def main():
     legs = aisana_legs.connect_from_environment()
     camera, faces = aisana_faces.connect_from_environment()     # camera stays on across reconnects
     spotter = wake_listener.spotter_from_environment()
+    current = {'session': None}
+    try:
+        control = aisana_control.ControlServer(lambda: current['session']).start()   # phone panel
+    except OSError as exc:
+        control = None
+        print('Panel control port not available:', exc)
     delay = 2
     try:
         while True:
@@ -2137,6 +2210,7 @@ def main():
             session.on_arm_connected = lambda link: holder.setdefault('arm', link)
             session.camera_stream, session.faces = camera, faces
             session.spotter = spotter
+            current['session'] = session
             try:
                 session.run(manage_devices=False)
                 problem = 'session ended'
@@ -2157,6 +2231,8 @@ def main():
             arm.close()
         if camera is not None:
             camera.stop()
+        if control is not None:
+            control.close()
 
 
 def _stop_now(signum, frame):

@@ -620,6 +620,25 @@ class StopAndGreetTests(unittest.TestCase):
         self.assertIn('no answer', rt.aisana_legs.short_error(Exception('Connection to 10.42.0.148 timed out.')))
 
 
+class PanelActionTests(unittest.TestCase):
+    def test_panel_stop_and_status(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        self.assertEqual(session.panel_action('stop'), {'ok': True})
+        self.assertEqual(session.arm.stopped, 1)
+        status = session.panel_status()
+        self.assertEqual(status['arms'], 'ready')
+        self.assertEqual(status['legs'], 'not connected')
+
+    def test_panel_say_speaks_exactly(self):
+        session, sent = make_session()
+        session.panel_action('say', 'Welcome to Nazarbayev University!')
+        deadline = time.time() + 3
+        while not any('Welcome to Nazarbayev University!' in str(m) for m in sent) and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(any('Welcome to Nazarbayev University!' in str(m) for m in sent))
+
+
 class ArmReconnectTests(unittest.TestCase):
     def setUp(self):
         self.original = rt.WAKE_GATE
