@@ -33,6 +33,16 @@ journalctl -u aisana-panel -n 30      # лог пульта
 
 Служба камеры `nvargus-daemon` сломалась (обычно после грубого выключения Айсаны). `start.sh` теперь сам перезапускает эту службу при каждом запуске (правило sudo ставит `./install_panel_service.sh`, без пароля и только для этой команды). Вручную: `./stop.sh; sudo systemctl restart nvargus-daemon; ./start.sh`.
 
+### Университетский Wi-Fi NU_Campus
+
+`NU_Campus_WiFi` — WPA2-Enterprise (логин и пароль от университетской почты). Запустите на Джетсоне сами и введите логин и пароль (в git и в чат они не попадают, хранятся только в системном файле NetworkManager, доступном root):
+
+```bash
+./connect_nu_campus.sh            # NU_Campus первым, роутер 4G запасным (экономит трафик симки)
+./connect_nu_campus.sh --backup   # наоборот: роутер первым, NU_Campus запасным
+./connect_nu_campus.sh --remove   # забыть NU_Campus и пароль
+```
+
 ### iPhone как микрофон
 
 На пульте карточка «🎤 Микрофон iPhone». Работает **только по https-ссылке** (`https://mmae603-desktop.tail16cc45.ts.net`): по `http://…:8080` Safari не даёт микрофон.
