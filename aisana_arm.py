@@ -613,7 +613,12 @@ def parse_arm_commands(text, limit=4):
         intents.extend(found)
     if any(intent['action'] == 'stop' for intent in intents):
         return [_intent('stop')]           # stop always wins, nothing else is sent
-    return intents[-limit:]
+    # "wave the hand, ah, wave the hand on the right arm": one command, not two.
+    unique = []
+    for intent in intents:
+        if not unique or intent != unique[-1]:
+            unique.append(intent)
+    return unique[-limit:]
 
 
 make_intent = _intent

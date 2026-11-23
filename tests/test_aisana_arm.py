@@ -412,6 +412,8 @@ class Checked5FirmwareTests(unittest.TestCase):
         self.assertEqual(arm.parse_arm_commands('Айсана, хватит махать рукой')[0]['action'], 'hand_still')
         self.assertEqual(arm.parse_arm_commands('Стоп, руки!')[0]['action'], 'stop')
         self.assertEqual(arm.build_command('hand_shake'), 'r g s')
+        # Jetson log, Nov 23: a repeated phrase sent "r g s" twice.
+        self.assertEqual(len(arm.parse_arm_commands('Aisana, wave the hand, ah, wave the hand on the right arm.')), 1)
         self.assertEqual(arm.build_command('hand_still'), 'r g n')
 
 if __name__ == '__main__':
