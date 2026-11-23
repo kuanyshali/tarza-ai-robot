@@ -124,7 +124,7 @@ def decide(box, walking, degrees_per_second=107.0):
     width = box[2] - box[0]
     if abs(offset) > TURN_ZONE:
         angle = abs(offset) * CAMERA_FOV
-        pulse = min(0.35, max(0.08, angle / degrees_per_second))
+        pulse = min(0.8, max(0.08, angle / degrees_per_second))
         return ('spin_left' if offset < 0 else 'spin_right'), pulse, walking
     limit = FAR_WIDTH if not walking else NEAR_WIDTH
     if width < limit:
@@ -177,9 +177,12 @@ class Follower(object):
 
     def run(self):
         reason = 'stopped'
-        degrees = 90.0 / max(0.1, getattr(self.legs, 'spin_90', 0.84))
+        degrees = 90.0 / max(0.1, getattr(self.legs, 'spin_90', 0.84))   # at 2 km/h
         try:
-            self.legs.ensure_enabled()
+            status = self.legs.ensure_enabled() or {}
+            # Spins are timed for 2 km/h; at "медленнее" (0.5 km/h) she turns 4x slower.
+            speed = float(status.get('speed_kmh') or 2.0)
+            degrees *= max(0.25, min(2.75, speed / 2.0))
             end = time.monotonic() + self.seconds
             last_seen = time.monotonic()
             target, walking, last = None, False, None

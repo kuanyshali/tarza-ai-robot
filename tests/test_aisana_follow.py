@@ -75,6 +75,17 @@ class FollowerTests(unittest.TestCase):
         self.assertEqual(commands[-1], 'stop')               # always ends standing
         self.assertEqual(ended, ['lost'])
 
+    def test_spin_pulses_follow_the_drive_speed(self):
+        fast, slow = [], []
+        for speed, out in ((2.0, fast), (0.5, slow)):
+            fake = FakeLegs()
+            fake.ensure_enabled = lambda speed=speed: {'enabled': True, 'speed_kmh': speed}
+            sleeps = []
+            follow.Follower(fake, lambda: 'f', FakeDetector([[box(0.1, 0.15)]]), log=lambda t: None,
+                            lost_seconds=0.0, sleep=sleeps.append).run()
+            out.append(sleeps[0])
+        self.assertGreater(slow[0], fast[0])                 # slower wheels: longer turn pulse
+
     def test_waits_at_an_obstacle(self):
         commands, ended = self.run_follower([[box(0.5, 0.15)]] * 3, refuse={'forward'})
         self.assertEqual(commands.count('forward'), 3)       # refused (409): no crash, keeps trying
