@@ -135,11 +135,17 @@ class CameraStream(object):
             camera = self._open()
             if camera is None or not camera.isOpened():
                 self.error = 'camera did not open'
+                failures_open = getattr(self, 'failures_open', 0) + 1
+                self.failures_open = failures_open
                 if not reported:
-                    print('Camera stream: could not open the camera; retrying every 5 s.')
+                    print('Camera stream: no camera ("No cameras available"). Fix: ./stop.sh; '
+                          'sudo systemctl restart nvargus-daemon; ./start.sh - or check the ribbon '
+                          'cable (ls /dev/video*). Retrying every minute.')
                     reported = True
-                self.stop_event.wait(5)
+                # Nov 23: GStreamer printed two lines every 5 s; retry slowly instead.
+                self.stop_event.wait(5 if failures_open < 2 else 60)
                 continue
+            self.failures_open = 0
             if reported:
                 print('Camera stream: camera is back.')
             reported = False
