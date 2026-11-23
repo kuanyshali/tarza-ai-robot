@@ -103,9 +103,10 @@ class NudgeCommandTests(unittest.TestCase):
         # Shoulders count up toward position 4; the right elbow counts DOWN.
         self.assertEqual(arm.nudge_commands('right', 'shoulder', 'up', 5), ['r m r 5'])
         self.assertEqual(arm.nudge_commands('left', 'shoulder', 'down', 10), ['l m r -10'])
-        self.assertEqual(arm.nudge_commands('right', 'elbow', 'up', 5), ['r s r -5'])
+        # checked5: the right elbow has no pot, its positions are servo angles 80..184 (up = bigger).
+        self.assertEqual(arm.nudge_commands('right', 'elbow', 'up', 5), ['r s r 5'])
         self.assertEqual(arm.nudge_commands('left', 'elbow', 'up', 5), ['l s r 5'])
-        self.assertEqual(arm.nudge_commands('both', 'elbow', 'up', 10), ['r s r -10', 'l s r 10'])
+        self.assertEqual(arm.nudge_commands('both', 'elbow', 'up', 10), ['r s r 10', 'l s r 10'])
         self.assertEqual(arm.nudge_commands('both', 'whole', 'up', 10), ['r m r 10', 'l m r 10'])
 
     def test_direction_can_be_flipped(self):
@@ -196,8 +197,8 @@ class ControllerTests(unittest.TestCase):
         controller, _ = open_controller(fake)
         try:
             summary = controller.execute('nudge', 'both', None, 'elbow', 'up', 5)
-            self.assertEqual(moves(fake), [b'r s r -5\n', b'l s r 5\n'])
-            self.assertIn('"r s r -5"', summary)
+            self.assertEqual(moves(fake), [b'r s r 5\n', b'l s r 5\n'])
+            self.assertIn('"r s r 5"', summary)
         finally:
             controller.close()
 
@@ -276,7 +277,7 @@ class ControllerTests(unittest.TestCase):
         controller.open()
         try:
             with self.assertRaisesRegex(arm.ArmError, 'did not report'):
-                controller.execute('gripper_close', 'right')
+                controller.execute('gripper_close', 'left')
             controller.emergency_stop()
             self.assertEqual(fake.written, [b'x\n'])
         finally:
@@ -358,6 +359,60 @@ class VoiceParserTests(unittest.TestCase):
         self.assertEqual(arm.arm_reply(grip, 'Russian'), 'Открываю захват на левой руке.')
         self.assertIn('не отвечает', arm.arm_reply(grip, 'Russian', error='x'))
 
+
+
+class Checked5FirmwareTests(unittest.TestCase):
+    """robotic_arms_checked5.ino (Nov 23): right elbow without pot, right HAND instead of gripper."""
+
+    BOOT = (b'Starting both arms...\n',
+            b'RIGHT elbow (no pot): starting at REST (down) = 80.00 deg, holding.\n',
+            b'Both arms ready.\n',
+            b'POSITIONS (pot readings)  zero\t1\t2\t3\t4\n',
+            b'RIGHT stepper           \t47\t77\t107\t137\t167\tlimits 10-178\n',
+            b'RIGHT elbow (servo deg) \t80\t106\t132\t158\t184\tlimits 0-180\n',
+            b'LEFT  stepper           \t52\t82\t112\t142\t172\tlimits 13-184\n',
+            b'LEFT  elbow             \t144\t174\t204\t234\t264\tlimits 91-280\n',
+            b'RIGHT hand:    not started yet (send g s / g n)\n',
+            b'LEFT gripper: not started yet (send g o / g c)\n')
+
+    def open(self):
+        fake = FakeSerial(boot_lines=self.BOOT)
+        controller, _ = open_controller(fake)
+        time.sleep(0.3)                      # boot lines read
+        return fake, controller
+
+    def test_status_of_elbow_without_pot(self):
+        status = arm.parse_status(['RIGHT elbow:   servo 106.00 deg (no pot)  [at position 1]'])
+        self.assertEqual(status[('right', 'elbow')][:2], (106.0, None))
+
+    def test_table_and_hand_read_from_the_boot_text(self):
+        fake, controller = self.open()
+        try:
+            self.assertEqual(controller.position_table[('right', 'elbow')], (80, 106, 132, 158, 184))
+            self.assertEqual(controller.hands, {'right': True, 'left': False})
+        finally:
+            controller.close()
+
+    def test_hand_shakes_and_right_gripper_is_not_sent(self):
+        fake, controller = self.open()
+        try:
+            controller.execute_many([arm.make_intent('hand_shake', 'right')], verify=False)
+            self.assertEqual(moves(fake), [b'r g s\n'])
+            summary = controller.execute_many([arm.make_intent('gripper_open', 'right')], verify=False)
+            self.assertIn('has a hand', summary)
+            self.assertEqual(moves(fake), [b'r g s\n'])                # nothing new sent
+            controller.execute_many([arm.make_intent('gripper_close', 'both')], verify=False)
+            self.assertEqual(moves(fake)[-1], b'l g c\n')             # only the arm with a gripper
+        finally:
+            controller.close()
+
+    def test_voice_commands_for_the_hand(self):
+        self.assertEqual(arm.parse_arm_commands('Айсана, помаши рукой')[0]['action'], 'hand_shake')
+        self.assertEqual(arm.parse_arm_commands('Айсана, пожми руку')[0]['action'], 'hand_shake')
+        self.assertEqual(arm.parse_arm_commands('Айсана, хватит махать рукой')[0]['action'], 'hand_still')
+        self.assertEqual(arm.parse_arm_commands('Стоп, руки!')[0]['action'], 'stop')
+        self.assertEqual(arm.build_command('hand_shake'), 'r g s')
+        self.assertEqual(arm.build_command('hand_still'), 'r g n')
 
 if __name__ == '__main__':
     unittest.main()

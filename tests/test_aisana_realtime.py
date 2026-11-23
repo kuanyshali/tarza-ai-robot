@@ -817,7 +817,7 @@ class ArmVerificationTests(unittest.TestCase):
     def test_vague_arm_request_uses_model_interpretation(self):
         session, _ = make_session()
         session.arm = FakeArm()
-        say(session, 'i3', 'Айсана, помаши правой рукой')
+        say(session, 'i3', 'Айсана, подвигай правой рукой')
         session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'direction': 'up', 'degrees': 15})
         self.assertEqual(session.arm.calls[0][:2], ('nudge', 'right'))
 

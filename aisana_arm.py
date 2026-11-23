@@ -27,19 +27,21 @@ BAUD = 115200
 READY_TEXT = 'Both arms ready'
 ARM_LETTERS = {'right': 'r', 'left': 'l', 'both': 'b'}
 JOINT_LETTERS = {'whole': '', 'shoulder': 'm', 'elbow': 's'}
-ACTIONS = ('position', 'nudge', 'gripper_open', 'gripper_close', 'stop', 'status')
+ACTIONS = ('position', 'nudge', 'gripper_open', 'gripper_close', 'hand_shake', 'hand_still', 'stop', 'status')
 MAX_NUDGE_DEGREES = 45
 VERIFY_SECONDS = float(os.environ.get('AISANA_ARM_VERIFY_SECONDS', '1.0'))
-# Pot readings of positions 0..4 from robotic_arms_checked.ino (Nov 19). Replaced at
-# runtime by the table the Arduino prints at start-up ("POSITIONS (pot readings)").
+# Positions 0..4 from robotic_arms_checked5.ino (Nov 23). Replaced at runtime by
+# the table the Arduino prints at start-up ("POSITIONS (pot readings)").
+# The right elbow has no pot now: its positions are servo angles (rest 80 = down,
+# +26 per position, 184 is clamped to 180 by the firmware).
 DEFAULT_POSITION_TABLE = {
     ('right', 'shoulder'): (47, 77, 107, 137, 167),
-    ('right', 'elbow'): (106, 91, 76, 61, 46),
+    ('right', 'elbow'): (80, 106, 132, 158, 184),
     ('left', 'shoulder'): (52, 82, 112, 142, 172),
     ('left', 'elbow'): (144, 174, 204, 234, 264),
 }
 TABLE_LINE = re.compile(
-    r'^(RIGHT|LEFT)\s+(stepper|elbow)\s+((?:\S+\s+){5})limits', re.I)
+    r'^(RIGHT|LEFT)\s+(stepper|elbow)\s+(?:\(servo deg\)\s+)?((?:\S+\s+){5})limits', re.I)
 # Arduino lines worth showing at AISANA_ARM_ECHO=1 (errors and safety only).
 IMPORTANT_LINE = re.compile(
     r'STOPPED|EMERGENCY|limit is|nearest limit|limit reached|not set|feedback is OFF|'
@@ -48,10 +50,14 @@ IMPORTANT_LINE = re.compile(
 SERIOUS_LINE = re.compile(r'STEPPER STOPPED|wrong way|outside limits|feedback is OFF|is not set', re.I)
 STOPPED_AT = re.compile(r'stopped at (-?[\d.]+) \(target (-?[\d.]+)\)', re.I)
 # Lines of the firmware's help text ("h"), printed at every start.
-HELP_LINE = re.compile(r'^(?:-{5,}|Arm:|Whole arm:|Stepper:|Jog:|Elbow:|Gripper:|Other:)', re.I)
+HELP_LINE = re.compile(r'^(?:-{5,}|Arm:|Whole arm:|Stepper:|Jog:|Elbow:|Gripper:|Hand:|Right elbow:|Other:)', re.I)
 # "p" status lines, e.g. "RIGHT stepper: 42.01  target 42.01  [between positions]"
 STATUS_LINE = re.compile(
     r'^(RIGHT|LEFT)\s+(stepper|elbow):\s+(-?[\d.]+)\s+target\s+(-?[\d.]+)\s*(.*)$', re.I)
+# Elbow without a pot (right arm, checked5): "RIGHT elbow:   servo 80.00 deg (no pot)  [at position 0]"
+NO_POT_LINE = re.compile(r'^(RIGHT|LEFT)\s+elbow:\s+servo\s+(-?[\d.]+)\s+deg\s+\(no pot\)\s*(.*)$', re.I)
+# "RIGHT hand:    SHAKING" = a shaking hand instead of a gripper on that arm.
+HAND_LINE = re.compile(r'^(RIGHT|LEFT)\s+(hand|gripper):', re.I)
 JOINT_TITLES = {('right', 'shoulder'): 'right shoulder', ('right', 'elbow'): 'right elbow',
                 ('left', 'shoulder'): 'left shoulder', ('left', 'elbow'): 'left elbow'}
 
@@ -65,6 +71,11 @@ def parse_status(lines):
             joint = 'shoulder' if match.group(2).lower() == 'stepper' else 'elbow'
             result[(match.group(1).lower(), joint)] = (
                 float(match.group(3)), float(match.group(4)), match.group(5).strip())
+            continue
+        match = NO_POT_LINE.match(line.strip())
+        if match:                      # target None: moves by timing, no feedback
+            result[(match.group(1).lower(), 'elbow')] = (float(match.group(2)), None,
+                                                          (match.group(3).strip() + ' no pot').strip())
     return result
 
 
@@ -106,10 +117,10 @@ def build_command(action, arm='both', position=None, joint='whole'):
         if joint_letter is None:
             raise ArmError('Unknown joint: {!r}'.format(joint))
         return ' '.join(part for part in (letter, joint_letter, str(number)) if part)
-    if action == 'gripper_open':
-        return letter + ' g o'
-    if action == 'gripper_close':
-        return letter + ' g c'
+    if action in ('gripper_open', 'gripper_close'):
+        return letter + (' g o' if action == 'gripper_open' else ' g c')
+    if action in ('hand_shake', 'hand_still'):
+        return 'r g ' + ('s' if action == 'hand_shake' else 'n')   # only the right arm has the hand
     raise ArmError('Unknown arm action: {!r}'.format(action))
 
 
@@ -219,6 +230,9 @@ class ArmController(object):
         self.echo = int(echo)
         self.up_toward_4 = up_toward_4
         self.position_table = dict(DEFAULT_POSITION_TABLE)
+        # checked5: a shaking hand on the right arm instead of a gripper. Updated from
+        # the firmware's status ("RIGHT hand:" / "RIGHT gripper:").
+        self.hands = {'right': True, 'left': False}
         self.log = log
 
     def open(self):
@@ -279,6 +293,9 @@ class ArmController(object):
         if self.echo >= 2 or (self.echo == 1 and IMPORTANT_LINE.search(line)
                                and not HELP_LINE.match(line)):
             self.log('Arduino: ' + line)
+        hand = HAND_LINE.match(line)
+        if hand:
+            self.hands[hand.group(1).lower()] = hand.group(2).lower() == 'hand'
         if READY_TEXT in line and not self.ready.is_set():
             self.ready.set()
             self.log('Arm: ready.')
@@ -318,8 +335,17 @@ class ArmController(object):
         ~1 s after the moves, so the summary says "47 -> 61, target 77, still
         moving" or "DID NOT MOVE" instead of assuming success.
         """
-        commands, joints = [], []
+        commands, joints, notes = [], [], []
         for intent in intents:
+            if intent['action'] in ('gripper_open', 'gripper_close') and self.hands.get(intent['arm']):
+                notes.append('the {} arm has a hand, not a gripper: it cannot open or close '
+                             '(it can shake: "помаши рукой")'.format(intent['arm']))
+                continue
+            if (intent['action'] in ('gripper_open', 'gripper_close') and intent['arm'] == 'both'
+                    and any(self.hands.values())):
+                side = 'left' if self.hands.get('right') else 'right'
+                commands.append(build_command(intent['action'], side))   # only the arm with a gripper
+                continue
             if intent['action'] == 'nudge':
                 commands += nudge_commands(intent['arm'], intent['joint'], intent['direction'],
                                            intent['degrees'], self.position_table, self.up_toward_4)
@@ -331,6 +357,8 @@ class ArmController(object):
                     joints.append(key)
         if not verify or 'x' in commands:
             joints = []
+        if not commands:
+            return 'Nothing sent: ' + '; '.join(notes) + '. Tell the user in a few words.'
         status_only = commands == ['p']
         before = parse_status(self.send('p', collect_seconds=0.3)) if joints else {}
         lines = []
@@ -357,6 +385,10 @@ class ArmController(object):
                 now, target, _note = after[key]
                 start_value = before.get(key, (None,))[0]
                 moved = start_value is not None and abs(now - start_value) >= 1.5
+                if target is None:          # no pot: the servo angle it is sent to, no feedback
+                    report.append('{}: servo at {:.0f} deg (no sensor, moves by timing)'.format(
+                        JOINT_TITLES[key], now))
+                    continue
                 if abs(target - now) <= 3:
                     state = 'reached' if moved or start_value is None else 'already there'
                 elif moved:
@@ -370,6 +402,8 @@ class ArmController(object):
             if any('DID NOT MOVE' in item for item in report):
                 summary += (' Tell the user honestly which joint did not move '
                             '(check motor power, limit or load); never claim it moved.')
+        if notes:
+            summary += ' Not sent: ' + '; '.join(notes) + '.'
         if problems:
             summary += ' Arduino reported: ' + ' | '.join(sorted(set(problems))[-3:])
         return summary
@@ -407,7 +441,7 @@ class ArmController(object):
                     if line not in problems:
                         problems.append(line)
             for key in joints:
-                if key in early and key in late:
+                if key in early and key in late and late[key][1] is not None:
                     now, target, _note = late[key]
                     if abs(target - now) > 4 and abs(now - early[key][0]) < 1.0:
                         problems.append('{} is not moving: at {:.0f}, target {:.0f}'.format(
@@ -599,9 +633,20 @@ def describe(intents):
             parts.append('{} {} {} degrees'.format(who, intent['direction'], intent['degrees']))
         elif intent['action'] in ('gripper_open', 'gripper_close'):
             parts.append('{} gripper {}'.format(side[intent['arm']], intent['action'].split('_')[1]))
+        elif intent['action'] == 'hand_shake':
+            parts.append('right hand shaking (until told to stop)')
+        elif intent['action'] == 'hand_still':
+            parts.append('right hand stops shaking')
         else:
             parts.append(intent['action'])
     return '; '.join(parts)
+# The right hand (checked5) shakes: "помаши рукой", "потряси рукой", "дай пять"...
+SHAKE_WORDS = re.compile(
+    r'(?:помаши|помахай|маши|махни|махать|маха\w*|потряс\w*|тряс\w*|покачай|пожми|рукопожат\w*|дай пять|'
+    r'\bwave\b|\bshake\b|\bhigh five\b|бұлға\w*|сілке\w*)', re.I)
+STILL_WORDS = re.compile(
+    r'(?:перестань\w*|хватит|прекрати\w*|не маши|не тряси|успокой\w*|stop (?:waving|shaking)|'
+    r'enough|жетер\w*)', re.I)
 CONTINUE_WORDS = re.compile(
     r'(?:ещ[её]|снова|опять|повтори|\bagain\b|\bmore\b|тағы|كمان)', re.I)
 
@@ -617,8 +662,12 @@ def parse_arm_command(text):
         arm = 'left'
     else:
         arm = 'both'                    # "руки", "обе руки", or both sides named
+    if SHAKE_WORDS.search(q) and STILL_WORDS.search(q):
+        return _intent('hand_still', 'right')     # "хватит махать рукой"
     if STOP_WORDS.search(q):
         return _intent('stop')
+    if SHAKE_WORDS.search(q) and not LEFT_WORDS.search(q):
+        return _intent('hand_shake', 'right')     # "помаши рукой", "пожми руку"
     number = _position_number(q)
     if number is not None:
         joint = 'whole'
@@ -673,6 +722,12 @@ def arm_reply(intent, language='Russian', error=None):
             'Egyptian Arabic': '{} {} {} درجات.'.format('بعلّي' if up else 'بنزّل', side, degrees),
             'English': '{} {} by {} degrees.'.format('Raising' if up else 'Lowering', side, degrees),
         }[language]
+    if action in ('hand_shake', 'hand_still'):
+        shake = action == 'hand_shake'
+        return {'Russian': 'Машу!' if shake else 'Всё, не машу.',
+                'Kazakh': 'Бұлғап тұрмын!' if shake else 'Болды, тоқтаттым.',
+                'Egyptian Arabic': 'بسلّم!' if shake else 'خلاص وقفت.',
+                'English': 'Waving!' if shake else 'Stopped waving.'}[language]
     if action == 'position':
         number = intent['position']
         return {

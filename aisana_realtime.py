@@ -366,7 +366,8 @@ def tool_definitions():
                          'position. For relative requests (a bit higher, lower, чуть-чуть наверх) use '
                          'action nudge with direction and degrees.'),
          'parameters': {'type': 'object', 'properties': {
-             'action': {'type': 'string', 'enum': ['position', 'nudge', 'gripper_open', 'gripper_close', 'stop', 'status']},
+             'action': {'type': 'string', 'enum': ['position', 'nudge', 'gripper_open', 'gripper_close', 'hand_shake', 'hand_still', 'stop', 'status'],
+                        'description': 'hand_shake / hand_still: the RIGHT arm has a shaking hand (wave, greet), not a gripper; only the left arm opens/closes'},
              'arm': {'type': 'string', 'enum': ['right', 'left', 'both'],
                      'description': 'Use both when the user does not say which arm'},
              'position': {'type': 'integer', 'minimum': 0, 'maximum': 4,

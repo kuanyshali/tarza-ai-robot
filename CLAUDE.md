@@ -13,7 +13,9 @@ Aisana (Айсана): university voice robot on an NVIDIA Jetson Nano. The owne
   (text commands: `b 1`, `l g o`, `r m 3`, `x` emergency stop, `p` status). Only whitelisted
   commands from `aisana_arm.build_command` may be sent. Opening the port resets the board;
   wait for `Both arms ready.`. Physical motion: keep "стоп" → `x` working in both modes.
-  Latest firmware: robotic_arms_checked.ino (Nov 19; right elbow positions 106..46, limits 32-134).
+  Latest firmware: robotic_arms_checked5.ino (Nov 23): RIGHT elbow has NO pot (positions = servo angles
+  80,106,132,158,184; rest 80 = down; status 'servo N deg (no pot)', no feedback), RIGHT arm has a shaking
+  HAND ('r g s' shake / 'r g n' stop) instead of a gripper; only the LEFT gripper opens/closes.
   Arm moves are verified with "p" before/after; never let the model claim motion without feedback.
   In realtime mode explicit commands are re-parsed from the STT transcript (aisana_arm.parse_arm_commands);
   model arguments are used only for vague arm requests.
