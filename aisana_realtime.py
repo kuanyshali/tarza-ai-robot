@@ -205,6 +205,35 @@ OWN = {'purpose': 'own'}            # responses the code asked for itself
 SILENT_RESULT = '[silent] '          # tool results that need no spoken reply
 
 
+HUMOR_FILE = os.environ.get('AISANA_HUMOR_FILE', os.path.expanduser('~/.local/share/aisana/humor.txt'))
+
+
+def load_humor():
+    """AISANA_HUMOR wins; else the last level set by voice or the panel; else 45."""
+    value = os.environ.get('AISANA_HUMOR')
+    if value is None:
+        try:
+            with open(HUMOR_FILE) as handle:
+                value = handle.read().strip()
+        except (IOError, OSError):
+            value = '45'
+    try:
+        return max(0, min(100, int(value)))
+    except ValueError:
+        return 45
+
+
+def save_humor(value):
+    try:
+        folder = os.path.dirname(HUMOR_FILE)
+        if folder and not os.path.isdir(folder):
+            os.makedirs(folder)
+        with open(HUMOR_FILE, 'w') as handle:
+            handle.write('{}\n'.format(value))
+    except (IOError, OSError) as exc:
+        print('Humor not saved:', exc)
+
+
 def humor_instructions(humor):
     """Personality by humor level, like TARS in Interstellar ("humor 75%").
 
@@ -588,7 +617,7 @@ class RealtimeAisana(object):
         self.arm_lock = threading.Lock()
         self.last_arm_at = 0.0
         self.local_items = set()            # commands already run from the user's words
-        self.humor = max(0, min(100, int(os.environ.get('AISANA_HUMOR', '45'))))
+        self.humor = load_humor()
         self.shouts = ShoutPlayer()
         self.oob_ids = set()                # out-of-band responses (shout recording)
         self.shout_buffer = bytearray()
@@ -1297,18 +1326,23 @@ class RealtimeAisana(object):
 
     def set_humor(self, item_id, value):
         """"Айсана, юмор 60 процентов" - changes her personality live."""
-        self.humor = max(0, min(100, value))
-        print('Humor setting: {}%'.format(self.humor))
+        self.apply_humor(value)
         with self.arm_lock:
             self.responded_items.add(item_id)
             self.local_items.add(item_id)
         self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
         self.cancel_reply()
-        self.send({'type': 'session.update', 'session': {'type': 'realtime', 'instructions': self.instructions()}})
         self.expect_tool_response = True
         self.send({'type': 'response.create', 'response': {'metadata': OWN, 'tool_choice': 'none', 'instructions': self.reply_language() + (
             'The user set your humor level to {}%. Confirm it in ONE short sentence in the new style; you may say the number this once.'.format(
                 self.humor))}})
+
+    def apply_humor(self, value):
+        """New level for the next answers (voice command or panel); kept across restarts."""
+        self.humor = max(0, min(100, int(value)))
+        print('Humor setting: {}%'.format(self.humor))
+        save_humor(self.humor)
+        self.send({'type': 'session.update', 'session': {'type': 'realtime', 'instructions': self.instructions()}})
 
     def start_prefetch(self):
         """Look while the user is still speaking: "кто перед тобой?" is then
@@ -1719,6 +1753,13 @@ class RealtimeAisana(object):
                 self.send({'type': 'response.create', 'response': {'metadata': OWN}})
             threading.Thread(target=worker, daemon=True).start()
             return {'ok': True}
+        if action == 'humor':
+            try:
+                value = int(float(text))
+            except ValueError:
+                return {'ok': False, 'error': 'humor must be 0-100'}
+            self.apply_humor(value)            # silent: she just jokes more or less from now on
+            return {'ok': True, 'humor': self.humor}
         return {'ok': False, 'error': 'unknown action'}
 
     def stop_motion(self):

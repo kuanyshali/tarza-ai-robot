@@ -4,7 +4,11 @@ import json
 import time
 import unittest
 
+import os
+import tempfile
 import aisana_realtime as rt
+
+rt.HUMOR_FILE = os.path.join(tempfile.mkdtemp(), 'humor.txt')   # never touch the real one
 
 # Most tests were written for 'answer in the user's language'; English-only has its own tests.
 rt.FIXED_LANGUAGE = None
@@ -270,6 +274,17 @@ class HumorAndCameraTests(unittest.TestCase):
         self.assertIn('never joke about', text.replace("Never", 'never'))
         self.assertIn('NEVER mention the humor level', text)   # no "юмор 100%" in every answer
         self.assertIn('no jokes', rt.humor_instructions(10))
+
+    def test_panel_sets_humor_silently_and_keeps_it(self):
+        session, sent = make_session()
+        result = session.panel_action('humor', '80')
+        self.assertEqual(result, {'ok': True, 'humor': 80})
+        kinds = types(sent)
+        self.assertIn('session.update', kinds)
+        self.assertNotIn('response.create', kinds)           # no spoken confirmation
+        self.assertEqual(rt.load_humor(), 80)                # next start uses it
+        self.assertEqual(session.panel_action('humor', '250')['humor'], 100)
+        self.assertFalse(session.panel_action('humor', 'lots')['ok'])
 
     def test_voice_command_changes_humor(self):
         session, sent = make_session()

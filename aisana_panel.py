@@ -1,6 +1,6 @@
 """Phone control panel for Aisana:  python3 aisana_panel.py   ->  http://<jetson>:8080
 
-Buttons: start / stop Aisana, emergency STOP, wave, dance, "say this", "ask her",
+Buttons: start / stop Aisana, emergency STOP, wave, dance, humor slider, "say this", "ask her",
 live status (arms, legs, camera, internet) and the last log lines.
 Python 3.6 standard library only (runs with the system python3 on the Jetson).
 No login (the owner's choice): reach it over the robot's Wi-Fi, Tailscale or a
@@ -80,6 +80,7 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
  .on{background:#3ecf6e}.off{background:#e5484d}
  main{padding:0 14px 30px;max-width:640px;margin:auto}
  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}
+ .grid.h5{grid-template-columns:repeat(5,1fr);gap:6px}.grid.h5 button{font-size:13px;padding:10px 2px}
  button{border:0;border-radius:14px;padding:16px;font-size:17px;font-weight:600;color:#fff;background:#2b2f3a}
  button:active{transform:scale(.98)}
  .stop{background:#e5484d;font-size:22px;grid-column:span 2;padding:22px}
@@ -104,6 +105,15 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
   <textarea id="text" placeholder="Текст для Айсаны"></textarea>
   <div class="grid"><button onclick="talk('say')">Сказать это</button><button onclick="talk('ask')">Спросить её</button></div>
  </div>
+ <div class="card">
+  <div class="row"><span>😏 Юмор и сарказм</span><b id="hv">—</b></div>
+  <input id="humor" type="range" min="0" max="100" step="5" style="width:100%"
+   oninput="hTouch=Date.now();document.getElementById('hv').textContent=this.value+'%'"
+   onchange="hTouch=Date.now();post('/api/action',{action:'humor',text:this.value})">
+  <div class="grid h5">
+   <button onclick="setH(0)">0 серьёзно</button><button onclick="setH(25)">25</button><button onclick="setH(45)">45</button><button onclick="setH(75)">75</button><button onclick="setH(100)">100 TARS</button>
+  </div>
+ </div>
  <div id="msg"></div>
  <div class="card" id="state"></div>
  <div class="card"><pre id="log"></pre></div>
@@ -112,6 +122,8 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 const msg=t=>{document.getElementById('msg').textContent=t};
 async function post(url,body){try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});const j=await r.json();msg(j.ok?'Готово':'Ошибка: '+(j.error||''));setTimeout(refresh,800)}catch(e){msg('Нет связи с роботом')}}
 function act(a){post('/api/action',{action:a})}
+let hTouch=0;
+function setH(v){hTouch=Date.now();document.getElementById('humor').value=v;document.getElementById('hv').textContent=v+'%';post('/api/action',{action:'humor',text:String(v)})}
 function talk(a){const t=document.getElementById('text').value.trim();if(!t)return msg('Напиши текст');post('/api/action',{action:a,text:t})}
 const R=(k,v)=>`<div class="row"><span>${k}</span><span>${v}</span></div>`;
 async function refresh(){try{const s=await (await fetch('/api/status')).json();
@@ -122,6 +134,7 @@ async function refresh(){try{const s=await (await fetch('/api/status')).json();
  if(a&&a.ok){h+=R('OpenAI',a.connected?'на связи':'подключается')+R('Руки',a.arms)+R('Ноги',a.legs)+R('Камера',a.camera)+R('Лиц в памяти',a.faces)+R('Язык',a.language)+R('Юмор',a.humor+'%')+R('Сейчас',a.moving?'двигается':(a.speaking?'говорит':'слушает'))}
  else if(s.running){h+=R('Статус',(a&&a.error)||'запускается…')}
  document.getElementById('state').innerHTML=h;
+ if(a&&a.ok&&Date.now()-hTouch>5000){document.getElementById('humor').value=a.humor;document.getElementById('hv').textContent=a.humor+'%'}
  const log=document.getElementById('log');const atEnd=log.scrollTop+log.clientHeight>=log.scrollHeight-20;
  log.textContent=(s.log||[]).join('\n');if(atEnd)log.scrollTop=log.scrollHeight;
 }catch(e){document.getElementById('dot').className='dot off';msg('Нет связи с роботом')}}

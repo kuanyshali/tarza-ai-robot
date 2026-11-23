@@ -17,7 +17,7 @@ import socketserver
 import threading
 
 CONTROL_PORT = 8091
-ACTIONS = ('status', 'stop', 'wave', 'dance', 'say', 'ask')
+ACTIONS = ('status', 'stop', 'wave', 'dance', 'say', 'ask', 'humor')
 MAX_TEXT = 300
 
 
@@ -64,7 +64,7 @@ class ControlServer(object):
         if action == 'status':
             return dict(ok=True, **session.panel_status())
         text = str(request.get('text') or '').strip()[:MAX_TEXT]
-        if action in ('say', 'ask') and not text:
+        if action in ('say', 'ask', 'humor') and not text:
             return {'ok': False, 'error': 'empty text'}
         return session.panel_action(action, text)
 
