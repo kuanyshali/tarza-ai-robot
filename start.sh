@@ -22,8 +22,9 @@ fi
 # powered on), offer it first; it still asks to lift the robot.
 legs="$(curl -s --max-time 3 "$AISANA_LEGS_URL/motor/status")"
 case "$legs" in
-    *alibrat*)
-        echo "The wheels need calibrating."
+    *alibrat*|*DISCONNECTED*)
+        # After the ODrive is powered on it needs a calibration (that also connects it).
+        echo "The wheels need calibrating (ODrive just switched on)."
         if ./calibrate_legs.sh; then
             read -r -p "Robot back on the floor? Press Enter to start Aisana. " _
         else
