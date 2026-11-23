@@ -305,6 +305,20 @@ class KeepAliveTests(unittest.TestCase):
         c.keepalive_step(now=0)
         self.assertEqual(pi.posts, [('/motor/enable', {'calibrate': False})])
 
+    def test_heartbeat_starts_right_after_enabling(self):
+        # Nov 23: the first check came 3 s after enabling; the Pi had switched the
+        # motors off again after 0.75 s without a heartbeat (CONTROL LINK LOST loop).
+        pi = StatePi('CONTROL LINK LOST')
+        c = self.controller(pi)
+        c.keepalive_step(now=0)                       # asks to enable
+        pi.state, pi.enabled = 'ENABLED', True        # the Pi enabled ~0.5 s later
+        t, waited = 0.0, 0.0
+        while not c.alive_on and t < 2:
+            t += 0.2
+            c.keepalive_step(now=t)
+        self.assertTrue(c.alive_on)
+        self.assertLess(t, 0.75)                      # before the Pi's link timeout
+
     def test_waits_while_the_pi_connects(self):
         pi = StatePi('CONNECTING / ENABLING', connecting=True)
         c = self.controller(pi)

@@ -124,6 +124,7 @@ class LegsController(object):
         self.calibrations = []               # times of automatic calibrations
         self.alive_on = False                # motors on and kept on by the keep-alive
         self._next_check = 0.0
+        self._enabling_until = 0.0           # just asked to enable: poll fast, heartbeat at once
         self._last_note = ''
 
     # --- raw API -----------------------------------------------------------
@@ -199,7 +200,10 @@ class LegsController(object):
             self._note('motors went off ({}); switching them on again.'.format(data.get('state', '?')))
         if now < self._next_check:
             return 0.2
-        self._next_check = now + 3.0
+        # Right after an enable request poll every 0.2 s: the Pi switches the motors
+        # off again 0.75 s after enabling unless a heartbeat comes (Nov 23 log:
+        # "switching the motors on" -> CONTROL LINK LOST -> on -> lost ...).
+        self._next_check = now + (0.2 if now < self._enabling_until else 3.0)
         status = self.status()
         if status.get('enabled'):
             self.alive_on = True
@@ -207,7 +211,9 @@ class LegsController(object):
             return KEEPALIVE_SECONDS
         if status.get('connecting'):
             self._note('the Pi is connecting to the ODrive ({}).'.format(status.get('state', '?')))
-            return 0.5
+            self._enabling_until = max(self._enabling_until, now + 2.0)
+            self._next_check = now + 0.2
+            return 0.2
         state = str(status.get('state', ''))
         error = str(status.get('error') or '')
         if 'NEEDS CALIBRATION' in state or (state == 'ERROR' and 'calibration failed' in error):
@@ -228,14 +234,16 @@ class LegsController(object):
                     pass
             self._closed.wait(3.0)            # time to step away
             self._post('/motor/enable', {'calibrate': True}, timeout=2.0)
-            self._next_check = now + 5.0
-            return 0.5
+            self._enabling_until = now + 60.0  # calibration, then closed loop
+            self._next_check = now + 0.2
+            return 0.2
         # DISCONNECTED, CONTROL LINK LOST, DISABLED or another error: switch on
         # without calibration (keeps the old calibration, nothing moves).
         self._note('switching the motors on ({}).'.format(state or '?'))
         self._post('/motor/enable', {'calibrate': False}, timeout=2.0)
-        self._next_check = now + (3.0 if state != 'ERROR' else 15.0)
-        return 0.5
+        self._enabling_until = now + ENABLE_TIMEOUT
+        self._next_check = now + (0.2 if state != 'ERROR' else 15.0)
+        return 0.2
 
     # --- drives ------------------------------------------------------------
     def obstacle(self):
