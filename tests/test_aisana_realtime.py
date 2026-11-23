@@ -491,6 +491,45 @@ class BackgroundTalkTests(unittest.TestCase):
         self.assertEqual(legs.intents, [])                           # "поворот" before her name never drives
 
 
+class StopAndGreetTests(unittest.TestCase):
+    """Jetson log, Nov 23."""
+
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_stop_is_sent_once_and_confirmed_with_a_fixed_phrase(self):
+        # "Асана, стоп" -> two EMERGENCY STOPs and "Опускаю руки в ноль."
+        session, sent = make_session()
+        session.arm = FakeArm()
+        say(session, 's1', 'Асана, стоп.')
+        self.assertEqual(session.arm.stopped, 1)
+        self.assertIn('s1', session.local_items)
+        result = session.run_tool('move_arm', {'action': 'stop', 'arm': 'right'})
+        self.assertIn('Already executed', result)
+        self.assertEqual(session.arm.stopped, 1)
+        deadline = time.time() + 3
+        while not any('Стою' in str(m) for m in sent) and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(any('Стою' in str(m) for m in sent))
+
+    def test_greeting_waves_the_hand(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        say(session, 'g1', 'Айсана, поздоровайся.')
+        deadline = time.time() + 2
+        while not session.arm.calls and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(session.arm.calls[0][0], 'hand_shake')
+        session.stop.set()                              # ends the wave timer early
+
+    def test_short_legs_errors(self):
+        self.assertIn('no answer', rt.aisana_legs.short_error(Exception('Connection to 10.42.0.148 timed out.')))
+
+
 class ArmReconnectTests(unittest.TestCase):
     def setUp(self):
         self.original = rt.WAKE_GATE

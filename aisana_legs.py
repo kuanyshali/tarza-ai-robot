@@ -75,6 +75,18 @@ def plan_seconds(intent, speed_kmh=2.0, spin_90=0.6):
     return max(0.3, min(MAX_SECONDS, seconds))
 
 
+def short_error(error):
+    """'timed out' instead of three lines of urllib3 (Jetson log, Nov 23)."""
+    text = str(error)
+    if 'timed out' in text or 'Timeout' in text:
+        return 'no answer: Pi off, cable out or another IP'
+    if 'Connection refused' in text:
+        return 'Pi answers but the legs app (port 5000) is not running'
+    if 'Name or service' in text or 'No route' in text or 'unreachable' in text:
+        return 'no route to the Pi'
+    return text[:120]
+
+
 class LegsController(object):
     """HTTP client for the Pi plus one background drive at a time."""
 
@@ -142,7 +154,7 @@ class LegsController(object):
             self._post('/motor/command', {'command': 'stop'}, timeout=0.5)
         except Exception as error:
             # No heartbeat any more: the Pi stops on its own within 0.35 s.
-            self.log('Legs: stop request failed ({}); the Pi stops by itself.'.format(error))
+            self.log('Legs: stop request failed ({}); the Pi stops by itself.'.format(short_error(error)))
 
     def change_speed(self, delta):
         code, data = self._post('/motor/speed', {'delta': delta})
@@ -254,7 +266,7 @@ def connect_from_environment(log=print, environ=None, http=None):
         status = legs.status()
         log('Legs: Pi at {} answers, motors {}.'.format(url, status.get('state', '?')))
     except Exception as error:
-        log('Legs: Pi at {} not reachable ({}); will retry on each command.'.format(url, error))
+        log('Legs: Pi at {} not reachable ({}); will retry on each command.'.format(url, short_error(error)))
     return legs
 
 

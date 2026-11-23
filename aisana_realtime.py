@@ -222,6 +222,10 @@ FACE_GREET_MINUTES = float(os.environ.get('AISANA_FACE_GREET_MINUTES', '30'))
 POSSESSIVE_RE = re.compile(r'\b(?:мой|моя|моё|мое|мои|my)\b', re.I)
 THING_FILLER_RE = re.compile(r'\b(?:мой|моя|моё|мое|мои|наш|наша|наше|этот|эту|эта|это|вот|my|our|this|the)\b', re.I)
 
+# "Айсана, поздоровайся": she says hello AND waves the right hand for 3 s.
+GREET_RE = re.compile(r'(?:поздоровайся|поприветствуй|поздоровай|say hello|greet (?:us|them|him|her)|'
+                      r'wave hello|сәлемдес\w*)', re.I)
+
 HUMOR_RE = re.compile(r'(?:юмор\w*|сарказм\w*|\bhumou?r\b|\bsarcasm\b|әзіл\w*)\D{0,20}?(\d{1,3})', re.I)
 # Visual questions are answered by the camera at once, in first person.
 CAMERA_RE = re.compile(
@@ -677,8 +681,8 @@ class RealtimeAisana(object):
         if intents[0]['action'] != 'stop':
             self.arm.watch(intents, self.report_arm_problem)
         problem = ' Arduino said: ' + result.split('Arduino reported: ', 1)[1] if 'Arduino reported: ' in result else ''
-        return ('Sent to the arms: {}.{} Say ONLY a few words that you are doing it '
-                '(Russian: "Опускаю руки в ноль." English: "Lowering my arms."). Do not describe results; '
+        return ('Sent to the arms: {}.{} Say ONLY a few words that you are doing exactly this '
+                '(e.g. Russian: "Делаю." English: "On it."). Do not describe results; '
                 'sensors are checked automatically and problems will be reported to you.'.format(
                     describe(intents), problem))
 
@@ -1473,6 +1477,20 @@ class RealtimeAisana(object):
                     self.say_phrase('{} (you know them) just came into view.'.format(name), 'greet', name)
                     break
 
+    def wave_hello(self, seconds=3.0):
+        """Right hand shakes for a moment, then stops (a greeting gesture)."""
+        arm = self.arm
+
+        def worker():
+            try:
+                arm.execute_many([make_intent('hand_shake', 'right')], verify=False)
+                print('Arms: waving hello.')
+                if not self.stop.wait(seconds):
+                    arm.execute_many([make_intent('hand_still', 'right')], verify=False)
+            except Exception as exc:
+                print('Arms: wave failed:', exc)
+        threading.Thread(target=worker, daemon=True).start()
+
     def reconnect_arm(self):
         """The Arduino was missing or busy at start (Jetson log, Nov 20: "the arm
         controller is not connected"): try again when an arm command comes,
@@ -1578,6 +1596,20 @@ class RealtimeAisana(object):
             self.stop_playback()
         addressed = (not WAKE_GATE or item_id in self.responded_items
                      or self.dialog_active() or has_wake_name(transcript))
+        if stop and addressed:
+            # Already stopped above. Jetson log, Nov 23: the model then called
+            # move_arm stop again (a second "x") and said "Опускаю руки в ноль".
+            if held:
+                self.release_hold(drop=True)
+            with self.arm_lock:
+                self.local_items.add(item_id)
+                self.responded_items.add(item_id)
+            self.cancel_reply()
+            phrase = {'Russian': 'Стою.', 'English': 'Stopped.', 'Kazakh': 'Тоқтадым.',
+                      'Egyptian Arabic': 'وقفت.'}.get(self.user_language, 'Stopped.')
+            threading.Thread(target=self.speak_report, daemon=True, args=(
+                'Robot report: wheels and arms were stopped.', confirm_instruction(phrase, ''))).start()
+            return
         if addressed and not stop and (arm_intents or drive):
             # A clear command: run it now from the user's exact words and only
             # confirm it, instead of letting the model think aloud first.
@@ -1585,6 +1617,8 @@ class RealtimeAisana(object):
                 self.release_hold(drop=True)
             self.run_command_locally(item_id, arm_intents, drive)
             return
+        if addressed and not stop and self.arm is not None and GREET_RE.search(transcript):
+            self.wave_hello()                       # the reply itself comes from the model below
         humor = HUMOR_RE.search(transcript) if addressed and not stop else None
         if humor:
             if held:
