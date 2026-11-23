@@ -223,6 +223,10 @@ POSSESSIVE_RE = re.compile(r'\b(?:мой|моя|моё|мое|мои|my)\b', re.
 THING_FILLER_RE = re.compile(r'\b(?:мой|моя|моё|мое|мои|наш|наша|наше|этот|эту|эта|это|вот|my|our|this|the)\b', re.I)
 
 WAVE_SECONDS = float(os.environ.get('AISANA_WAVE_SECONDS', '6'))
+# "Айсана, танцуй": arms up, right hand waves, she spins with her shouts, then arms down.
+DANCE_RE = re.compile(r'(?:\bтанцу\w*|потанцу\w*|станцу\w*|затанцу\w*|\bdance\b|\bdancing\b|'
+                      r'билеші\w*|биле\b|ارقص\w*)', re.I)
+DANCE_SECONDS = float(os.environ.get('AISANA_DANCE_SECONDS', '6'))
 WAVE_FOR = re.compile(r'(\d{1,2})\s*(?:сек\w*|с\b|seconds?|secs?|s\b)', re.I)
 
 
@@ -1504,7 +1508,57 @@ class RealtimeAisana(object):
                 print('Arms: wave failed:', exc)
         threading.Thread(target=worker, daemon=True).start()
 
-    def end_wave_after(self, seconds=None):
+    def run_dance_locally(self, item_id, transcript):
+        """Arms up and waving while she spins with shouts; afterwards arms down.
+        Time from the words ("танцуй 8 секунд", at most 10) or AISANA_DANCE_SECONDS."""
+        with self.arm_lock:
+            self.local_items.add(item_id)
+            self.responded_items.add(item_id)
+            self.arm_done_items.add(item_id)
+            self.legs_done_items.add(item_id)
+        self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+        self.cancel_reply()
+        found = WAVE_FOR.search(transcript or '')
+        seconds = min(aisana_legs.MAX_SECONDS, float(found.group(1)) if found else DANCE_SECONDS)
+
+        def worker():
+            done = []
+            if self.arm is None:
+                self.reconnect_arm()
+            arm = self.arm
+            if arm is not None:
+                try:
+                    self.wave_id += 1
+                    arm.execute_many([make_intent('position', 'both', 3, 'shoulder'),
+                                      make_intent('hand_shake', 'right')], verify=False)
+                    done.append('arms up, right hand waving')
+                    self.end_wave_after(seconds + 0.5, finish=[make_intent('hand_still', 'right'),
+                                                               make_intent('position', 'both', 0)])
+                except Exception as exc:
+                    print('Dance: arms failed:', exc)
+            spun = None
+            if self.legs is not None:
+                try:
+                    spun = self.legs.execute(aisana_legs.make_intent('spin_right', seconds=seconds),
+                                             self.report_legs_problem)
+                    done.append('legs: ' + spun)
+                except Exception as exc:
+                    print('Dance: legs failed:', exc)
+            print('Dance (from your words) -> ' + ('; '.join(done) or 'nothing connected'))
+            moving = re.search(r'Driving \S+(?: \S+)? for ([\d.]+) s', spun or '')
+            if moving:
+                self.motion_until = time.monotonic() + float(moving.group(1)) + 1.0
+                self.shouts.play_for(float(moving.group(1)))
+            elif done:
+                self.speak_report('Robot report: dancing with the arms only (no wheels).',
+                                  confirm_instruction('Танцую!' if self.user_language == 'Russian'
+                                                      else "I'm dancing!", ''))
+            else:
+                self.speak_report('Robot report: neither arms nor wheels are connected, no dance.',
+                                  self.reply_language() + 'In ONE short sentence say that you cannot dance now.')
+        threading.Thread(target=worker, daemon=True).start()
+
+    def end_wave_after(self, seconds=None, finish=None):
         """Stop waving and lower the right arm after a while, unless another arm
         command (or a stop) came first. Nov 23: the wave had no timer and the
         greeting ended too early; default 6 s, a spoken time works too."""
@@ -1517,9 +1571,9 @@ class RealtimeAisana(object):
             if self.stop.wait(seconds) or mine != self.wave_id or arm is None:
                 return
             try:
-                arm.execute_many([make_intent('hand_still', 'right'),
-                                  make_intent('position', 'right', 0)], verify=False)   # arm down again
-                print('Arms: waving done, right arm down.')
+                arm.execute_many(finish or [make_intent('hand_still', 'right'),
+                                            make_intent('position', 'right', 0)], verify=False)   # arm down again
+                print('Arms: waving done, arms down.')
             except Exception as exc:
                 print('Arms: could not end the wave:', exc)
         threading.Thread(target=worker, daemon=True).start()
@@ -1644,6 +1698,11 @@ class RealtimeAisana(object):
                       'Egyptian Arabic': 'وقفت.'}.get(self.user_language, 'Stopped.')
             threading.Thread(target=self.speak_report, daemon=True, args=(
                 'Robot report: wheels and arms were stopped.', confirm_instruction(phrase, ''))).start()
+            return
+        if addressed and not stop and DANCE_RE.search(transcript) and not re.search(r'\?\s*$', transcript):
+            if held:
+                self.release_hold(drop=True)
+            self.run_dance_locally(item_id, transcript)
             return
         if addressed and not stop and (arm_intents or drive):
             # A clear command: run it now from the user's exact words and only

@@ -546,6 +546,22 @@ class StopAndGreetTests(unittest.TestCase):
         self.assertNotIn('hand_still', [c[0] for c in session.arm.calls])
         self.assertEqual(rt.wave_seconds('помаши рукой'), rt.WAVE_SECONDS)
 
+    def test_dance_spins_with_arms_up_then_arms_down(self):
+        session, sent = make_session()
+        session.arm, session.legs = FakeArm(), FakeLegs()
+        session.shouts = FakeShouts()
+        say(session, 'd1', 'Айсана, потанцуй 1 секунду и подними руки')
+        deadline = time.time() + 4
+        while ('position', 'both', 0, 'whole', None, None) not in session.arm.calls and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(session.legs.intents[0]['action'], 'spin_right')
+        self.assertEqual(session.legs.intents[0]['seconds'], 1.0)
+        actions = [c[:4] for c in session.arm.calls]
+        self.assertEqual(actions[0], ('position', 'both', 3, 'shoulder'))
+        self.assertEqual(actions[1][0], 'hand_shake')
+        self.assertEqual(actions[-1], ('position', 'both', 0, 'whole'))
+        self.assertFalse(rt.DANCE_RE.search('Ты умеешь танцевать?'))
+
     def test_short_legs_errors(self):
         self.assertIn('no answer', rt.aisana_legs.short_error(Exception('Connection to 10.42.0.148 timed out.')))
 
