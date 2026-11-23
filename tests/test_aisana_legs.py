@@ -119,10 +119,10 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(legs.plan_seconds(legs.make_intent('forward')), legs.DEFAULT_SECONDS)
         self.assertAlmostEqual(legs.plan_seconds(legs.make_intent('forward', meters=1.0), 3.6), 1.0)
         # Robot, Nov 19: 1.5 s spun ~1.5 turns while the ODrive was still ramping, so the
-        # angle grows with time squared: 90 deg = 0.6 s, 360 deg = 1.2 s.
-        self.assertAlmostEqual(legs.plan_seconds(legs.make_intent('spin_left', degrees=90)), 0.6)
-        self.assertAlmostEqual(legs.plan_seconds(legs.make_intent('spin_left', degrees=360)), 1.2)
-        self.assertAlmostEqual(legs.plan_seconds(legs.make_intent('spin_left', degrees=720)), 2.4)
+        # angle grows with time squared: 90 deg = 0.84 s, 360 deg = 1.68 s (1.4x since Nov 23).
+        self.assertAlmostEqual(legs.plan_seconds(legs.make_intent('spin_left', degrees=90)), 0.84)
+        self.assertAlmostEqual(legs.plan_seconds(legs.make_intent('spin_left', degrees=360)), 1.68)
+        self.assertAlmostEqual(legs.plan_seconds(legs.make_intent('spin_left', degrees=720)), 3.36)
 
 
 class ControllerTests(unittest.TestCase):

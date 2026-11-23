@@ -22,7 +22,7 @@ Safety built on the Pi's own interlocks:
 
 Python 3.6 compatible. Environment:
     AISANA_LEGS_URL=http://192.168.1.50:5000   the Pi (unset = legs disabled)
-    AISANA_LEGS_SPIN_90_SECONDS=0.6            spin time for a 90 degree turn (360 = 2x)
+    AISANA_LEGS_SPIN_90_SECONDS=0.84           spin time for a 90 degree turn (360 = 2x)
 """
 import os
 import re
@@ -43,19 +43,23 @@ class LegsError(RuntimeError):
     """The Pi is unreachable, motors cannot be enabled, or a command is refused."""
 
 
+# Nov 23: turns were too short; all turns 1.4x longer (was 0.6 s per 90 degrees).
+SPIN_90 = 0.84
+
+
 def spin_90_seconds(environ=None):
     environ = os.environ if environ is None else environ
     try:
-        return max(0.2, min(5.0, float(environ.get('AISANA_LEGS_SPIN_90_SECONDS', '0.6'))))
+        return max(0.2, min(5.0, float(environ.get('AISANA_LEGS_SPIN_90_SECONDS', str(SPIN_90)))))
     except ValueError:
-        return 0.6
+        return SPIN_90
 
 
 def _intent(action, seconds=None, meters=None, degrees=None):
     return {'action': action, 'seconds': seconds, 'meters': meters, 'degrees': degrees}
 
 
-def plan_seconds(intent, speed_kmh=2.0, spin_90=0.6):
+def plan_seconds(intent, speed_kmh=2.0, spin_90=SPIN_90):
     """How long to drive for an intent; always within (0, MAX_SECONDS]."""
     if intent.get('seconds'):
         seconds = float(intent['seconds'])
@@ -90,7 +94,7 @@ def short_error(error):
 class LegsController(object):
     """HTTP client for the Pi plus one background drive at a time."""
 
-    def __init__(self, base_url, http=None, log=print, spin_90=0.6):
+    def __init__(self, base_url, http=None, log=print, spin_90=SPIN_90):
         if http is None:
             import requests
             http = requests.Session()        # keep-alive: no new TCP connection per heartbeat

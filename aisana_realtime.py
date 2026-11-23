@@ -1477,8 +1477,8 @@ class RealtimeAisana(object):
                     self.say_phrase('{} (you know them) just came into view.'.format(name), 'greet', name)
                     break
 
-    def wave_hello(self, seconds=3.0):
-        """Right hand shakes for a moment, then stops (a greeting gesture)."""
+    def wave_hello(self, seconds=4.0):
+        """Greeting gesture: right arm up, hand waves, then the arm goes back down."""
         arm = self.arm
 
         def worker():
@@ -1486,7 +1486,8 @@ class RealtimeAisana(object):
                 arm.execute_many([make_intent('hand_shake', 'right')], verify=False)
                 print('Arms: waving hello.')
                 if not self.stop.wait(seconds):
-                    arm.execute_many([make_intent('hand_still', 'right')], verify=False)
+                    arm.execute_many([make_intent('hand_still', 'right'),
+                                      make_intent('position', 'right', 0)], verify=False)   # arm down again
             except Exception as exc:
                 print('Arms: wave failed:', exc)
         threading.Thread(target=worker, daemon=True).start()

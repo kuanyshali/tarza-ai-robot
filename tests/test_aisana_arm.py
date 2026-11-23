@@ -397,10 +397,11 @@ class Checked5FirmwareTests(unittest.TestCase):
         fake, controller = self.open()
         try:
             controller.execute_many([arm.make_intent('hand_shake', 'right')], verify=False)
-            self.assertEqual(moves(fake), [b'r g s\n'])
+            # Nov 23: the arm is raised first (shoulder 3, elbow 4), then the hand waves.
+            self.assertEqual(moves(fake), [b'r m 3\n', b'r s 4\n', b'r g s\n'])
             summary = controller.execute_many([arm.make_intent('gripper_open', 'right')], verify=False)
             self.assertIn('has a hand', summary)
-            self.assertEqual(moves(fake), [b'r g s\n'])                # nothing new sent
+            self.assertEqual(len(moves(fake)), 3)                       # nothing new sent
             controller.execute_many([arm.make_intent('gripper_close', 'both')], verify=False)
             self.assertEqual(moves(fake)[-1], b'l g c\n')             # only the arm with a gripper
         finally:

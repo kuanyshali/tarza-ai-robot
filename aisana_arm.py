@@ -29,6 +29,19 @@ ARM_LETTERS = {'right': 'r', 'left': 'l', 'both': 'b'}
 JOINT_LETTERS = {'whole': '', 'shoulder': 'm', 'elbow': 's'}
 ACTIONS = ('position', 'nudge', 'gripper_open', 'gripper_close', 'hand_shake', 'hand_still', 'stop', 'status')
 MAX_NUDGE_DEGREES = 45
+# "Помаши рукой": the right arm is raised first (shoulder 3, elbow 4), then the hand waves.
+# AISANA_WAVE_POSE="3,4" (shoulder,elbow); "-" = do not raise.
+def _wave_pose(text):
+    try:
+        shoulder, elbow = [int(v) for v in text.split(',')]
+        if 0 <= shoulder <= 4 and 0 <= elbow <= 4:
+            return shoulder, elbow
+    except ValueError:
+        pass
+    return None
+
+
+WAVE_POSE = _wave_pose(os.environ.get('AISANA_WAVE_POSE', '3,4'))
 VERIFY_SECONDS = float(os.environ.get('AISANA_ARM_VERIFY_SECONDS', '1.0'))
 # Positions 0..4 from robotic_arms_checked5.ino (Nov 23). Replaced at runtime by
 # the table the Arduino prints at start-up ("POSITIONS (pot readings)").
@@ -80,6 +93,8 @@ def parse_status(lines):
 
 
 def affected_joints(action, arm='both', joint='whole'):
+    if action == 'hand_shake' and WAVE_POSE:
+        return [('right', 'shoulder')]   # raised for waving; the elbow has no sensor
     if action not in ('position', 'nudge'):
         return []
     sides = ('right', 'left') if arm == 'both' else (arm,)
@@ -346,6 +361,8 @@ class ArmController(object):
                 side = 'left' if self.hands.get('right') else 'right'
                 commands.append(build_command(intent['action'], side))   # only the arm with a gripper
                 continue
+            if intent['action'] == 'hand_shake' and WAVE_POSE and self.hands.get('right'):
+                commands += ['r m {}'.format(WAVE_POSE[0]), 'r s {}'.format(WAVE_POSE[1])]   # raise, then wave
             if intent['action'] == 'nudge':
                 commands += nudge_commands(intent['arm'], intent['joint'], intent['direction'],
                                            intent['degrees'], self.position_table, self.up_toward_4)
