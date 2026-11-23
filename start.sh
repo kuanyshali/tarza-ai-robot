@@ -4,6 +4,13 @@
 # Stop: Ctrl+C here, or ./stop.sh from another terminal.
 cd "$(dirname "$0")" || exit 1
 
+# The OpenAI key lives in ~/.bashrc, which is skipped when started over SSH,
+# by nohup or by a service (Nov 23: "OPENAI_API_KEY is missing"). Read just that line.
+if [ -z "$OPENAI_API_KEY" ] && [ -f "$HOME/.bashrc" ]; then
+    eval "$(grep -E '^[[:space:]]*export[[:space:]]+OPENAI_API_KEY=' "$HOME/.bashrc" | tail -1)"
+    export OPENAI_API_KEY
+fi
+
 export AISANA_LEGS_URL="${AISANA_LEGS_URL:-http://10.42.0.148:5000}"   # Raspberry Pi (legs)
 export AISANA_ECHO_TAIL_SECONDS="${AISANA_ECHO_TAIL_SECONDS:-0.4}"
 export AISANA_PLAYBACK_LEAD_MS="${AISANA_PLAYBACK_LEAD_MS:-150}"
