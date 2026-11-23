@@ -7,7 +7,9 @@ if ! pgrep -f "$PATTERN" >/dev/null; then
     exit 0
 fi
 pkill -TERM -f "$PATTERN"
-for _ in 1 2 3 4 5 6; do
+# Up to 10 s: she closes the camera cleanly first. Killing her with the camera
+# open crashes nvargus-daemon (Nov 23) and the next start has no camera.
+for _ in $(seq 1 20); do
     sleep 0.5
     pgrep -f "$PATTERN" >/dev/null || { echo "Aisana stopped."; exit 0; }
 done

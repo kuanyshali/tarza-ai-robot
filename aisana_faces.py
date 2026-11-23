@@ -180,8 +180,14 @@ class CameraStream(object):
                 return None
             time.sleep(0.05)
 
-    def stop(self):
+    def stop(self, wait=3.0):
+        """Stop and wait until the camera is released. Nov 23: the process exited
+        with the Argus session still open and nvargus-daemon crashed (ABRT); the
+        next start then got "Failed to create CameraProvider"."""
         self.stop_event.set()
+        thread = self.thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(wait)
 
 
 def jpeg(frame, quality=80):

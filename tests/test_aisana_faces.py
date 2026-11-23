@@ -120,12 +120,18 @@ class CameraStreamTests(unittest.TestCase):
 
             def release(self):
                 pass
+        released = []
+        FakeCapture.release = lambda self: released.append(True)
         stream = faces.CameraStream(opener=FakeCapture).start()
         try:
             frame = stream.latest(wait=2)
             self.assertEqual(frame.shape, (540, 960, 3))
         finally:
             stream.stop()
+        # stop() returns only after the camera is closed: exiting with the Argus
+        # session open crashed nvargus-daemon (Jetson, Nov 23).
+        self.assertEqual(released, [True])
+        self.assertFalse(stream.thread.is_alive())
 
 
 if __name__ == '__main__':

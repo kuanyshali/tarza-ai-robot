@@ -16,6 +16,16 @@ export AISANA_ECHO_TAIL_SECONDS="${AISANA_ECHO_TAIL_SECONDS:-0.4}"
 export AISANA_PLAYBACK_LEAD_MS="${AISANA_PLAYBACK_LEAD_MS:-150}"
 
 PATTERN='python[0-9.]* -u aisana_realtime[.]py'
+restart_camera_service() {
+    # Fresh camera service on every start: after an unclean exit nvargus-daemon is
+    # broken and the camera says "Failed to create CameraProvider" (Nov 23).
+    # Needs the sudo rule from ./install_panel_service.sh (no password asked).
+    if sudo -n systemctl restart nvargus-daemon 2>/dev/null; then
+        sleep 2
+    else
+        echo "Camera service not restarted (run ./install_panel_service.sh once)." >&2
+    fi
+}
 if [ ! -x .venv/bin/python ]; then
     echo "No .venv here: create it first (see README)." >&2
     exit 1
@@ -24,6 +34,7 @@ if pgrep -f "$PATTERN" >/dev/null; then
     echo "Aisana is already running. Stop it first: ./stop.sh" >&2
     exit 1
 fi
+restart_camera_service
 
 # One command for the day: if the wheels need calibrating (ODrive was just
 # powered on), offer it first; it still asks to lift the robot.

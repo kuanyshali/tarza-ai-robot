@@ -2326,12 +2326,12 @@ def main():
             print('Connection lost ({}); reconnecting in {} s... (Ctrl+C to stop)'.format(problem, delay))
             reconnect_pause(delay)
     finally:
+        if camera is not None:
+            camera.stop()               # waits for the camera release (Argus must close cleanly)
         if legs is not None:
             legs.stop()
         if arm is not None:
             arm.close()
-        if camera is not None:
-            camera.stop()
         if control is not None:
             control.close()
 
