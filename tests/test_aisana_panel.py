@@ -68,6 +68,25 @@ class ControlPortTests(unittest.TestCase):
 
 
 class PanelTests(unittest.TestCase):
+    def test_speaker_found_by_label_only(self):
+        cards = (' 0 [tegrahda       ]: tegra-hda - tegra-hda\n'
+                 '                      tegra-hda at 0x70038000 irq 115\n'
+                 ' 4 [Device         ]: USB-Audio - USB Composite Device\n'
+                 '                      GeneralPlus USB Composite Device at usb-70090000, full speed\n'
+                 ' 3 [Audio          ]: USB-Audio - KT USB Audio\n')
+        self.assertEqual(aisana_panel.speaker_card(cards), 4)      # the number moves after a replug
+        self.assertIsNone(aisana_panel.speaker_card(' 3 [Audio ]: USB-Audio - KT USB Audio\n'))   # no fallback
+        self.assertEqual(aisana_panel.parse_volume('  Front Left: Playback 127 [86%] [-4.68dB] [on]'), 86)
+
+    def test_volume_without_speaker_fails_closed(self):
+        original = aisana_panel.speaker_card
+        aisana_panel.speaker_card = lambda cards_text=None: None
+        try:
+            self.assertFalse(aisana_panel.set_volume(50)['ok'])
+            self.assertIsNone(aisana_panel.speaker_volume())
+        finally:
+            aisana_panel.speaker_card = original
+
     def test_log_tail_hides_camera_noise(self):
         original = aisana_panel.LOG
         import tempfile
