@@ -93,7 +93,7 @@ python3 -u robot.py 2>&1 | tee robot.log              # классический
 
 ### Гости по фото (с их согласия)
 
-Для презентации можно заранее добавить людей по фото с должностью. Айсана здоровается с ними уважительно («Hello, Waqar Ahmad, President of Nazarbayev University. Welcome!») и, пока такой гость рядом (15 минут, `AISANA_VIP_MINUTES`), не язвит и не шутит. Фото кладите в `faces_photos/` на Джетсоне (в GitHub не попадает):
+Для презентации можно заранее добавить людей по фото с должностью. Айсана здоровается с ними уважительно («Hello, Waqar Ahmad, President of Nazarbayev University. Welcome!») а юмор и сарказм остаются как обычно. Если нужно, чтобы при гостях она не шутила: `AISANA_VIP_MINUTES=15 ./start.sh`. Фото кладите в `faces_photos/` на Джетсоне (в GitHub не попадает):
 
 ```bash
 .venv/bin/python enroll_face.py "Waqar Ahmad" "President of Nazarbayev University" faces_photos/waqar.jpg

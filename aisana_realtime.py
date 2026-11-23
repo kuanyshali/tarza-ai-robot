@@ -62,7 +62,8 @@ MIC_LABEL = os.environ.get('AISANA_MIC_LABEL', 'KT USB Audio')
 REPLY_LANGUAGE = os.environ.get('AISANA_LANGUAGE', 'English')
 FIXED_LANGUAGE = None if REPLY_LANGUAGE.lower() == 'auto' else REPLY_LANGUAGE
 # After a guest with a title is seen: polite only, no sarcasm, for this long.
-VIP_MINUTES = float(os.environ.get('AISANA_VIP_MINUTES', '15'))
+# Off by default (Nov 23: "верни сарказм и шутки как раньше"); e.g. 15 to turn it on.
+VIP_MINUTES = float(os.environ.get('AISANA_VIP_MINUTES', '0'))
 MIC_GAIN = float(os.environ.get('AISANA_MIC_GAIN', '1.0'))          # software gain, e.g. 2.0
 MIC_LEVEL = os.environ.get('AISANA_MIC_LEVEL', '0') == '1'           # print loudness once a second
 VAD_THRESHOLD = float(os.environ.get('AISANA_VAD_THRESHOLD', '0.5'))  # lower = hears quieter speech
@@ -151,7 +152,7 @@ MEMORY_PHRASES = {
         'no_such': ('{n}? Такого в памяти нет.',),
         'off': ('Память на лица сейчас выключена.',),
         'failed': ('Не получилось, память на лица дала сбой.',),
-        'greet': ('Привет, {n}!', 'Здравствуй, {n}! Рада тебя видеть.'),
+        'greet': ('Привет, {n}!', 'О, {n}! Снова ты.', '{n}, привет. Узнала.', 'Здравствуй, {n}. Камера не врёт, это ты.'),
         'greet_guest': ('Здравствуйте, {n}! Добро пожаловать.', 'Добрый день, {n}! Рада вас видеть.'),
         'list': ('Я знаю: {n}.',),
         'list_none': ('Пока я никого не знаю.',),
@@ -167,7 +168,7 @@ MEMORY_PHRASES = {
         'no_such': ('{n}? Not in my memory.',),
         'off': ('Face memory is switched off right now.',),
         'failed': ('That did not work, face memory failed.',),
-        'greet': ('Hi, {n}!', 'Hello, {n}! Good to see you.'),
+        'greet': ('Hi, {n}!', 'Oh, {n}! You again.', 'Hello, {n}. I know that face.'),
         'greet_guest': ('Hello, {n}. Welcome!', 'Good to see you, {n}. Welcome!'),
         'list': ('I know: {n}.',),
         'list_none': ('I do not know anyone yet.',),
@@ -1272,7 +1273,9 @@ class RealtimeAisana(object):
         return getter(name) if getter else None
 
     def vip_seen(self, name):
-        """A titled guest is in view: respectful mode for VIP_MINUTES."""
+        """A titled guest is in view: respectful mode for VIP_MINUTES (0 = off)."""
+        if VIP_MINUTES <= 0:
+            return
         starting = time.monotonic() >= self.vip_until
         self.vip_until = time.monotonic() + VIP_MINUTES * 60
         if starting:

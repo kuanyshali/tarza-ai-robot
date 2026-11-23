@@ -531,8 +531,14 @@ class EnglishAndGuestsTests(unittest.TestCase):
         greeting = [m for m in sent if 'President of Nazarbayev University' in str(m) and m['type'] == 'response.create']
         self.assertTrue(greeting)
         self.assertIn('Welcome', str(greeting[-1]))
-        self.assertIn('no sarcasm', session.instructions())
-        self.assertNotIn('красавчик', session.instructions())
+        self.assertNotIn('no sarcasm', session.instructions())     # humor stays on (default)
+        original_vip = rt.VIP_MINUTES
+        rt.VIP_MINUTES = 15                                         # optional respectful mode
+        try:
+            session.vip_seen('Waqar Ahmad')
+            self.assertIn('no sarcasm', session.instructions())
+        finally:
+            rt.VIP_MINUTES = original_vip
 
 
 class StopAndGreetTests(unittest.TestCase):
