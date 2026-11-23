@@ -1,6 +1,7 @@
 """Phone control panel for Aisana:  python3 aisana_panel.py   ->  http://<jetson>:8080
 
-Buttons: start / stop Aisana, emergency STOP, wave, dance, humor slider, "say this", "ask her",
+Buttons: start / stop Aisana, emergency STOP, wave, dance, iPhone microphone (push to talk
+or always on, https only), humor slider, "say this", "ask her",
 live status (arms, legs, camera, internet) and the last log lines.
 Python 3.6 standard library only (runs with the system python3 on the Jetson).
 No login (the owner's choice): reach it over the robot's Wi-Fi, Tailscale or a
@@ -91,6 +92,12 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
  textarea{width:100%;box-sizing:border-box;border-radius:12px;border:0;padding:12px;font-size:16px;background:#232733;color:#fff;min-height:64px}
  pre{white-space:pre-wrap;font-size:12px;line-height:1.35;color:#aeb3c2;max-height:340px;overflow:auto;margin:0}
  #msg{min-height:20px;font-size:14px;color:#9aa0ad;margin:6px 2px}
+ .sel{outline:3px solid #3b82f6}
+ #ptt{display:none;width:100%;margin-top:10px;padding:34px 10px;font-size:22px;background:#7c3aed;
+      -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:none}
+ #ptt.down{background:#3ecf6e;color:#062}
+ #lvl{height:8px;border-radius:4px;background:#232733;margin-top:10px;overflow:hidden}
+ #lvl div{height:100%;width:0;background:#3ecf6e;transition:width .1s}
 </style></head><body>
 <header><span><span id="dot" class="dot"></span>Айсана</span><span id="net" style="font-size:13px;color:#9aa0ad"></span></header>
 <main>
@@ -104,6 +111,16 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
  <div class="card">
   <textarea id="text" placeholder="Текст для Айсаны"></textarea>
   <div class="grid"><button onclick="talk('say')">Сказать это</button><button onclick="talk('ask')">Спросить её</button></div>
+ </div>
+ <div class="card">
+  <div class="row"><span>🎤 Микрофон iPhone</span><b id="mv">выключен</b></div>
+  <div class="grid">
+   <button id="m-ptt" onclick="micStart('ptt')">Режим кнопки</button>
+   <button id="m-live" onclick="micStart('live')">Слушать всё время</button>
+  </div>
+  <button id="ptt">Зажми и говори</button>
+  <div id="lvl"><div></div></div>
+  <div class="grid"><button class="off-btn" style="grid-column:span 2" onclick="micStop('Микрофон iPhone выключен, слушает USB-микрофон')">Выключить микрофон iPhone</button></div>
  </div>
  <div class="card">
   <div class="row"><span>😏 Юмор и сарказм</span><b id="hv">—</b></div>
@@ -121,6 +138,55 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <script>
 const msg=t=>{document.getElementById('msg').textContent=t};
 async function post(url,body){try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});const j=await r.json();msg(j.ok?'Готово':'Ошибка: '+(j.error||''));setTimeout(refresh,800)}catch(e){msg('Нет связи с роботом')}}
+// iPhone microphone: 24 kHz mono 16-bit PCM to /api/mic, one request at a time.
+let mic=null,pressed=false,sending=false,lastSent=0,parts=[],wake=null;
+const $=id=>document.getElementById(id);
+function micShow(){$('m-ptt').className=mic&&mic.mode==='ptt'?'sel':'';$('m-live').className=mic&&mic.mode==='live'?'sel':'';
+ $('ptt').style.display=mic&&mic.mode==='ptt'?'block':'none';
+ $('mv').textContent=!mic?'выключен':(mic.mode==='ptt'?(pressed?'слушает…':'кнопка'):'слушает всё время')}
+async function micStart(mode){
+ if(!window.isSecureContext||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)
+  return msg('Микрофон работает только по https-ссылке: https://mmae603-desktop.tail16cc45.ts.net');
+ if(mic){mic.mode=mode;pressed=false;micShow();return}
+ let stream;
+ try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}})}
+ catch(e){return msg('Нет доступа к микрофону: разреши его в Safari (аА → Настройки сайта)')}
+ const AC=window.AudioContext||window.webkitAudioContext;const ctx=new AC();
+ try{await ctx.resume()}catch(e){}
+ const src=ctx.createMediaStreamSource(stream);const node=ctx.createScriptProcessor(4096,1,1);
+ const ratio=ctx.sampleRate/24000;let prev=0,pos=0;
+ node.onaudioprocess=e=>{
+  const inp=e.inputBuffer.getChannelData(0),n=inp.length;
+  let peak=0;for(let i=0;i<n;i+=16){const v=Math.abs(inp[i]);if(v>peak)peak=v}
+  $('lvl').firstChild.style.width=Math.min(100,peak*140)+'%';
+  if(!mic||(mic.mode==='ptt'&&!pressed)){prev=inp[n-1];pos=0;return}
+  const out=new Int16Array(Math.ceil((n-pos)/ratio)+1);let k=0,t=pos;
+  while(t<n){const i=Math.floor(t),f=t-i,a=i===0?prev:inp[i-1],b=inp[i];
+   let v=a+(b-a)*f;v=v<-1?-1:v>1?1:v;out[k++]=v*32767;t+=ratio}
+  pos=t-n;prev=inp[n-1];parts.push(out.subarray(0,k))};
+ src.connect(node);node.connect(ctx.destination);
+ mic={mode,stream,ctx,node,src};pressed=false;micShow();
+ try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen')}catch(e){}
+ msg(mode==='ptt'?'Зажми кнопку и говори, имя «Айсана» не нужно':'iPhone слушает вместо USB-микрофона; обращайся «Айсана, …»; не блокируй экран')}
+function micStop(note){if(!mic)return;try{mic.node.disconnect();mic.src.disconnect();mic.stream.getTracks().forEach(t=>t.stop());mic.ctx.close()}catch(e){}
+ mic=null;pressed=false;parts=[];try{if(wake)wake.release()}catch(e){}wake=null;$('lvl').firstChild.style.width='0';micShow();if(note)msg(note)}
+function b64(bytes){let s='';for(let i=0;i<bytes.length;i+=0x8000)s+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));return btoa(s)}
+async function micSend(){
+ if(!mic||sending)return;
+ let len=0;parts.forEach(p=>len+=p.length);
+ if(!len&&Date.now()-lastSent<700&&!(mic.wasPressed&&!pressed))return;   // heartbeat keeps the USB mic muted
+ const pcm=new Int16Array(len);let o=0;parts.forEach(p=>{pcm.set(p,o);o+=p.length});parts=[];
+ const body={mode:mic.mode,pressed:pressed,pcm:b64(new Uint8Array(pcm.buffer))};mic.wasPressed=pressed;
+ sending=true;lastSent=Date.now();
+ try{const r=await fetch('/api/mic',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json();if(!j.ok)msg('Микрофон: '+(j.error||'ошибка'))}catch(e){msg('Микрофон: нет связи с роботом')}
+ sending=false}
+setInterval(micSend,100);
+function down(e){e.preventDefault();if(!mic)return;pressed=true;$('ptt').className='down';$('ptt').textContent='Говори… отпусти, когда закончишь';micShow()}
+function up(e){e.preventDefault();if(!pressed)return;pressed=false;$('ptt').className='';$('ptt').textContent='Зажми и говори';micShow();micSend()}
+['touchstart','mousedown'].forEach(n=>$('ptt').addEventListener(n,down));
+['touchend','touchcancel','mouseup','mouseleave'].forEach(n=>$('ptt').addEventListener(n,up));
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&mic)micStop('Экран был выключен: микрофон iPhone остановлен, включи снова')});
 function act(a){post('/api/action',{action:a})}
 let hTouch=0;
 function setH(v){hTouch=Date.now();document.getElementById('humor').value=v;document.getElementById('hv').textContent=v+'%';post('/api/action',{action:'humor',text:String(v)})}
@@ -131,7 +197,7 @@ async function refresh(){try{const s=await (await fetch('/api/status')).json();
  document.getElementById('net').textContent='интернет: '+s.internet;
  let h=R('Айсана',s.running?'работает':'выключена');
  const a=s.aisana;
- if(a&&a.ok){h+=R('OpenAI',a.connected?'на связи':'подключается')+R('Руки',a.arms)+R('Ноги',a.legs)+R('Камера',a.camera)+R('Лиц в памяти',a.faces)+R('Язык',a.language)+R('Юмор',a.humor+'%')+R('Сейчас',a.moving?'двигается':(a.speaking?'говорит':'слушает'))}
+ if(a&&a.ok){h+=R('OpenAI',a.connected?'на связи':'подключается')+R('Руки',a.arms)+R('Ноги',a.legs)+R('Камера',a.camera)+R('Лиц в памяти',a.faces)+R('Язык',a.language)+R('Юмор',a.humor+'%')+R('Микрофон',a.mic||'USB')+R('Сейчас',a.moving?'двигается':(a.speaking?'говорит':'слушает'))}
  else if(s.running){h+=R('Статус',(a&&a.error)||'запускается…')}
  document.getElementById('state').innerHTML=h;
  if(a&&a.ok&&Date.now()-hTouch>5000){document.getElementById('humor').value=a.humor;document.getElementById('hv').textContent=a.humor+'%'}
@@ -163,7 +229,8 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(404, {'ok': False, 'error': 'not found'})
 
     def do_POST(self):
-        length = min(int(self.headers.get('Content-Length') or 0), 8192)
+        limit = aisana_control.MAX_LINE if self.path == '/api/mic' else 8192
+        length = min(int(self.headers.get('Content-Length') or 0), limit)
         try:
             body = json.loads(self.rfile.read(length).decode('utf-8') or '{}')
         except ValueError:
@@ -172,9 +239,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, start())
         if self.path == '/api/stop':
             return self.reply(200, stop())
+        if self.path == '/api/mic':
+            result = aisana_control.send({'action': 'mic', 'mode': body.get('mode'),
+                                          'pressed': bool(body.get('pressed')), 'pcm': body.get('pcm', '')})
+            return self.reply(200, result or {'ok': False, 'error': 'Айсана выключена'})
         if self.path == '/api/action':
             action = body.get('action')
-            if action not in aisana_control.ACTIONS or action == 'status':
+            if action not in aisana_control.ACTIONS or action in ('status', 'mic'):
                 return self.reply(400, {'ok': False, 'error': 'unknown action'})
             if not running():
                 return self.reply(200, {'ok': False, 'error': 'Айсана выключена'})

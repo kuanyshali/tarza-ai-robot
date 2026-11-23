@@ -7,23 +7,29 @@ One JSON object per line in, one JSON object per line out:
     {"action": "dance"}
     {"action": "say", "text": "..."}   she says exactly this
     {"action": "ask", "text": "..."}   as if someone asked her this
+    {"action": "humor", "text": "60"}  humor level 0-100, silently
+    {"action": "mic", "mode": "live"|"ptt", "pressed": bool, "pcm": base64}
+                                       iPhone microphone: 24 kHz mono S16_LE
 
 Python 3.6, stdlib only. Never listens on other interfaces: the panel is the
 only door from the network, and it can only send these actions.
 """
+import base64
+import binascii
 import json
 import socket
 import socketserver
 import threading
 
 CONTROL_PORT = 8091
-ACTIONS = ('status', 'stop', 'wave', 'dance', 'say', 'ask', 'humor')
+ACTIONS = ('status', 'stop', 'wave', 'dance', 'say', 'ask', 'humor', 'mic')
 MAX_TEXT = 300
+MAX_LINE = 1 << 17                  # a mic packet (2 s of audio in base64) fits
 
 
 class _Handler(socketserver.StreamRequestHandler):
     def handle(self):
-        line = self.rfile.readline(4096)
+        line = self.rfile.readline(MAX_LINE)
         try:
             request = json.loads(line.decode('utf-8'))
             reply = self.server.dispatch(request)
@@ -63,6 +69,12 @@ class ControlServer(object):
             return {'ok': False, 'error': 'Aisana is starting'}
         if action == 'status':
             return dict(ok=True, **session.panel_status())
+        if action == 'mic':
+            try:
+                pcm = base64.b64decode(str(request.get('pcm') or ''), validate=True)
+            except (binascii.Error, ValueError):
+                return {'ok': False, 'error': 'bad audio'}
+            return session.phone_audio(str(request.get('mode')), bool(request.get('pressed')), pcm)
         text = str(request.get('text') or '').strip()[:MAX_TEXT]
         if action in ('say', 'ask', 'humor') and not text:
             return {'ok': False, 'error': 'empty text'}

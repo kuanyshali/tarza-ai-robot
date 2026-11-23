@@ -73,6 +73,10 @@ NOISE_REDUCTION = os.environ.get('AISANA_NOISE_REDUCTION', 'off')   # far_field 
 # Respond only after the name "Aisana" (then a timed follow-up window).
 WAKE_GATE = os.environ.get('AISANA_REALTIME_WAKE', '1') == '1'
 DIALOG_TIMEOUT = max(5.0, float(os.environ.get('AISANA_DIALOG_TIMEOUT', '12')))
+# iPhone microphone from the panel page: while it sends, the USB mic is muted.
+PHONE_TIMEOUT = 1.5                      # seconds without a packet = phone gone, USB mic again
+PHONE_MAX_BYTES = RATE * 2 * 2           # at most 2 s of audio per packet
+PHONE_MODES = ('live', 'ptt')            # always on / push to talk
 
 WAKE_PATTERN = re.compile(
     r'^\W*(?:(?:ok|okay|окей|ок|эй|hey|привет)\W+)?'
@@ -594,6 +598,9 @@ class RealtimeAisana(object):
         self.audio_queue = queue.Queue(maxsize=256)
         self.audio_generation = 0
         self.mute_until = 0.0
+        self.phone_until = 0.0              # iPhone mic (panel) sending until then
+        self.phone_mode = None
+        self.phone_pressed = False
         # True from response.created through the very last ALSA playback byte.
         # Covers the race between response.done and the playback worker.
         self.echo_guard_active = False
@@ -1018,7 +1025,10 @@ class RealtimeAisana(object):
                             sum(levels) // len(levels), peak,
                             'too quiet' if peak < 1500 else 'clipping' if peak > 25000 else 'ok'))
                         levels = []
-                if ECHO_GUARD and (self.echo_guard_active or self.responding or self.playing or time.monotonic() < self.mute_until):
+                if self.phone_active():
+                    preroll.clear()                     # the iPhone is the microphone now
+                    continue
+                if self.echo_guarded():
                     continue
                 if not self.streaming():
                     # Outside a conversation only the local spotter listens.
@@ -1039,6 +1049,54 @@ class RealtimeAisana(object):
             if not self.stop.is_set():
                 print('Microphone/connection error:', exc)
                 self.stop.set()
+
+    def echo_guarded(self):
+        return ECHO_GUARD and (self.echo_guard_active or self.responding or self.playing
+                               or time.monotonic() < self.mute_until)
+
+    def append_audio(self, pcm):
+        self.send({'type': 'input_audio_buffer.append', 'audio': base64.b64encode(pcm).decode('ascii')})
+
+    def phone_active(self):
+        return time.monotonic() < self.phone_until
+
+    def phone_audio(self, mode, pressed, pcm):
+        """iPhone microphone from the panel page. "live": like the USB mic (name
+        needed, echo guard). "ptt": only while the button is held, no name needed,
+        pressing interrupts her; on release a short silence ends the turn at once."""
+        if mode not in PHONE_MODES:
+            return {'ok': False, 'error': 'unknown mic mode'}
+        if len(pcm) > PHONE_MAX_BYTES or len(pcm) % 2:
+            return {'ok': False, 'error': 'bad audio'}
+        now = time.monotonic()
+        if not self.phone_active() or mode != self.phone_mode:
+            print('Microphone: iPhone ({}); USB mic muted.'.format(
+                'push to talk' if mode == 'ptt' else 'always on'))
+        self.phone_until = now + PHONE_TIMEOUT
+        self.phone_mode = mode
+        try:
+            if mode == 'live':
+                self.phone_pressed = False
+                if pcm and not self.echo_guarded():
+                    self.append_audio(pcm)
+                return {'ok': True}
+            if pressed and not self.phone_pressed:
+                print('Push to talk: listening.')
+                if self.responding or self.playing:
+                    self.cancel_reply()                 # the operator interrupts her
+                self.echo_guard_active = False
+                self.mute_until = 0.0
+            if pressed or pcm:
+                self.dialog_until = max(self.dialog_until, now + DIALOG_TIMEOUT)   # no name needed
+            if pcm:
+                self.append_audio(pcm)
+            if self.phone_pressed and not pressed:
+                # Server VAD needs silence to end the turn; the phone sends none after release.
+                self.append_audio(b'\x00\x00' * (RATE * (SILENCE_MS + 400) // 1000))
+            self.phone_pressed = pressed
+        except Exception as exc:
+            return {'ok': False, 'error': 'not connected: {}'.format(exc)[:120]}
+        return {'ok': True}
 
     def take_photo(self):
         """(jpeg bytes, frame or None): a fresh frame from the always-on stream,
@@ -1712,6 +1770,8 @@ class RealtimeAisana(object):
             'language': FIXED_LANGUAGE or 'auto',
             'humor': self.humor,
             'speaking': bool(self.responding),
+            'mic': ('iPhone (button)' if self.phone_mode == 'ptt' else 'iPhone') if self.phone_active() else 'USB',
+            'ptt': self.phone_active() and self.phone_pressed,
             'moving': self.motion_active(),
         }
 

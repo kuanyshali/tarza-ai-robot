@@ -25,6 +25,10 @@ class FakeSession(object):
         self.actions.append((action, text))
         return {'ok': True}
 
+    def phone_audio(self, mode, pressed, pcm):
+        self.actions.append(('mic', mode, pressed, pcm))
+        return {'ok': True}
+
 
 class ControlPortTests(unittest.TestCase):
     def setUp(self):
@@ -46,6 +50,15 @@ class ControlPortTests(unittest.TestCase):
         self.assertFalse(aisana_control.send({'action': 'say', 'text': '  '}, port=self.port)['ok'])
         aisana_control.send({'action': 'ask', 'text': 'x' * 1000}, port=self.port)
         self.assertEqual(len(self.session.actions[-1][1]), aisana_control.MAX_TEXT)
+
+    def test_iphone_audio_packet(self):
+        import base64
+        pcm = b'\x10\x00' * 24000                      # 1 s of audio fits in one line
+        reply = aisana_control.send({'action': 'mic', 'mode': 'ptt', 'pressed': True,
+                                     'pcm': base64.b64encode(pcm).decode('ascii')}, port=self.port)
+        self.assertEqual(reply, {'ok': True})
+        self.assertEqual(self.session.actions[-1], ('mic', 'ptt', True, pcm))
+        self.assertFalse(aisana_control.send({'action': 'mic', 'mode': 'ptt', 'pcm': '%%%'}, port=self.port)['ok'])
 
     def test_listens_on_localhost_only(self):
         self.assertEqual(self.server.server.server_address[0], '127.0.0.1')

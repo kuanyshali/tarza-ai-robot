@@ -275,6 +275,42 @@ class HumorAndCameraTests(unittest.TestCase):
         self.assertIn('NEVER mention the humor level', text)   # no "юмор 100%" in every answer
         self.assertIn('no jokes', rt.humor_instructions(10))
 
+    def test_iphone_push_to_talk(self):
+        session, sent = make_session()
+        session.responding = True                             # she is talking
+        self.assertEqual(session.phone_audio('ptt', True, b'\x01\x00' * 2400), {'ok': True})
+        self.assertTrue(session.phone_active())                # USB mic is muted now
+        self.assertTrue(session.dialog_active())               # no "Aisana" needed
+        self.assertIn('response.cancel', types(sent))          # pressing interrupts her
+        appended = [m for m in sent if m['type'] == 'input_audio_buffer.append']
+        self.assertEqual(len(appended), 1)                     # sent despite her talking
+        del sent[:]
+        session.phone_audio('ptt', False, b'')                 # released
+        silence = base64.b64decode([m for m in sent if m['type'] == 'input_audio_buffer.append'][0]['audio'])
+        self.assertGreater(len(silence), rt.RATE * 2 * rt.SILENCE_MS // 1000)   # ends the turn now
+        self.assertFalse(any(silence))
+        del sent[:]
+        session.phone_audio('ptt', False, b'')                 # heartbeat: nothing sent
+        self.assertEqual(sent, [])
+
+    def test_iphone_always_on_keeps_echo_guard(self):
+        session, sent = make_session()
+        session.phone_audio('live', False, b'\x01\x00' * 100)
+        self.assertEqual(types(sent), ['input_audio_buffer.append'])
+        self.assertFalse(session.dialog_active())              # still needs her name
+        session.playing = True
+        session.phone_audio('live', False, b'\x01\x00' * 100)
+        self.assertEqual(types(sent), ['input_audio_buffer.append'])   # her own voice is not sent
+        self.assertFalse(session.phone_audio('karaoke', False, b'')['ok'])
+        self.assertFalse(session.phone_audio('live', False, b'\x01')['ok'])
+
+    def test_usb_mic_back_when_phone_stops(self):
+        session, sent = make_session()
+        session.phone_audio('live', False, b'')
+        self.assertTrue(session.phone_active())
+        session.phone_until = time.monotonic() - 0.1          # no packets for PHONE_TIMEOUT
+        self.assertFalse(session.phone_active())
+
     def test_panel_sets_humor_silently_and_keeps_it(self):
         session, sent = make_session()
         result = session.panel_action('humor', '80')
