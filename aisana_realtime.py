@@ -452,8 +452,12 @@ def alsa_device(command, expected, description):
             matches.append('plughw:{},{}'.format(m.group(1), m.group(3)))
     matches = sorted(set(matches))
     if len(matches) != 1:
-        raise RuntimeError('{} must match exactly one ALSA device; found {}.\n{}'.format(
-            description, matches, output))
+        # One short line instead of the whole aplay/arecord list (Jetson log, Nov 23).
+        names = sorted(set(re.findall(r'^card\s+\d+:\s*[^\[]+\[([^\]]+)\]', output, re.M)))
+        problem = 'not found - is it plugged in and switched on?' if not matches else \
+            'found {} times: {}'.format(len(matches), ', '.join(matches))
+        raise RuntimeError('{} ("{}") {} Devices now: {}'.format(
+            description, expected, problem, ', '.join(names) or 'none'))
     return matches[0]
 
 
