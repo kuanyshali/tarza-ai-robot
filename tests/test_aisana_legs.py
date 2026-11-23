@@ -346,5 +346,17 @@ class KeepAliveTests(unittest.TestCase):
 
 
 
+class ApproachWordsTests(unittest.TestCase):
+    def test_come_closer_is_a_short_step(self):
+        # Jetson log, Nov 23: "Aisana, came closer." -> "did not ask you to drive".
+        for text in ('Aisana, came closer.', 'Айсана, подойди ко мне', 'Айсана, иди сюда', 'Айсана, ближе'):
+            intent = legs.parse_legs_command(text)
+            self.assertEqual((intent['action'], intent['seconds']), ('forward', legs.SHORT_SECONDS), text)
+        self.assertEqual(legs.parse_legs_command('Айсана, отойди подальше')['action'], 'backward')
+        self.assertEqual(legs.parse_legs_command('Айсана, подойди на 2 метра')['meters'], 2.0)
+        self.assertIsNone(legs.parse_legs_command('почему ты не подходишь ближе?'))
+        self.assertTrue(legs.mentions_driving('Aisana, came closer.'))
+
+
 if __name__ == '__main__':
     unittest.main()

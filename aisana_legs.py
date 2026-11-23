@@ -410,6 +410,10 @@ CM_RE = re.compile(r'(\d+)\s*(?:сантиметр\w*|см\b|cm\b|centimet\w*)',
 DEGREES_RE = re.compile(r'(\d{1,3})\s*(?:градус\w*|°|degrees?|درج\w*)', re.I)
 A_BIT = re.compile(r'(?:немного|чуть|слегка|a bit|a little|slightly|аздап|сәл|شوية)', re.I)
 METER_WORD = re.compile(r'(?:на метр|one meter|a meter|бір метр)', re.I)
+# "Подойди", "ближе", "come closer" (STT often writes "came closer", Nov 23 log).
+APPROACH = re.compile(r'(?:подойди\w*|подходи\w*|подъезжай|иди сюда|иди ко мне|ко мне\b|\w*ближе\b|'
+                      r'\bc[oa]me (?:closer|here|to me|over)\b|\bcloser\b|\bapproach\b|жақында\w*|бері кел\w*)', re.I)
+BACK_OFF = re.compile(r'(?:отойди\w*|отъедь\w*|подальше|\bgo away\b|\bback off\b|\bfurther\b|алыстa\w*)', re.I)
 LEG_CONTEXT = re.compile(r'(?:\bноги\b|колёс\w*|колес\w*|\blegs?\b|wheels?|робот\w*)', re.I)
 
 
@@ -420,6 +424,7 @@ def mentions_driving(text):
     """Does the user talk about driving at all (for vague requests the model interprets)?"""
     q = (text or '').casefold()
     return bool(DRIVE.search(q) or LEG_CONTEXT.search(q) or FORWARD.search(q) or BACKWARD.search(q)
+                or APPROACH.search(q) or BACK_OFF.search(q)
                 or SPIN.search(q) or FASTER.search(q) or SLOWER.search(q))
 
 
@@ -464,6 +469,18 @@ def parse_legs_command(text):
     if re.search(r'(?:голов\w*|\bhead\b|шею|взгляд|камер\w*)', q):
         return None                      # "поверни голову": not the wheels
     driving = DRIVE.search(q) or LEG_CONTEXT.search(q) or (SPIN.search(q) and '?' not in q)
+    if '?' not in q and core_words <= 6 and not re.search(r'(?:рук|руч|\barms?\b|\bhands?\b)', q):
+        near, away = APPROACH.search(q), BACK_OFF.search(q)
+        if near or away:
+            # A short careful step toward / away from the speaker; the Pi's
+            # obstacle stop (< 40 cm) ends it before it touches anyone.
+            seconds, meters = SECONDS_RE.search(q), METERS_RE.search(q)
+            intent = _intent('forward' if near else 'backward', seconds=SHORT_SECONDS)
+            if seconds:
+                intent['seconds'] = min(MAX_SECONDS, _number(seconds.group(1)))
+            elif meters:
+                intent['seconds'], intent['meters'] = None, min(5.0, _number(meters.group(1)))
+            return intent
     if not driving and '?' not in q and core_words <= 6 and (FORWARD.search(q) or BACKWARD.search(q)) \
             and not re.search(r'(?:рук|руч|плеч|локот|локт|кист|ладон|\barms?\b|\bhands?\b|shoulder|elbow|расскаж|tell)', q) and (
             METERS_RE.search(q) or CM_RE.search(q) or SECONDS_RE.search(q)):
