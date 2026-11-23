@@ -632,6 +632,8 @@ class RealtimeAisana(object):
         self.arm_lock = threading.Lock()
         self.last_arm_at = 0.0
         self.local_items = set()            # commands already run from the user's words
+        self.rephrased_items = set()        # audio replaced by its text request (answer_request_only)
+        self.noise_items = set()            # empty speech / noise: never acted on
         self.humor = load_humor()
         self.shouts = ShoutPlayer()
         self.oob_ids = set()                # out-of-band responses (shout recording)
@@ -707,7 +709,10 @@ class RealtimeAisana(object):
         """Replace the heard audio (with other people's talk before her name) by
         just the request as text, then answer that."""
         with self.arm_lock:
-            self.local_items.add(item_id)            # any reply to the full audio is cut
+            # Any reply to the full audio is cut, but this is NOT a command that
+            # already ran: Nov 23, "Уи! Айсана на один метр назад" -> move_legs got
+            # "Already executed", nothing moved and she said "I backed up one meter".
+            self.rephrased_items.add(item_id)
             self.responded_items.add(item_id)
         self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
         self.cancel_reply()
@@ -751,6 +756,10 @@ class RealtimeAisana(object):
         transcript = self.wait_transcript(item_id, timeout=1.5)
         if item_id in self.local_items:
             return 'Already executed by the robot from the user\'s words; confirm in a few words.'
+        if item_id in self.noise_items or (transcript is not None and not re.search(r'\w', transcript)):
+            # A late reply to noise (Nov 23: after "покружись 8 секунд" the model called
+            # move_legs for an empty turn, then said "It didn't work" while she spun).
+            return SILENT_RESULT + 'That was noise, not a request; nothing moved. Say nothing.'
         intents = parse_arm_commands(transcript) if transcript else []
         if not intents:
             action = args.get('action')
@@ -845,6 +854,10 @@ class RealtimeAisana(object):
         transcript = self.wait_transcript(item_id, timeout=1.5)
         if item_id in self.local_items:
             return 'Already executed by the robot from the user\'s words; confirm in a few words.'
+        if item_id in self.noise_items or (transcript is not None and not re.search(r'\w', transcript)):
+            # A late reply to noise (Nov 23: after "покружись 8 секунд" the model called
+            # move_legs for an empty turn, then said "It didn't work" while she spun).
+            return SILENT_RESULT + 'That was noise, not a request; nothing moved. Say nothing.'
         intent = parse_legs_command(transcript) if transcript else None
         action = args.get('action')
         if intent is None:
@@ -1913,6 +1926,7 @@ class RealtimeAisana(object):
                 or SHOUT_ECHO_RE.match(transcript.strip()):
             # Noise or the STT hint repeated back: never a request, never a move.
             print('Empty speech or noise; ignored.')
+            self.noise_items.add(item_id)
             if held:
                 self.release_hold(drop=True)
             if item_id in self.responded_items:
@@ -2164,7 +2178,8 @@ class RealtimeAisana(object):
             purpose = ((e.get('response') or {}).get('metadata') or {}).get('purpose')
             self.responding = True
             self.response_id = (e.get('response') or {}).get('id')
-            if purpose != 'own' and self.last_item in self.local_items:
+            if purpose != 'own' and (self.last_item in self.local_items or self.last_item in self.rephrased_items
+                                     or self.last_item in self.noise_items):
                 # A model reply to words the code already handled (the camera, a
                 # command): it arrived after we tried to cancel. Cut it, never play it.
                 # Jetson log: only "Сейчас быстро проверю..." and the real answer lost.

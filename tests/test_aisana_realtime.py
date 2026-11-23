@@ -1149,6 +1149,36 @@ class LegsToolTests(unittest.TestCase):
         self.assertEqual(session.legs.intents[0]['seconds'], 3.0)
         self.assertIn('Already executed', result)
 
+    def test_talk_before_her_name_still_drives(self):
+        # Jetson log, Nov 23: "Уи! Айсана на один метр назад." -> nothing moved,
+        # the tool said "Already executed" and she said "I backed up one meter".
+        session, sent = make_session()
+        session.legs = FakeLegs()
+        say(session, 'l7', 'Уи! Айсана на один метр назад.')
+        time.sleep(0.3)
+        self.assertEqual(session.legs.intents[0]['action'], 'backward')
+        self.assertEqual(session.legs.intents[0]['meters'], 1.0)
+
+    def test_rephrased_request_is_not_already_executed(self):
+        session, sent = make_session()
+        session.legs = FakeLegs()
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'l8'})
+        session.transcripts['l8'] = 'Ну вот. Айсана, проедь назад.'
+        session.rephrased_items.add('l8')
+        result = session.run_tool('move_legs', {'action': 'backward'})
+        self.assertNotIn('Already executed', result)
+        self.assertEqual(session.legs.intents[0]['action'], 'backward')
+
+    def test_late_tool_call_for_noise_is_silent(self):
+        # Nov 23: during "покружись 8 секунд" an empty turn got a move_legs call and
+        # she said "It didn't work" while spinning.
+        session, sent = make_session()
+        session.legs = FakeLegs()
+        say(session, 'l9', '')
+        result = session.run_tool('move_legs', {'action': 'spin_right', 'seconds': 8})
+        self.assertTrue(result.startswith(rt.SILENT_RESULT))
+        self.assertEqual(session.legs.intents, [])
+
     def test_model_cannot_drive_when_not_asked(self):
         session, _ = make_session()
         session.legs = FakeLegs()

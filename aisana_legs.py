@@ -464,6 +464,12 @@ def parse_legs_command(text):
     if re.search(r'(?:голов\w*|\bhead\b|шею|взгляд|камер\w*)', q):
         return None                      # "поверни голову": not the wheels
     driving = DRIVE.search(q) or LEG_CONTEXT.search(q) or (SPIN.search(q) and '?' not in q)
+    if not driving and '?' not in q and core_words <= 6 and (FORWARD.search(q) or BACKWARD.search(q)) \
+            and not re.search(r'(?:рук|руч|плеч|локот|локт|кист|ладон|\barms?\b|\bhands?\b|shoulder|elbow|расскаж|tell)', q) and (
+            METERS_RE.search(q) or CM_RE.search(q) or SECONDS_RE.search(q)):
+        # "Айсана, на один метр назад": a direction plus a distance or time is a drive
+        # even without a verb (Nov 23: ignored, then "I backed up" with nothing moved).
+        driving = True
     if not driving and ('?' in q or core_words > 3):
         # Questions ("что у тебя впереди?") and longer talk never drive
         # without an explicit movement verb; a short "стоп" still stops.
