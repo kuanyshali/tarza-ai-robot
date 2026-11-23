@@ -294,6 +294,7 @@ GREET_RE = re.compile(r'(?:поздоровайся|поприветствуй|�
 
 HUMOR_RE = re.compile(r'(?:юмор\w*|сарказм\w*|\bhumou?r\b|\bsarcasm\b|әзіл\w*)\D{0,20}?(\d{1,3})', re.I)
 # Visual questions are answered by the camera at once, in first person.
+WEATHER_RE = re.compile(r'\b(weather|temperature|forecast|погод\w*|температур\w*|прогноз\w*|ауа рай\w*)', re.I)
 CAMERA_RE = re.compile(
     r'(?:кто (?:\w+ )?(?:перед тобой|передо мной|рядом|тут|здесь|это)|что (?:ты )?(?:\w+ )?видишь|'
     r'что (?:у меня|я) (?:\w+ )?(?:в руке|в руках|держу)|что (?:это|перед тобой|тут|здесь)\b|'
@@ -496,7 +497,8 @@ PROMPT = (
     'You are Aisana (Айсана), a female robot at a university, with a camera, two arms and wheels. '
     'In Russian always use feminine forms for yourself (рада, сделала, увидела). '
     'LANGUAGE: reply in the language of the user\'s latest words (Russian, Kazakh, English, Arabic). '
-    'LENGTH: one short sentence, two at most, unless asked to explain. No filler, no offers of help, '
+    'LENGTH: one short sentence, two at most (under 30 words), unless asked to explain; never a list '
+    'of options or advice. While you speak you cannot hear anyone. No filler, no offers of help, '
     'no follow-up questions, no greetings, no apologies. '
     'NOT FOR YOU: people around also talk to each other. If the latest words are not a request or '
     'question for you, call stay_silent and say nothing; never say aloud that you are silent. '
@@ -598,6 +600,9 @@ class RealtimeAisana(object):
         self.audio_queue = queue.Queue(maxsize=256)
         self.audio_generation = 0
         self.mute_until = 0.0
+        self.heard_at = 0.0                 # end of the user's last turn (latency log)
+        self.first_audio_pending = False
+        self.slow_send_note = 0.0
         self.phone_until = 0.0              # iPhone mic (panel) sending until then
         self.phone_mode = None
         self.phone_pressed = False
@@ -661,17 +666,39 @@ class RealtimeAisana(object):
     def dialog_active(self):
         return time.monotonic() < self.dialog_until
 
-    def respond(self, item_id=None, force_arm=False, force_tool=None):
-        """Answer the latest user turn and keep the follow-up window open."""
+    def respond(self, item_id=None, force_arm=False, force_tool=None, extend=True):
+        """Answer the latest user turn and keep the follow-up window open.
+        extend=False: a reply started before the transcript (inside the window);
+        the window then grows only if she really speaks (end of playback), so
+        background talk that she stays silent on closes it (Jetson log, Nov 23:
+        a noisy room kept the window open and every remark started a reply)."""
         if item_id:
             self.responded_items.add(item_id)
-        self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+        if extend:
+            self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
         if force_arm or force_tool:
             # The words are a clear arm/legs command: the model must call the tool.
             self.send({'type': 'response.create', 'response': {
                 'tool_choice': {'type': 'function', 'name': force_tool or 'move_arm'}}})
         else:
             self.send({'type': 'response.create'})
+
+    def answer_with_tool(self, item_id, tool):
+        """Drop any reply already started for this turn and answer through `tool`."""
+        with self.arm_lock:
+            self.responded_items.add(item_id)
+        self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+        self.cancel_reply()
+
+        def worker():
+            deadline = time.monotonic() + 4
+            while self.responding and time.monotonic() < deadline and not self.stop.is_set():
+                time.sleep(0.05)
+            try:
+                self.respond(item_id, force_tool=tool)
+            except Exception as exc:
+                print('Reply error:', exc)
+        threading.Thread(target=worker, daemon=True).start()
 
     def answer_request_only(self, item_id, request):
         """Replace the heard audio (with other people's talk before her name) by
@@ -910,7 +937,13 @@ class RealtimeAisana(object):
 
     def send(self, payload):
         with self.send_lock:
+            started = time.monotonic()
             self.ws.send(json.dumps(payload))
+            took = time.monotonic() - started
+        if took > 1.0 and time.monotonic() - self.slow_send_note > 10:
+            # Nov 23: "The write operation timed out" = the 4G upload stalled.
+            self.slow_send_note = time.monotonic()
+            print('Network slow: sending to OpenAI took {:.1f} s (mobile upload is stalling).'.format(took))
 
     def stop_playback(self):
         with self.play_lock:
@@ -1051,8 +1084,12 @@ class RealtimeAisana(object):
                 self.stop.set()
 
     def echo_guarded(self):
-        return ECHO_GUARD and (self.echo_guard_active or self.responding or self.playing
-                               or time.monotonic() < self.mute_until)
+        """Mute the mic while she can be heard. A reply that is still held (nothing
+        played yet, maybe a stay_silent) does not mute it: Nov 23, background
+        remarks kept muting the mic and the real question was half lost."""
+        held = self.holding()
+        return ECHO_GUARD and ((self.echo_guard_active and not held) or (self.responding and not held)
+                               or self.playing or time.monotonic() < self.mute_until)
 
     def append_audio(self, pcm):
         self.send({'type': 'input_audio_buffer.append', 'audio': base64.b64encode(pcm).decode('ascii')})
@@ -1969,6 +2006,14 @@ class RealtimeAisana(object):
                 self.release_hold(drop=True)
             self.run_memory_locally(item_id, memory)
             return
+        if addressed and not stop and WEATHER_RE.search(transcript) and not (arm_intents or drive) \
+                and (has_wake_name(transcript) or transcript.rstrip().endswith('?')):
+            # Nov 23: a reply started before the transcript talked about the
+            # earlier topic instead of the weather. Weather always uses the tool.
+            if held:
+                self.release_hold(drop=True)
+            self.answer_with_tool(item_id, 'get_weather')
+            return
         if addressed and not stop and CAMERA_RE.search(transcript):
             if held:
                 self.release_hold(drop=True)
@@ -2120,10 +2165,14 @@ class RealtimeAisana(object):
                 self.response_item = self.last_item
             self.echo_guard_active = True
             self.playback_interrupted = False
+            self.first_audio_pending = self.response_item is not None
         elif typ == 'response.output_audio.delta' and e.get('response_id') in self.oob_ids:
             self.shout_buffer.extend(base64.b64decode(e.get('delta', '')))     # recorded, not played
         elif typ == 'response.output_audio.delta':
             self.echo_guard_active = True
+            if self.first_audio_pending and not self.playback_interrupted and self.heard_at:
+                self.first_audio_pending = False
+                print('Reply after {:.1f} s (from the end of your words).'.format(time.monotonic() - self.heard_at))
             if not self.playback_interrupted:
                 chunk = base64.b64decode(e.get('delta', ''))
                 if self.holding():
@@ -2142,13 +2191,14 @@ class RealtimeAisana(object):
                     self.save_turn(text)
         elif typ == 'input_audio_buffer.committed':
             self.last_item = e.get('item_id')
+            self.heard_at = time.monotonic()
             # Inside an open dialogue start the answer at once, but hold its audio
             # until the transcript shows it is not a command (or 1.6 s passed).
             # While the wheels turn, wait for the transcript (her shouts are heard).
             if WAKE_GATE and self.dialog_active() and not self.motion_active():
                 self.hold_item, self.held_audio = e.get('item_id'), []
                 self.hold_deadline = time.monotonic() + 1.6
-                self.respond(e.get('item_id'))
+                self.respond(e.get('item_id'), extend=False)
         elif typ == 'conversation.item.input_audio_transcription.completed':
             self.handle_transcript(e.get('item_id'), (e.get('transcript') or '').strip())
         elif typ == 'conversation.item.input_audio_transcription.failed':

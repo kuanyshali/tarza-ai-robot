@@ -311,6 +311,42 @@ class HumorAndCameraTests(unittest.TestCase):
         session.phone_until = time.monotonic() - 0.1          # no packets for PHONE_TIMEOUT
         self.assertFalse(session.phone_active())
 
+    def test_background_talk_does_not_keep_the_dialogue_open(self):
+        # Jetson log, Nov 23: in a noisy room every remark started a reply and
+        # pushed the follow-up window further, muting the mic again and again.
+        session, sent = make_session()
+        session.dialog_until = time.monotonic() + 3
+        before = session.dialog_until
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'b1'})
+        self.assertIn('response.create', types(sent))           # still answered fast
+        self.assertEqual(session.dialog_until, before)           # but the window did not grow
+
+    def test_held_reply_does_not_mute_the_mic(self):
+        session, sent = make_session()
+        session.dialog_until = time.monotonic() + 5
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'b2'})
+        session.handle({'type': 'response.created', 'response': {'id': 'r1'}})
+        self.assertTrue(session.holding())
+        self.assertFalse(session.echo_guarded())                 # nothing is audible yet
+        session.hold_item = None
+        self.assertTrue(session.echo_guarded())                  # an ordinary reply mutes it
+
+    def test_weather_with_her_name_always_uses_the_tool(self):
+        session, sent = make_session()
+        say(session, 'w1', "Aisana, what's the weather in Astana?")
+        deadline = time.time() + 2
+        forced = []
+        while time.time() < deadline and not forced:
+            forced = [m for m in sent if m['type'] == 'response.create'
+                      and (m.get('response') or {}).get('tool_choice', {}).get('name') == 'get_weather']
+            time.sleep(0.02)
+        self.assertTrue(forced)
+        session2, sent2 = make_session()
+        session2.dialog_until = time.monotonic() + 5
+        say(session2, 'w2', 'Погода сегодня ужасная, конечно.')    # a remark, not a question
+        time.sleep(0.1)
+        self.assertFalse([m for m in sent2 if (m.get('response') or {}).get('tool_choice', {}) == {'type': 'function', 'name': 'get_weather'}])
+
     def test_panel_sets_humor_silently_and_keeps_it(self):
         session, sent = make_session()
         result = session.panel_action('humor', '80')
