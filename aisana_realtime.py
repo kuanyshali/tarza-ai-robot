@@ -57,6 +57,12 @@ STT_FALLBACK = 'gpt-4o-mini-transcribe'
 # ALSA label of the microphone (arecord -l); still exactly one device, no fallback.
 # For the ReSpeaker USB Mic Array: AISANA_MIC_LABEL=ReSpeaker
 MIC_LABEL = os.environ.get('AISANA_MIC_LABEL', 'KT USB Audio')
+# She speaks only this language for now (Nov 23: English for the presentation).
+# AISANA_LANGUAGE=auto = answer in the language of the user's words, as before.
+REPLY_LANGUAGE = os.environ.get('AISANA_LANGUAGE', 'English')
+FIXED_LANGUAGE = None if REPLY_LANGUAGE.lower() == 'auto' else REPLY_LANGUAGE
+# After a guest with a title is seen: polite only, no sarcasm, for this long.
+VIP_MINUTES = float(os.environ.get('AISANA_VIP_MINUTES', '15'))
 MIC_GAIN = float(os.environ.get('AISANA_MIC_GAIN', '1.0'))          # software gain, e.g. 2.0
 MIC_LEVEL = os.environ.get('AISANA_MIC_LEVEL', '0') == '1'           # print loudness once a second
 VAD_THRESHOLD = float(os.environ.get('AISANA_VAD_THRESHOLD', '0.5'))  # lower = hears quieter speech
@@ -145,7 +151,8 @@ MEMORY_PHRASES = {
         'no_such': ('{n}? Такого в памяти нет.',),
         'off': ('Память на лица сейчас выключена.',),
         'failed': ('Не получилось, память на лица дала сбой.',),
-        'greet': ('Привет, {n}!', 'О, {n}! Снова ты.', '{n}, привет. Узнала.', 'Здравствуй, {n}. Камера не врёт, это ты.'),
+        'greet': ('Привет, {n}!', 'Здравствуй, {n}! Рада тебя видеть.'),
+        'greet_guest': ('Здравствуйте, {n}! Добро пожаловать.', 'Добрый день, {n}! Рада вас видеть.'),
         'list': ('Я знаю: {n}.',),
         'list_none': ('Пока я никого не знаю.',),
         'thing': ('Запомнила: {n}.',),
@@ -160,7 +167,8 @@ MEMORY_PHRASES = {
         'no_such': ('{n}? Not in my memory.',),
         'off': ('Face memory is switched off right now.',),
         'failed': ('That did not work, face memory failed.',),
-        'greet': ('Hi, {n}!', 'Oh, {n}! You again.', 'Hello, {n}. I know that face.'),
+        'greet': ('Hi, {n}!', 'Hello, {n}! Good to see you.'),
+        'greet_guest': ('Hello, {n}. Welcome!', 'Good to see you, {n}. Welcome!'),
         'list': ('I know: {n}.',),
         'list_none': ('I do not know anyone yet.',),
         'thing': ('Remembered: {n}.',),
@@ -559,7 +567,8 @@ class RealtimeAisana(object):
         self.transcripts = {}
         self.transcript_cond = threading.Condition()
         self.last_item = None
-        self.user_language = 'Russian'
+        self.user_language = FIXED_LANGUAGE or 'Russian'
+        self.vip_until = 0.0
         self.response_item = None
         self.expect_tool_response = False
         self.done_items = set()
@@ -1032,7 +1041,10 @@ class RealtimeAisana(object):
                 self.faces.learn(face['name'], face['vector'], face['distance'])
                 self.seen_at[face['name']] = now
                 self.greeted_at[face['name']] = now        # named now: no extra greeting
-                known.append('{} ({})'.format(face['name'], face['where']))
+                title = self.guest_title(face['name'])
+                if title:
+                    self.vip_seen(face['name'])
+                known.append('{} ({}{})'.format(face['name'], title + ', ' if title else '', face['where']))
         self.last_people = (known, len(found) - len(known))
         parts = ['Do not try to identify people and never say you do not know who someone is; '
                  'just describe them.'] if found else []
@@ -1047,6 +1059,8 @@ class RealtimeAisana(object):
         if known:
             parts.append('Face memory (certain, stored on the robot): this is ' + ', '.join(known) +
                          '. Call them by this name.')
+            if time.monotonic() < self.vip_until:
+                parts.append('Speak about a guest with a title respectfully, with the title; no jokes.')
         if strangers:
             parts.append('{} person(s) nobody introduced to you: a stranger ("какой-то красавчик"), '
                          'never invent names.'.format(strangers))
@@ -1242,7 +1256,31 @@ class RealtimeAisana(object):
             'transcription': {'model': self.stt_model, 'prompt': STT_PROMPT}}}}})
 
     def instructions(self):
-        return PROMPT + humor_instructions(self.humor) + voice_style_instructions()
+        prompt = PROMPT
+        if FIXED_LANGUAGE:
+            prompt = prompt.replace(
+                'LANGUAGE: reply in the language of the user\'s latest words (Russian, Kazakh, English, Arabic). ',
+                'LANGUAGE: always speak {0} only, even when the user speaks Russian, Kazakh or another '
+                'language (you understand them, you answer in {0}). '.format(FIXED_LANGUAGE))
+        if time.monotonic() < self.vip_until:
+            return (prompt + 'GUESTS: senior university guests are here. Be polite, warm and respectful; '
+                    'no sarcasm, no teasing, no jokes about anyone. ' + voice_style_instructions())
+        return prompt + humor_instructions(self.humor) + voice_style_instructions()
+
+    def guest_title(self, name):
+        getter = getattr(self.faces, 'title', None)
+        return getter(name) if getter else None
+
+    def vip_seen(self, name):
+        """A titled guest is in view: respectful mode for VIP_MINUTES."""
+        starting = time.monotonic() >= self.vip_until
+        self.vip_until = time.monotonic() + VIP_MINUTES * 60
+        if starting:
+            print('Guest in view ({}): respectful mode, no sarcasm.'.format(name))
+            try:
+                self.send({'type': 'session.update', 'session': {'type': 'realtime', 'instructions': self.instructions()}})
+            except Exception as exc:
+                print('Session update error:', exc)
 
     def set_humor(self, item_id, value):
         """"Айсана, юмор 60 процентов" - changes her personality live."""
@@ -1486,13 +1524,20 @@ class RealtimeAisana(object):
                 if not name:
                     continue
                 self.faces.learn(name, face['vector'], face['distance'])
+                title = self.guest_title(name)
+                if title:
+                    self.vip_seen(name)
                 away = now - self.seen_at.get(name, -1e9)
                 self.seen_at[name] = now
                 if FACE_GREET and away > 120 and now - self.greeted_at.get(name, -1e9) > FACE_GREET_MINUTES * 60:
                     self.greeted_at[name] = now
                     print('Face seen: {} -> greeting'.format(name))
                     self.dialog_until = now + DIALOG_TIMEOUT
-                    self.say_phrase('{} (you know them) just came into view.'.format(name), 'greet', name)
+                    if title:
+                        self.say_phrase('{} ({}) just came into view; greet them respectfully.'.format(name, title),
+                                        'greet_guest', '{}, {}'.format(name, title))
+                    else:
+                        self.say_phrase('{} (you know them) just came into view.'.format(name), 'greet', name)
                     break
 
     def wave_hello(self, seconds=None):
@@ -1613,11 +1658,14 @@ class RealtimeAisana(object):
                 self.queue_audio(kind, chunk)
 
     def reply_language(self):
+        if FIXED_LANGUAGE:
+            return 'Reply in {} only, even if the user speaks another language. '.format(FIXED_LANGUAGE)
         return 'Reply in {} only (the language of the user\'s latest words). '.format(self.user_language)
 
     def handle_transcript(self, item_id, transcript):
         print('You:', transcript)
-        self.user_language = language_of(transcript) or self.user_language
+        if not FIXED_LANGUAGE:
+            self.user_language = language_of(transcript) or self.user_language
         with self.transcript_cond:
             self.transcripts[item_id] = transcript
             self.transcript_cond.notify_all()

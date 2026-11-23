@@ -12,3 +12,4 @@ venv/
 
 # Offline speech recognition models (downloaded on-device)
 models/
+faces_photos/

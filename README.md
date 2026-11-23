@@ -91,6 +91,20 @@ python3 -u robot.py 2>&1 | tee robot.log              # классический
 
 Характер: сухой сарказм в духе TARS из «Интерстеллара», уровень юмора по умолчанию 45%, меняется голосом: «Айсана, юмор 60 процентов». На «кто перед тобой?» она смотрит сразу и отвечает от первого лица («Передо мной какой-то красавчик…»), без «секунду, посмотрю». Шутки без оскорблений внешности.
 
+### Гости по фото (с их согласия)
+
+Для презентации можно заранее добавить людей по фото с должностью. Айсана здоровается с ними уважительно («Hello, Waqar Ahmad, President of Nazarbayev University. Welcome!») и, пока такой гость рядом (15 минут, `AISANA_VIP_MINUTES`), не язвит и не шутит. Фото кладите в `faces_photos/` на Джетсоне (в GitHub не попадает):
+
+```bash
+.venv/bin/python enroll_face.py "Waqar Ahmad" "President of Nazarbayev University" faces_photos/waqar.jpg
+.venv/bin/python enroll_face.py --list
+.venv/bin/python enroll_face.py --forget "Waqar Ahmad"
+```
+
+### Язык
+
+Сейчас Айсана говорит только по-английски (`AISANA_LANGUAGE=English`, понимает и русскую речь). Вернуть ответ на языке собеседника: `AISANA_LANGUAGE=auto ./start.sh`, другой язык: `AISANA_LANGUAGE=Russian`.
+
 ### Память о разговорах (realtime-режим)
 
 Айсана помнит последние разговоры (общая память с `robot.py`, `~/.local/share/aisana/dialogue.sqlite3`): при запуске она получает 12 последних вопросов и ответов и может ответить «что мы вчера обсуждали». «Айсана, забудь наши разговоры» всё стирает. `AISANA_HISTORY_TURNS` — сколько помнить, `AISANA_MEMORY_ENABLED=0` — выключить.

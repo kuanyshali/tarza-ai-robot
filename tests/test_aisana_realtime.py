@@ -6,6 +6,9 @@ import unittest
 
 import aisana_realtime as rt
 
+# Most tests were written for 'answer in the user's language'; English-only has its own tests.
+rt.FIXED_LANGUAGE = None
+
 
 class FakeArm(object):
     def __init__(self):
@@ -489,6 +492,47 @@ class BackgroundTalkTests(unittest.TestCase):
         say(session, 'b2', 'Вчера поворот проехали. Айсана, как дела?')
         time.sleep(0.2)
         self.assertEqual(legs.intents, [])                           # "поворот" before her name never drives
+
+
+class EnglishAndGuestsTests(unittest.TestCase):
+    """Nov 23: English only for the presentation; respectful greetings for titled guests."""
+
+    def setUp(self):
+        self.original = rt.WAKE_GATE, rt.FIXED_LANGUAGE
+        rt.WAKE_GATE, rt.FIXED_LANGUAGE = True, 'English'
+
+    def tearDown(self):
+        rt.WAKE_GATE, rt.FIXED_LANGUAGE = self.original
+
+    def test_english_even_for_russian_words(self):
+        session, sent = make_session()
+        self.assertEqual(session.user_language, 'English')
+        say(session, 'e1', 'Айсана, как дела?')
+        self.assertEqual(session.user_language, 'English')
+        self.assertIn('always speak English only', session.instructions())
+        self.assertIn('Reply in English only', session.reply_language())
+
+    def test_guest_is_greeted_respectfully_and_sarcasm_is_off(self):
+        session, sent = make_session()
+        session.camera_stream, session.faces = FakeStream(), FakeFaces('Waqar Ahmad')
+        session.faces.title = lambda name: 'President of Nazarbayev University' if name == 'Waqar Ahmad' else None
+        session.ready = True
+        original = rt.FACE_SCAN_SECONDS
+        rt.FACE_SCAN_SECONDS = 0.05
+        try:
+            __import__('threading').Thread(target=session.watch_faces, daemon=True).start()
+            deadline = time.time() + 3
+            while not any('Waqar Ahmad, President of Nazarbayev University' in str(m) for m in sent) \
+                    and time.time() < deadline:
+                time.sleep(0.02)
+            session.stop.set()
+        finally:
+            rt.FACE_SCAN_SECONDS = original
+        greeting = [m for m in sent if 'President of Nazarbayev University' in str(m) and m['type'] == 'response.create']
+        self.assertTrue(greeting)
+        self.assertIn('Welcome', str(greeting[-1]))
+        self.assertIn('no sarcasm', session.instructions())
+        self.assertNotIn('красавчик', session.instructions())
 
 
 class StopAndGreetTests(unittest.TestCase):

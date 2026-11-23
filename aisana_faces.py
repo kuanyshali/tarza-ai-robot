@@ -226,6 +226,7 @@ class FaceMemory(object):
         if embedder is not None or detector is not None:
             self.ready.set()
         self.people = []                  # [(name, vector)]
+        self.titles = {}                  # name -> "President of Nazarbayev University" (guests)
         self.things = []                  # [(id, label, owner, description)]
         folder = os.path.dirname(db_path)
         if folder and not os.path.isdir(folder):
@@ -233,6 +234,7 @@ class FaceMemory(object):
         with self._db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS faces (id INTEGER PRIMARY KEY AUTOINCREMENT, '
                        'name TEXT NOT NULL, vector BLOB NOT NULL, created_at REAL NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS titles (name TEXT PRIMARY KEY, title TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS things (id INTEGER PRIMARY KEY AUTOINCREMENT, '
                        'label TEXT NOT NULL, owner TEXT, description TEXT NOT NULL, '
                        'picture TEXT, created_at REAL NOT NULL)')
@@ -247,6 +249,7 @@ class FaceMemory(object):
             self.people = [(name, np.frombuffer(blob, dtype=np.float32))
                            for name, blob in db.execute('SELECT name, vector FROM faces ORDER BY id')]
             self.things = list(db.execute('SELECT id, label, owner, description FROM things ORDER BY id'))
+            self.titles = dict(db.execute('SELECT name, title FROM titles'))
 
     # -- networks ---------------------------------------------------------
     def _load_nets(self):
@@ -374,6 +377,18 @@ class FaceMemory(object):
         self.remember(name, [vector])
         return True
 
+    def set_title(self, name, title):
+        """A guest's role, for respectful greetings (enrolled from a photo with consent)."""
+        with self.lock, self._db() as db:
+            if title:
+                db.execute('INSERT OR REPLACE INTO titles (name, title) VALUES (?, ?)', (name, title))
+            else:
+                db.execute('DELETE FROM titles WHERE name = ?', (name,))
+        self._load()
+
+    def title(self, name):
+        return self.titles.get(name)
+
     def forget(self, name):
         """Deletes a person or a thing by name; how many records went."""
         key = name.casefold()
@@ -386,6 +401,7 @@ class FaceMemory(object):
             for row_id, known in list(db.execute('SELECT id, name FROM faces')):
                 if same(known.casefold()):
                     db.execute('DELETE FROM faces WHERE id = ?', (row_id,))
+                    db.execute('DELETE FROM titles WHERE name = ?', (known,))
                     gone += 1
             for row_id, label, owner, picture in list(db.execute('SELECT id, label, owner, picture FROM things')):
                 if same(label.casefold()):
