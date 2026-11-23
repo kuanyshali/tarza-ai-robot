@@ -504,6 +504,10 @@ class EnglishAndGuestsTests(unittest.TestCase):
     def tearDown(self):
         rt.WAKE_GATE, rt.FIXED_LANGUAGE = self.original
 
+    def test_shouts_in_english(self):
+        self.assertIn('English exclamations', rt.shouts_prompt())
+        self.assertNotIn('Уииии', rt.shouts_prompt())
+
     def test_english_even_for_russian_words(self):
         session, sent = make_session()
         self.assertEqual(session.user_language, 'English')

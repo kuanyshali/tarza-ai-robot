@@ -120,6 +120,15 @@ SHOUTS_PROMPT = (
     'No other words, no introduction.')
 
 
+def shouts_prompt():
+    """Shouts in her language: English-only mode got Russian "Уииии!" (Nov 23)."""
+    if FIXED_LANGUAGE and FIXED_LANGUAGE != 'Russian':
+        return SHOUTS_PROMPT.replace(
+            'Russian exclamations', FIXED_LANGUAGE + ' exclamations').replace(
+            '"Уииии!", "Вжууух!", "Полетели-и-и!"', '"Wheeeee!", "Woo-hooo!", "Here we gooo!"')
+    return SHOUTS_PROMPT
+
+
 def shout_request(text):
     """'вперёд 2 секунды и крикни «We»' -> 'We'; None if nothing to shout."""
     match = SHOUT_RE.search(text or '')
@@ -1901,7 +1910,7 @@ class RealtimeAisana(object):
                 # Record her own shouts once, silently (out-of-band, not played).
                 self.send({'type': 'response.create', 'response': {
                     'conversation': 'none', 'output_modalities': ['audio'],
-                    'metadata': {'purpose': 'shouts'}, 'instructions': SHOUTS_PROMPT}})
+                    'metadata': {'purpose': 'shouts'}, 'instructions': shouts_prompt()}})
         elif typ == 'input_audio_buffer.speech_started':
             self.speech_started_at = time.monotonic()
             if self.spotter is not None and time.monotonic() < self.stream_until:
