@@ -36,21 +36,12 @@ if pgrep -f "$PATTERN" >/dev/null; then
 fi
 restart_camera_service
 
-# One command for the day: if the wheels need calibrating (ODrive was just
-# powered on), offer it first; it still asks to lift the robot.
-legs="$(curl -s --max-time 3 "$AISANA_LEGS_URL/motor/status")"
-case "$legs" in
-    *alibrat*|*DISCONNECTED*)
-        # After the ODrive is powered on it needs a calibration (that also connects it).
-        echo "The wheels need calibrating (ODrive just switched on)."
-        # Automatic, no questions; one retry (a failed try is often fixed by the second).
-        if ./calibrate_legs.sh --yes || ./calibrate_legs.sh --yes; then
-            echo "Wheels ready."
-        else
-            echo "Starting without wheels; run ./calibrate_legs.sh --yes later."
-        fi ;;
-    "")
-        echo "Legs Pi at $AISANA_LEGS_URL does not answer; starting without wheels." ;;
-esac
+# Wheels: wait for the Pi to connect to the ODrive, enable, calibrate only if
+# needed (no questions). Aisana starts anyway; the panel has a "Колёса" button.
+if [ -n "$(curl -s --max-time 3 "$AISANA_LEGS_URL/motor/status")" ]; then
+    { ./legs_ready.sh || echo "Starting without wheels; press \"Колёса\" on the panel or run ./legs_ready.sh later."; } 2>&1 | tee realtime.log
+else
+    echo "Legs Pi at $AISANA_LEGS_URL does not answer; starting without wheels." | tee realtime.log
+fi
 
-.venv/bin/python -u aisana_realtime.py 2>&1 | tee realtime.log
+.venv/bin/python -u aisana_realtime.py 2>&1 | tee -a realtime.log   # after the wheel lines

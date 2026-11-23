@@ -154,6 +154,24 @@ def start():
     return {'ok': True}
 
 
+_legs_job = {'proc': None}
+
+
+def legs_ready():
+    """The "Колёса" button: ./legs_ready.sh in the background (wait for the ODrive,
+    enable, calibrate only if needed); its lines go to the log on the page."""
+    proc = _legs_job['proc']
+    if proc is not None and proc.poll() is None:
+        return {'ok': True, 'note': 'already running'}
+    log = open(LOG, 'ab')
+    try:
+        _legs_job['proc'] = subprocess.Popen(['./legs_ready.sh'], cwd=HERE, stdout=log, stderr=log,
+                                             stdin=subprocess.DEVNULL)
+    finally:
+        log.close()
+    return {'ok': True}
+
+
 def stop():
     subprocess.call(['./stop.sh'], cwd=HERE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return {'ok': True}
@@ -195,6 +213,7 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
   <button class="off-btn" onclick="if(confirm('Выключить Айсану?'))post('/api/stop')">Выключить</button>
   <button onclick="act('wave')">👋 Помахать</button>
   <button onclick="act('dance')">💃 Танцевать</button>
+  <button style="grid-column:span 2" onclick="if(confirm('Подготовить колёса? Если нужна калибровка, колёса немного покрутятся.'))post('/api/legs')">🛞 Колёса: включить / откалибровать</button>
  </div>
  <div class="card">
   <textarea id="text" placeholder="Текст для Айсаны"></textarea>
@@ -344,6 +363,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, start())
         if self.path == '/api/stop':
             return self.reply(200, stop())
+        if self.path == '/api/legs':
+            return self.reply(200, legs_ready())
         if self.path == '/api/volume':
             try:
                 return self.reply(200, set_volume(int(body.get('volume'))))
