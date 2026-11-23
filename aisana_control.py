@@ -5,6 +5,7 @@ One JSON object per line in, one JSON object per line out:
     {"action": "stop"}                 wheels + arms stop at once
     {"action": "wave"}                 arm up, hand waves, arm down
     {"action": "dance"}
+    {"action": "follow"}               follow the person in front ("иди за мной")
     {"action": "say", "text": "..."}   she says exactly this
     {"action": "ask", "text": "..."}   as if someone asked her this
     {"action": "humor", "text": "60"}  humor level 0-100, silently
@@ -22,7 +23,7 @@ import socketserver
 import threading
 
 CONTROL_PORT = 8091
-ACTIONS = ('status', 'stop', 'wave', 'dance', 'say', 'ask', 'humor', 'mic')
+ACTIONS = ('status', 'stop', 'wave', 'dance', 'follow', 'people', 'say', 'ask', 'humor', 'mic')
 MAX_TEXT = 300
 MAX_LINE = 1 << 17                  # a mic packet (2 s of audio in base64) fits
 

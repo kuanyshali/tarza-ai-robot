@@ -125,6 +125,7 @@ class LegsController(object):
         self.alive_on = False                # motors on and kept on by the keep-alive
         self._next_check = 0.0
         self._enabling_until = 0.0           # just asked to enable: poll fast, heartbeat at once
+        self.motion_lease_until = 0.0        # a drive/follow loop owns the motion until then
         self._last_note = ''
 
     # --- raw API -----------------------------------------------------------
@@ -194,6 +195,11 @@ class LegsController(object):
         if self.alive_on:
             code, data = self._post('/motor/heartbeat', timeout=0.3)
             if data.get('enabled'):
+                if data.get('command', 'stop') != 'stop' and time.monotonic() > self.motion_lease_until:
+                    # The keep-alive must never keep a drive going that nobody runs any
+                    # more (its loop died or hung): without it the Pi would stop after 0.35 s.
+                    self._post('/motor/command', {'command': 'stop'}, timeout=0.5)
+                    self._note('stopped a drive with no owner ({}).'.format(data.get('command')))
                 return KEEPALIVE_SECONDS
             self.alive_on = False
             self._next_check = 0.0
@@ -257,8 +263,17 @@ class LegsController(object):
         distances = [d for d in (data.get('distance_1'), data.get('distance_2')) if d is not None]
         return '{} cm away'.format(int(min(distances))) if distances else 'distance unknown'
 
+    def set_command(self, command, lease=0.9):
+        """One drive command for a loop that re-sends it every step (follow me).
+        The motion is kept alive only `lease` seconds past the last call."""
+        if command not in DRIVE_COMMANDS + ('stop',):
+            raise LegsError('Unknown drive: {!r}'.format(command))
+        self.motion_lease_until = time.monotonic() + (lease if command != 'stop' else 0.0)
+        return self._post('/motor/command', {'command': command}, timeout=0.5)
+
     def stop(self):
         """Stop now. Safe to call any time; never raises."""
+        self.motion_lease_until = 0.0
         self._cancel.set()
         try:
             self._post('/motor/command', {'command': 'stop'}, timeout=0.5)
@@ -297,6 +312,7 @@ class LegsController(object):
         # Enable and send the first command BEFORE returning, so a refusal
         # (obstacle closer than 40 cm, motors off) is known before Aisana speaks.
         self.ensure_enabled()
+        self.motion_lease_until = time.monotonic() + 0.5
         code, data = self._post('/motor/command', {'command': action})
         if code != 200:
             raise LegsError(data.get('error') or 'command refused ({})'.format(code))
@@ -308,6 +324,7 @@ class LegsController(object):
                 end = time.monotonic() + seconds
                 next_beat = time.monotonic()
                 while time.monotonic() < end and not cancel.is_set():
+                    self.motion_lease_until = time.monotonic() + 0.5
                     try:
                         code, data = self._post('/motor/heartbeat', timeout=0.25)
                         stopped = code != 200 or data.get('command') == 'stop'

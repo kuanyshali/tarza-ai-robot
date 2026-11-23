@@ -35,6 +35,7 @@ import aisana_legs
 from aisana_legs import parse_legs_command, LEGS_ACTIONS, legs_reply
 from aisana_arm import arm_reply
 import aisana_faces
+import aisana_follow
 import aisana_memory
 import aisana_control
 import wake_listener
@@ -278,6 +279,19 @@ WAVE_SECONDS = float(os.environ.get('AISANA_WAVE_SECONDS', '6'))
 # "Айсана, танцуй": arms up, right hand waves, she spins with her shouts, then arms down.
 DANCE_RE = re.compile(r'(?:\bтанцу\w*|потанцу\w*|станцу\w*|затанцу\w*|\bdance\b|\bdancing\b|'
                       r'билеші\w*|биле\b|ارقص\w*)', re.I)
+# "Иди за мной" / "follow me" (before drive parsing: "иди" alone is a drive word).
+FOLLOW_RE = re.compile(r'(?:(?:иди|ид[её]м|пойд[её]м|пошли|ходи|езжай|едь|поезжай|двигайся|кати|давай)\s+за\s+мной|'
+                       r'следуй\w*(?:\s+за\s+мной)?|\bfollow\s+me\b|\bcome\s+with\s+me\b|артымнан\s+\w+|'
+                       r'^\W*(?:\w+\W+)?за\s+мной\W*$)', re.I)
+FOLLOW_PHRASES = {
+    'start': {'Russian': 'Иду за тобой. Скажи «стоп», когда хватит.',
+              'English': 'Following you. Say stop when you want me to stay.'},
+    'lost': {'Russian': 'Потеряла тебя из виду, стою здесь.', 'English': "I lost you, so I'm staying here."},
+    'time': {'Russian': 'Минуту шла за тобой, пока остановлюсь.', 'English': "That's a minute of following; I'll stay here now."},
+    'no_legs': {'Russian': 'Не могу: колёса не подключены.', 'English': "I can't: my wheels are not connected."},
+    'no_camera': {'Russian': 'Не могу: камера не работает.', 'English': "I can't: my camera is not working."},
+    'no_model': {'Russian': 'Не могу: нет модели для поиска людей.', 'English': "I can't: my person detector did not load."},
+}
 DANCE_SECONDS = float(os.environ.get('AISANA_DANCE_SECONDS', '8'))
 WAVE_FOR = re.compile(r'(\d{1,2})\s*(?:сек\w*|с\b|seconds?|secs?|s\b)', re.I)
 
@@ -600,6 +614,8 @@ class RealtimeAisana(object):
         self.audio_queue = queue.Queue(maxsize=256)
         self.audio_generation = 0
         self.mute_until = 0.0
+        self.follower = None                # "иди за мной" run (aisana_follow.Follower)
+        self.person_detector = None
         self.heard_at = 0.0                 # end of the user's last turn (latency log)
         self.usb_level = 0                  # USB mic loudness for the panel (RMS peak, last second)
         self.usb_level_peak = 0
@@ -873,6 +889,8 @@ class RealtimeAisana(object):
         if self.legs is None:
             return ('Legs are not connected (AISANA_LEGS_URL is not set or the Pi is off); nothing moved. '
                     'Say so in a few words.')
+        if self.follower is not None:
+            self.follower.cancel()                   # a new drive command ends "follow me"
         result = self.legs.execute(intent, self.report_legs_problem)
         if result.startswith('NOT driving'):
             return result
@@ -1842,6 +1860,7 @@ class RealtimeAisana(object):
             'usb_level': self.usb_level,
             'muted': bool(self.echo_guarded()),
             'moving': self.motion_active(),
+            'following': self.follower is not None and self.follower.active(),
         }
 
     def panel_action(self, action, text=''):
@@ -1865,6 +1884,27 @@ class RealtimeAisana(object):
         if action == 'dance':
             self.run_dance_locally('panel-{}'.format(time.monotonic()), '')
             return {'ok': True}
+        if action == 'follow':
+            self.run_follow_locally('panel-{}'.format(time.monotonic()))
+            return {'ok': True}
+        if action == 'people':
+            # Dry check for "follow me": who does the person detector see now? Nothing moves.
+            if self.camera_stream is None:
+                return {'ok': False, 'error': 'camera off'}
+            frame = self.camera_stream.latest(max_age=1.0, wait=1.0)
+            if frame is None:
+                return {'ok': False, 'error': 'no picture'}
+            try:
+                if self.person_detector is None:
+                    self.person_detector = aisana_follow.PersonDetector(*aisana_follow.ensure_model())
+                started = time.monotonic()
+                people = self.person_detector.detect(frame)
+            except Exception as exc:
+                return {'ok': False, 'error': str(exc)[:120]}
+            target = aisana_follow.choose_target(people, None)
+            plan = aisana_follow.decide(target, False)[0] if target else 'stop (nobody)'
+            return {'ok': True, 'people': len(people), 'seconds': round(time.monotonic() - started, 2),
+                    'boxes': [[round(v, 2) for v in b] for b in people], 'would': plan}
         if action == 'say':
             threading.Thread(target=self.speak_report, daemon=True, args=(
                 'Robot report: the operator asked you to say a line.',
@@ -1894,6 +1934,55 @@ class RealtimeAisana(object):
     def stop_motion(self):
         self.motion_until = 0.0
         self.shouts.stop()
+        if self.follower is not None:
+            self.follower.cancel()
+
+    def follow_phrase(self, kind):
+        language = FIXED_LANGUAGE or self.user_language
+        phrases = FOLLOW_PHRASES[kind]
+        return phrases.get(language, phrases['English'])
+
+    def run_follow_locally(self, item_id):
+        """'Айсана, иди за мной': follow the person in front of the camera (aisana_follow)."""
+        with self.arm_lock:
+            self.local_items.add(item_id)
+            self.responded_items.add(item_id)
+            self.legs_done_items.add(item_id)
+        self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+        self.cancel_reply()
+
+        def say(kind):
+            self.speak_report('Robot report: follow me: ' + kind + '.', confirm_instruction(self.follow_phrase(kind), ''))
+
+        def worker():
+            if self.follower is not None and self.follower.active():
+                self.follower.cancel()
+                self.follower.thread.join(2)
+            if self.legs is None:
+                return say('no_legs')
+            camera = self.camera_stream
+            if camera is None or camera.latest(max_age=2.0, wait=1.0) is None:
+                return say('no_camera')
+            try:
+                if self.person_detector is None:
+                    self.person_detector = aisana_follow.PersonDetector(*aisana_follow.ensure_model())
+            except Exception as exc:
+                print('Follow: person detector not available:', exc)
+                return say('no_model')
+
+            def ended(reason):
+                self.motion_until = 0.0
+                if reason in ('lost', 'time') and not self.stop.is_set():
+                    say(reason)
+            self.follower = aisana_follow.Follower(
+                self.legs, lambda: camera.latest(max_age=0.6, wait=0.5), self.person_detector,
+                on_end=ended)
+            # While following only her name + a command counts (like other drives).
+            self.motion_until = time.monotonic() + aisana_follow.FOLLOW_SECONDS + 2
+            print('Follow: following the person in front (up to {:.0f} s).'.format(aisana_follow.FOLLOW_SECONDS))
+            say('start')
+            self.follower.start()
+        threading.Thread(target=worker, daemon=True).start()
 
     def holding(self):
         if self.hold_item is None:
@@ -2000,6 +2089,11 @@ class RealtimeAisana(object):
             threading.Thread(target=self.speak_report, daemon=True, args=(
                 'Robot report: wheels and arms were stopped.', confirm_instruction(phrase, ''))).start()
             return
+        if addressed and not stop and FOLLOW_RE.search(request_part(transcript)) and not re.search(r'\?\s*$', transcript):
+            if held:
+                self.release_hold(drop=True)
+            self.run_follow_locally(item_id)
+            return
         if addressed and not stop and DANCE_RE.search(transcript) and not re.search(r'\?\s*$', transcript):
             if held:
                 self.release_hold(drop=True)
@@ -2088,6 +2182,8 @@ class RealtimeAisana(object):
             self.legs_done_items.add(item_id)
             self.responded_items.add(item_id)
             self.local_items.add(item_id)
+        if drive is not None and self.follower is not None:
+            self.follower.cancel()                   # a new drive command ends "follow me"
         self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
         self.cancel_reply()                 # cut "Секунду, подумаю..." chatter
 

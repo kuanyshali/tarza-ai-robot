@@ -1179,6 +1179,31 @@ class LegsToolTests(unittest.TestCase):
         self.assertTrue(result.startswith(rt.SILENT_RESULT))
         self.assertEqual(session.legs.intents, [])
 
+    def test_follow_me_starts_the_follower_not_a_drive(self):
+        session, sent = make_session()
+        session.legs = FakeLegs()
+        started = []
+        session.run_follow_locally = lambda item_id: started.append(item_id)
+        say(session, 'f1', 'Айсана, иди за мной')
+        self.assertEqual(started, ['f1'])
+        self.assertEqual(session.legs.intents, [])          # not "иди" = 2 s forward
+
+    def test_stop_ends_following(self):
+        session, sent = make_session()
+        session.legs = FakeLegs()
+
+        class F(object):
+            cancelled = False
+
+            def cancel(self):
+                self.cancelled = True
+
+            def active(self):
+                return not self.cancelled
+        session.follower = F()
+        say(session, 'f2', 'Айсана, стоп')
+        self.assertTrue(session.follower.cancelled)
+
     def test_model_cannot_drive_when_not_asked(self):
         session, _ = make_session()
         session.legs = FakeLegs()

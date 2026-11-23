@@ -34,6 +34,8 @@ Aisana (Айсана): university voice robot on an NVIDIA Jetson Nano. The owne
 - `aisana_realtime.py` — main fast mode (OpenAI Realtime GA over websocket-client 1.3.1).
 - `robot.py` — classic STT → chat → TTS loop; imports cv2 and needs OPENAI_API_KEY at import,
   so tests extract its functions via `ast` (see `tests/test_robot.py::isolated`).
+- `aisana_follow.py` — "иди за мной": MobileNet-SSD person detector (cv2.dnn) + follow loop; drives only
+  through `LegsController.set_command` (lease: the keep-alive stops a drive nobody renews).
 - `aisana_arm.py`, `sadam_features.py`, `aisana_memory.py`, `wake_listener.py` are importable
   without hardware and tested directly.
 

@@ -213,6 +213,8 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
   <button class="off-btn" onclick="if(confirm('Выключить Айсану?'))post('/api/stop')">Выключить</button>
   <button onclick="act('wave')">👋 Помахать</button>
   <button onclick="act('dance')">💃 Танцевать</button>
+  <button onclick="act('follow')">👣 Иди за мной</button>
+  <button class="off-btn" onclick="act('stop')">✋ Стой</button>
   <button style="grid-column:span 2" onclick="if(confirm('Подготовить колёса? Если нужна калибровка, колёса немного покрутятся.'))post('/api/legs')">🛞 Колёса: включить / откалибровать</button>
  </div>
  <div class="card">
@@ -320,7 +322,7 @@ async function refresh(){try{const s=await (await fetch('/api/status')).json();
  document.getElementById('net').textContent='интернет: '+s.internet;
  let h=R('Айсана',s.running?'работает':'выключена');
  const a=s.aisana;
- if(a&&a.ok){h+=R('OpenAI',a.connected?'на связи':'подключается')+R('Руки',a.arms)+R('Ноги',a.legs)+R('Камера',a.camera)+R('Лиц в памяти',a.faces)+R('Язык',a.language)+R('Юмор',a.humor+'%')+R('Микрофон',(a.mic||'USB')+(a.mic==='USB'||!a.mic?' · '+usbLevel(a):''))+R('Сейчас',a.moving?'двигается':(a.speaking?'говорит':'слушает'))}
+ if(a&&a.ok){h+=R('OpenAI',a.connected?'на связи':'подключается')+R('Руки',a.arms)+R('Ноги',a.legs)+R('Камера',a.camera)+R('Лиц в памяти',a.faces)+R('Язык',a.language)+R('Юмор',a.humor+'%')+R('Микрофон',(a.mic||'USB')+(a.mic==='USB'||!a.mic?' · '+usbLevel(a):''))+R('Сейчас',a.following?'идёт за человеком':a.moving?'двигается':(a.speaking?'говорит':'слушает'))}
  else if(s.running){h+=R('Статус',(a&&a.error)||'запускается…')}
  document.getElementById('state').innerHTML=h;
  if(Date.now()-vTouch>5000){if(s.volume==null){$('vv').textContent='нет колонки'}else{$('vol').value=s.volume;$('vv').textContent=s.volume+'%'}}
