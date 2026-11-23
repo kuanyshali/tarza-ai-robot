@@ -38,8 +38,8 @@ journalctl -u aisana-panel -n 30      # лог пульта
 `NU_Campus_WiFi` — WPA2-Enterprise (логин и пароль от университетской почты). Запустите на Джетсоне сами и введите логин и пароль (в git и в чат они не попадают, хранятся только в системном файле NetworkManager, доступном root):
 
 ```bash
-./connect_nu_campus.sh            # NU_Campus первым, роутер 4G запасным (экономит трафик симки)
-./connect_nu_campus.sh --backup   # наоборот: роутер первым, NU_Campus запасным
+./connect_nu_campus.sh            # роутер 4G Altel первым, NU_Campus запасным (как сейчас)
+./connect_nu_campus.sh --first    # наоборот: NU_Campus первым (экономит трафик симки)
 ./connect_nu_campus.sh --remove   # забыть NU_Campus и пароль
 ```
 

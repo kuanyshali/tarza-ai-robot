@@ -2,8 +2,8 @@
 # Connect the Jetson to NU_Campus_WiFi (WPA2-Enterprise: PEAP + MSCHAPv2 with the
 # university e-mail login). Run it yourself on the Jetson and type the login and
 # password: they are stored only in NetworkManager's root-only file, not in git.
-#   ./connect_nu_campus.sh            connect, campus Wi-Fi first, 4G router as backup
-#   ./connect_nu_campus.sh --backup   connect, 4G router first, campus Wi-Fi as backup
+#   ./connect_nu_campus.sh            connect, 4G router (Altel) first, campus Wi-Fi as backup
+#   ./connect_nu_campus.sh --first    connect, campus Wi-Fi first, 4G router as backup
 #   ./connect_nu_campus.sh --remove   forget the campus Wi-Fi (and the stored password)
 set -u
 NAME=NU-Campus
@@ -13,8 +13,8 @@ if [ "${1:-}" = "--remove" ]; then
     exit 0
 fi
 # Route metric: router over USB has 50; lower = preferred.
-METRIC=40
-[ "${1:-}" = "--backup" ] && METRIC=250
+METRIC=250
+[ "${1:-}" = "--first" ] && METRIC=40
 
 read -r -p "Логин университетской почты (например name.surname или name.surname@nu.edu.kz): " LOGIN
 read -r -s -p "Пароль: " PASS
