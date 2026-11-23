@@ -47,7 +47,7 @@ def internet():
         name = device.group(1) if device else '?'
     except (OSError, subprocess.CalledProcessError):
         return 'нет'
-    return {'eth1': 'роутер Beeline (USB)', 'wlan0': 'Wi-Fi'}.get(name, name)
+    return {'eth1': 'роутер 4G Altel (USB)', 'wlan0': 'Wi-Fi'}.get(name, name)
 
 
 SPEAKER_LABEL = os.environ.get('AISANA_SPEAKER_LABEL', 'USB Composite Device')   # Xiaomi
