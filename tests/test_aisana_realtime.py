@@ -711,7 +711,7 @@ class StopAndGreetTests(unittest.TestCase):
         self.assertEqual(actions[0], ('position', 'both', 3, 'shoulder'))
         self.assertEqual(actions[1][0], 'hand_shake')
         self.assertEqual(actions[-1], ('position', 'both', 0, 'whole'))
-        self.assertFalse(rt.DANCE_RE.search('Ты умеешь танцевать?'))
+        self.assertFalse(rt.POLITE_ASK_RE.search('Ты умеешь танцевать?'))   # a question, not a request
 
     def test_short_legs_errors(self):
         self.assertIn('no answer', rt.aisana_legs.short_error(Exception('Connection to 10.42.0.148 timed out.')))
@@ -1312,6 +1312,23 @@ class LegsToolTests(unittest.TestCase):
         self.assertTrue(session.panel_status()['quiet'])
         session.panel_action('quiet', 'off')
         self.assertFalse(rt.load_quiet())
+
+    def test_polite_dance_question_dances(self):
+        # Jetson log, Nov 25: "Aisana, can you dance?" -> "I can't dance"; the panel button worked.
+        for text in ('Aisana, can you dance?', 'Айсана, можешь потанцевать?', 'Айсана, станцуешь?',
+                     'Айсана, потанцуй'):
+            session, sent = make_session()
+            danced = []
+            session.run_dance_locally = lambda item_id, transcript, danced=danced: danced.append(item_id)
+            say(session, 'd1', text)
+            self.assertEqual(danced, ['d1'], text)
+        for text in ('Aisana, do you like dancing?', 'Айсана, ты любишь танцевать?'):
+            session, sent = make_session()
+            danced = []
+            session.run_dance_locally = lambda item_id, transcript, danced=danced: danced.append(item_id)
+            say(session, 'd2', text)
+            self.assertEqual(danced, [], text)                 # a real question: she just answers
+        self.assertIn('Never say you cannot dance', rt.PROMPT)
 
     def test_model_cannot_drive_when_not_asked(self):
         session, _ = make_session()

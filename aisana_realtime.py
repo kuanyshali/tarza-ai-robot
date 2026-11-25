@@ -318,8 +318,13 @@ THING_FILLER_RE = re.compile(r'\b(?:мой|моя|моё|мое|мои|наш|н
 
 WAVE_SECONDS = float(os.environ.get('AISANA_WAVE_SECONDS', '6'))
 # "Айсана, танцуй": arms up, right hand waves, she spins with her shouts, then arms down.
-DANCE_RE = re.compile(r'(?:\bтанцу\w*|потанцу\w*|станцу\w*|затанцу\w*|\bdance\b|\bdancing\b|'
+DANCE_RE = re.compile(r'(?:\bтанцу\w*|потанцу\w*|станцу\w*|затанцу\w*|\w*танцева\w*|\bdance\b|\bdancing\b|'
                       r'билеші\w*|биле\b|ارقص\w*)', re.I)
+# A request phrased as a question: "can you dance?", "можешь потанцевать?" (Nov 25 log:
+# "Aisana, can you dance?" -> "I can't dance"). "Do you like dancing?" stays a question.
+POLITE_ASK_RE = re.compile(r'(?:\b(?:can|could|will|would)\s+you\b|\bcan\s+u\b|мож(?:ешь|ете)|сможешь|'
+                           r'(?:по|с)?танцуешь|(?:по|с)?танцуете|\bа\s+(?:по|с)танц|не\s+(?:по|с)танцуешь|'
+                           r'давай|бол(?:а|ады)\s+ма)', re.I)
 # "Иди за мной" / "follow me" (before drive parsing: "иди" alone is a drive word).
 FOLLOW_RE = re.compile(r'(?:(?:иди|ид[её]м|пойд[её]м|пошли|ходи|езжай|едь|поезжай|двигайся|кати|давай)\s+за\s+мной|'
                        r'следуй\w*(?:\s+за\s+мной)?|\bfollow\s+me\b|\bcome\s+with\s+me\b|артымнан\s+\w+|'
@@ -595,6 +600,9 @@ PROMPT = (
     'call inspect_camera silently, then answer in first person ("Вижу..."); never mention photos. '
     'ARMS and LEGS: call move_arm / move_legs only when asked to move, silently and first; never invent '
     'positions, times or distances; afterwards say a few words. '
+    'YOU CAN: dance (arms up, waving hand, spinning, music), wave hello, follow a person ("иди за '
+    'мной"), see with the camera, remember faces. Never say you cannot dance or move; the robot does '
+    'it by itself when asked. '
     'Use get_weather for weather and web_search for news, prices and other changing facts. '
 )
 
@@ -2302,12 +2310,14 @@ class RealtimeAisana(object):
             threading.Thread(target=self.speak_report, daemon=True, args=(
                 'Robot report: wheels and arms were stopped.', confirm_instruction(phrase, ''))).start()
             return
-        if addressed and not stop and FOLLOW_RE.search(request_part(transcript)) and not re.search(r'\?\s*$', transcript):
+        if addressed and not stop and FOLLOW_RE.search(request_part(transcript)) and (
+                not re.search(r'\?\s*$', transcript) or POLITE_ASK_RE.search(transcript)):
             if held:
                 self.release_hold(drop=True)
             self.run_follow_locally(item_id)
             return
-        if addressed and not stop and DANCE_RE.search(transcript) and not re.search(r'\?\s*$', transcript):
+        if addressed and not stop and DANCE_RE.search(transcript) and (
+                not re.search(r'\?\s*$', transcript) or POLITE_ASK_RE.search(transcript)):
             if held:
                 self.release_hold(drop=True)
             self.run_dance_locally(item_id, transcript)
