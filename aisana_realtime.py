@@ -617,6 +617,8 @@ class RealtimeAisana(object):
         self.follower = None                # "иди за мной" run (aisana_follow.Follower)
         self.person_detector = None
         self.heard_at = 0.0                 # end of the user's last turn (latency log)
+        self.last_create = (0.0, None)      # last response.create sent (retry after "active response")
+        self.retry_create = None
         self.usb_level = 0                  # USB mic loudness for the panel (RMS peak, last second)
         self.usb_level_peak = 0
         self.usb_level_at = 0.0
@@ -647,6 +649,7 @@ class RealtimeAisana(object):
         self.arm_done_items = set()
         self.arm_lock = threading.Lock()
         self.last_arm_at = 0.0
+        self.last_arm_talk_at = 0.0         # last user turn that talked about the arms/gripper
         self.local_items = set()            # commands already run from the user's words
         self.rephrased_items = set()        # audio replaced by its text request (answer_request_only)
         self.noise_items = set()            # empty speech / noise: never acted on
@@ -780,12 +783,19 @@ class RealtimeAisana(object):
         if not intents:
             action = args.get('action')
             words = transcript or ''
-            recent = time.monotonic() - self.last_arm_at < 90
+            now = time.monotonic()
+            # A follow-up about the arms ("Can you open it?" right after talking about the
+            # gripper, Nov 25 log) counts when the arms were moved or talked about lately.
+            recent = now - max(self.last_arm_at, self.last_arm_talk_at) < 90
+            follow_up = recent and (CONTINUE_WORDS.search(words) or UP_WORDS.search(words)
+                                    or DOWN_WORDS.search(words) or OPEN_WORDS.search(words)
+                                    or CLOSE_WORDS.search(words))
             if transcript is not None and action not in ('stop', 'status'):
-                if not (ARM_WORDS.search(words) or (recent and (CONTINUE_WORDS.search(words)
-                        or UP_WORDS.search(words) or DOWN_WORDS.search(words)))):
-                    return ('The user did not ask to move the arms (they said: "{}"). Nothing moved. '
-                            'Answer what they actually said.'.format(words))
+                if not (ARM_WORDS.search(words) or follow_up):
+                    # Nov 25: after "Nothing moved" the model still said "the gripper is now open".
+                    return ('NOT DONE. Nothing moved: the arms were not commanded (the user said: "{}"). '
+                            'Do NOT say that anything opened, closed or moved. Answer what they actually '
+                            'said; if they meant the arm, ask in a few words which arm and what to do.'.format(words))
                 if action == 'position' and not NUMBER_ANY.search(words):
                     return ('Nothing moved: the user did not say a position number. Ask only: '
                             '"В какую позицию, от нуля до четырёх?" (in the user\'s language).')
@@ -880,8 +890,8 @@ class RealtimeAisana(object):
             if action not in LEGS_ACTIONS:
                 return 'Unknown drive action; nothing moved.'
             if transcript is not None and action != 'stop' and not aisana_legs.mentions_driving(transcript):
-                return ('The user did not ask you to drive (they said: "{}"). Nothing moved. '
-                        'Answer what they actually said.'.format(transcript))
+                return ('NOT DONE. Nothing moved: the wheels were not commanded (the user said: "{}"). Do NOT say that you '
+                        'moved, drove or turned. Answer what they actually said.'.format(transcript))
             intent = aisana_legs.make_intent(action, args.get('seconds'), args.get('meters'), args.get('degrees'))
             if transcript is not None and not aisana_legs.mentions_amount(transcript):
                 # Never an invented time, distance or angle: defaults apply.
@@ -970,6 +980,8 @@ class RealtimeAisana(object):
             self.send({'type': 'conversation.item.delete', 'item_id': item_id})
 
     def send(self, payload):
+        if payload.get('type') == 'response.create':
+            self.last_create = (time.monotonic(), payload)
         with self.send_lock:
             started = time.monotonic()
             self.ws.send(json.dumps(payload))
@@ -2005,6 +2017,8 @@ class RealtimeAisana(object):
 
     def handle_transcript(self, item_id, transcript):
         print('You:', transcript)
+        if ARM_WORDS.search(transcript or ''):
+            self.last_arm_talk_at = time.monotonic()
         if not FIXED_LANGUAGE:
             self.user_language = language_of(transcript) or self.user_language
         with self.transcript_cond:
@@ -2347,6 +2361,11 @@ class RealtimeAisana(object):
                 print('Shouts ready: {:.1f} s'.format(len(self.shout_buffer) / (RATE * 2.0)))
         elif typ == 'response.done':
             self.responding = False
+            if self.retry_create is not None:
+                # A reply refused with "conversation_already_has_active_response" goes
+                # out now that the other one finished (Nov 25: she just stayed silent).
+                payload, self.retry_create = self.retry_create, None
+                threading.Thread(target=self.send, args=(payload,), daemon=True).start()
             holding = self.holding()
             if self.response_item:
                 self.done_items.add(self.response_item)
@@ -2361,6 +2380,12 @@ class RealtimeAisana(object):
             error = e.get('error', {}) or {}
             if error.get('code') == 'response_cancel_not_active':
                 return                          # harmless: the reply had already ended
+            if error.get('code') == 'conversation_already_has_active_response':
+                sent_at, payload = self.last_create
+                if payload is not None and time.monotonic() - sent_at < 5 and self.retry_create is None:
+                    self.retry_create = payload  # send it again when the current reply is done
+                    print('Reply queued: another reply was still running.')
+                    return
             print('Realtime API error:', error)
             if re.search(r'transcri', str(error), re.I):
                 self.stt_fallback(str(error))

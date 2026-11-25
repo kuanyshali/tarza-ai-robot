@@ -1204,6 +1204,37 @@ class LegsToolTests(unittest.TestCase):
         say(session, 'f2', 'Айсана, стоп')
         self.assertTrue(session.follower.cancelled)
 
+    def test_gripper_follow_up_after_talking_about_it(self):
+        # Jetson log, Nov 25: "Can you open it?" right after the gripper -> refused,
+        # then the model said "The left gripper is now open" with nothing sent.
+        session, sent = make_session()
+        arm = FakeArm()
+        session.arm = arm
+        say(session, 'g1', 'Is your left gripper closed?')
+        say(session, 'g2', 'Can you open it?')
+        result = session.run_tool('move_arm', {'arm': 'left', 'action': 'gripper_open'})
+        self.assertIn('Sent to the arms', result)
+        self.assertEqual(arm.calls[-1][:2], ('gripper_open', 'left'))
+
+    def test_refused_arm_move_forbids_claiming_it(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        say(session, 'g3', 'Can you open it?')                  # no arm talk before
+        result = session.run_tool('move_arm', {'arm': 'left', 'action': 'gripper_open'})
+        self.assertTrue(result.startswith('NOT DONE'))
+        self.assertIn('Do NOT say', result)
+
+    def test_reply_refused_as_busy_is_sent_again(self):
+        session, sent = make_session()
+        session.last_create = (time.monotonic(), {'type': 'response.create', 'response': {'instructions': 'x'}})
+        session.handle({'type': 'error', 'error': {'code': 'conversation_already_has_active_response'}})
+        del sent[:]
+        session.handle({'type': 'response.done', 'response': {'id': 'r9'}})
+        deadline = time.time() + 1
+        while time.time() < deadline and 'response.create' not in types(sent):
+            time.sleep(0.01)
+        self.assertIn('response.create', types(sent))
+
     def test_model_cannot_drive_when_not_asked(self):
         session, _ = make_session()
         session.legs = FakeLegs()
