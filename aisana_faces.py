@@ -169,6 +169,16 @@ class CameraStream(object):
                 time.sleep(0.1)            # ~10 frames/s is plenty; the Nano CPU is for audio
             camera.release()
 
+    def newer_than(self, after, wait=0.5):
+        """(frame, time) of a frame newer than `after`, or (None, after)."""
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            with self.lock:
+                if self.frame is not None and self.frame_at > after:
+                    return self.frame.copy(), self.frame_at
+            time.sleep(0.02)
+        return None, after
+
     def latest(self, max_age=1.5, wait=3.0):
         """A copy of the newest frame not older than max_age seconds, or None."""
         deadline = time.monotonic() + wait

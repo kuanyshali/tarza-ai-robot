@@ -36,6 +36,7 @@ from aisana_legs import parse_legs_command, LEGS_ACTIONS, legs_reply
 from aisana_arm import arm_reply
 import aisana_faces
 import aisana_follow
+import aisana_turn
 import aisana_usage
 import aisana_memory
 import aisana_control
@@ -320,6 +321,9 @@ WAVE_SECONDS = float(os.environ.get('AISANA_WAVE_SECONDS', '6'))
 # "Айсана, танцуй": arms up, right hand waves, she spins with her shouts, then arms down.
 DANCE_RE = re.compile(r'(?:\bтанцу\w*|потанцу\w*|станцу\w*|затанцу\w*|\w*танцева\w*|\bdance\b|\bdancing\b|'
                       r'билеші\w*|биле\b|ارقص\w*)', re.I)
+# "Айсана, откалибруй повороты" / "calibrate your turns": measure spins with the camera.
+CALIBRATE_TURNS_RE = re.compile(r'(?:(?:от|за)?калибр\w*\s+(?:свои\s+|твои\s+)?поворот\w*|'
+                                r'калибровк\w*\s+поворот\w*|\bcalibrat\w*\s+(?:your\s+|the\s+)?turn\w*)', re.I)
 # A request phrased as a question: "can you dance?", "можешь потанцевать?" (Nov 25 log:
 # "Aisana, can you dance?" -> "I can't dance"). "Do you like dancing?" stays a question.
 POLITE_ASK_RE = re.compile(r'(?:\b(?:can|could|will|would)\s+you\b|\bcan\s+u\b|мож(?:ешь|ете)|сможешь|'
@@ -2004,6 +2008,59 @@ class RealtimeAisana(object):
                                   self.reply_language() + 'In ONE short sentence say that you cannot dance now.')
         threading.Thread(target=worker, daemon=True).start()
 
+    def run_turn_calibration(self, item_id):
+        """Measure her spins with the camera (aisana_turn) and use them for "повернись на 90"."""
+        with self.arm_lock:
+            self.local_items.add(item_id)
+            self.responded_items.add(item_id)
+            self.legs_done_items.add(item_id)
+        self.cancel_reply()
+        russian = (FIXED_LANGUAGE or self.user_language) == 'Russian'
+
+        def say(ru, en):
+            self.speak_report('Robot report: turn calibration.', confirm_instruction(ru if russian else en, ''))
+
+        def worker():
+            if self.legs is None or self.camera_stream is None:
+                return say('Не могу: нужны колёса и камера.', "I can't: I need my wheels and my camera.")
+            say('Калибрую повороты: отойдите, я покручусь около минуты.',
+                'Calibrating my turns: please step back, I will spin around for about a minute.')
+            time.sleep(4)
+            self.dance_id += 1
+            token = self.dance_id
+            camera, last = self.camera_stream, [0.0]
+
+            def next_picture():
+                frame, last[0] = camera.newer_than(last[0], wait=0.5)
+                return aisana_turn.small_gray(frame) if frame is not None else None
+
+            def command(name):
+                code, data = self.legs.set_command(name, lease=0.9)
+                return code == 200
+            try:
+                status = self.legs.ensure_enabled()
+                calibrator = aisana_turn.Calibrator(
+                    next_picture, command, speed_kmh=float(status.get('speed_kmh') or 2.0),
+                    stopped=lambda: token != self.dance_id)
+                self.motion_until = time.monotonic() + 90
+                data = calibrator.run()
+                aisana_turn.save_calibration(data)
+                self.legs.turns = data
+                ninety = aisana_turn.seconds_for(90, data['table'])
+                print('Turn calibration saved: {} (90 degrees = {:.2f} s).'.format(data['table'], ninety))
+                say('Готово: теперь знаю свои повороты, девяносто градусов — {:.1f} секунды.'.format(ninety),
+                    'Done: I know my turns now; ninety degrees takes {:.1f} seconds.'.format(ninety))
+            except Exception as exc:
+                print('Turn calibration failed:', exc)
+                say('Калибровка не получилась, повороты как раньше.', "Calibration didn't work; my turns stay as before.")
+            finally:
+                self.motion_until = 0.0
+                try:
+                    self.legs.set_command('stop')
+                except Exception:
+                    pass
+        threading.Thread(target=worker, daemon=True).start()
+
     def dance_more(self, dance, remaining, wait, sleep=None):
         """The rest of a long dance: spins of <= MAX_SECONDS, left/right in turn."""
         sleep = sleep or self.stop.wait
@@ -2125,6 +2182,9 @@ class RealtimeAisana(object):
             return {'ok': True}
         if action == 'follow':
             self.run_follow_locally('panel-{}'.format(time.monotonic()))
+            return {'ok': True}
+        if action == 'calibrate_turns':
+            self.run_turn_calibration('panel-{}'.format(time.monotonic()))
             return {'ok': True}
         if action == 'quiet':
             self.quiet = text.strip().lower() in ('on', '1', 'true', 'да')
@@ -2346,6 +2406,11 @@ class RealtimeAisana(object):
                       'Egyptian Arabic': 'وقفت.'}.get(self.user_language, 'Stopped.')
             threading.Thread(target=self.speak_report, daemon=True, args=(
                 'Robot report: wheels and arms were stopped.', confirm_instruction(phrase, ''))).start()
+            return
+        if addressed and not stop and CALIBRATE_TURNS_RE.search(transcript):
+            if held:
+                self.release_hold(drop=True)
+            self.run_turn_calibration(item_id)
             return
         if addressed and not stop and FOLLOW_RE.search(request_part(transcript)) and (
                 not re.search(r'\?\s*$', transcript) or POLITE_ASK_RE.search(transcript)):

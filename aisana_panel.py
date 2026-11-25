@@ -290,6 +290,7 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
   <button onclick="act('wave')">👋 Помахать</button>
   <button onclick="act('dance')">💃 Танцевать</button>
   <button onclick="act('follow')">👣 Иди за мной</button>
+  <button onclick="if(confirm('Калибровка поворотов: Айсана сделает полный оборот и несколько поворотов (~1 мин). Вокруг должно быть свободно. Начать?'))act('calibrate_turns')">🧭 Калибровка поворотов</button>
   <button class="off-btn" onclick="act('stop')">✋ Стой</button>
   <button style="grid-column:span 2" onclick="if(confirm('Подготовить колёса? Если нужна калибровка, колёса немного покрутятся.'))post('/api/legs')">🛞 Колёса: включить / откалибровать</button>
  </div>

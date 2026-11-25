@@ -71,8 +71,15 @@ def _intent(action, seconds=None, meters=None, degrees=None):
     return {'action': action, 'seconds': seconds, 'meters': meters, 'degrees': degrees}
 
 
-def plan_seconds(intent, speed_kmh=2.0, spin_90=SPIN_90):
-    """How long to drive for an intent; always within (0, MAX_SECONDS]."""
+def plan_seconds(intent, speed_kmh=2.0, spin_90=SPIN_90, turns=None):
+    """How long to drive for an intent; always within (0, MAX_SECONDS].
+    turns: a camera calibration (aisana_turn) {'table': [[s, deg], ...], 'speed_kmh'}."""
+    if (turns and not intent.get('seconds') and intent['action'] in ('spin_left', 'spin_right')
+            and float(intent.get('degrees') or 90) <= 720):
+        import aisana_turn
+        seconds = aisana_turn.seconds_for(float(intent.get('degrees') or 90), turns['table'])
+        seconds *= float(turns.get('speed_kmh') or speed_kmh) / max(0.1, float(speed_kmh))
+        return max(0.2, min(MAX_SECONDS, seconds))
     if intent.get('seconds'):
         seconds = float(intent['seconds'])
     elif intent.get('meters'):
@@ -126,6 +133,11 @@ class LegsController(object):
         self._next_check = 0.0
         self._enabling_until = 0.0           # just asked to enable: poll fast, heartbeat at once
         self.motion_lease_until = 0.0        # a drive/follow loop owns the motion until then
+        try:
+            import aisana_turn
+            self.turns = aisana_turn.load_calibration()   # camera-measured spins, if done
+        except Exception:
+            self.turns = None
         self._last_note = ''
 
     # --- raw API -----------------------------------------------------------
@@ -311,7 +323,7 @@ class LegsController(object):
             speed = float(self.status().get('speed_kmh') or 2.0)
         except Exception:
             speed = 2.0
-        seconds = plan_seconds(intent, speed, self.spin_90)
+        seconds = plan_seconds(intent, speed, self.spin_90, self.turns)
 
         # Enable and send the first command BEFORE returning, so a refusal
         # (obstacle closer than 40 cm, motors off) is known before Aisana speaks.
