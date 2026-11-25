@@ -1832,6 +1832,15 @@ class RealtimeAisana(object):
     def motion_active(self):
         return time.monotonic() < self.motion_until
 
+    def panel_frame(self):
+        """Newest camera picture for the robot's display (read-only: the camera stays hers)."""
+        if self.camera_stream is None:
+            return {'ok': False, 'error': 'camera off'}
+        frame = self.camera_stream.latest(max_age=1.0, wait=0.5)
+        if frame is None:
+            return {'ok': False, 'error': 'no picture'}
+        return {'ok': True, 'jpeg': base64.b64encode(aisana_faces.jpeg(frame, 70)).decode('ascii')}
+
     def panel_status(self):
         """What the phone panel shows."""
         legs = 'not connected'

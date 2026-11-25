@@ -11,6 +11,7 @@ One JSON object per line in, one JSON object per line out:
     {"action": "humor", "text": "60"}  humor level 0-100, silently
     {"action": "mic", "mode": "live"|"ptt", "pressed": bool, "pcm": base64}
                                        iPhone microphone: 24 kHz mono S16_LE
+    {"action": "frame"}                newest camera picture (read-only): {"ok", "jpeg": base64}
 
 Python 3.6, stdlib only. Never listens on other interfaces: the panel is the
 only door from the network, and it can only send these actions.
@@ -23,7 +24,7 @@ import socketserver
 import threading
 
 CONTROL_PORT = 8091
-ACTIONS = ('status', 'stop', 'wave', 'dance', 'follow', 'people', 'say', 'ask', 'humor', 'mic')
+ACTIONS = ('status', 'stop', 'wave', 'dance', 'follow', 'people', 'say', 'ask', 'humor', 'mic', 'frame')
 MAX_TEXT = 300
 MAX_LINE = 1 << 17                  # a mic packet (2 s of audio in base64) fits
 
@@ -70,6 +71,8 @@ class ControlServer(object):
             return {'ok': False, 'error': 'Aisana is starting'}
         if action == 'status':
             return dict(ok=True, **session.panel_status())
+        if action == 'frame':
+            return session.panel_frame()
         if action == 'mic':
             try:
                 pcm = base64.b64decode(str(request.get('pcm') or ''), validate=True)
