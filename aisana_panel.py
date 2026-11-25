@@ -158,6 +158,7 @@ def traffic(name=None, now=None, read=None):
 def speed_test(timeout=20):
     """Download 5 MB and upload 2 MB to Cloudflare's speed test, ping OpenAI (~7 MB of traffic)."""
     import urllib.request
+    agent = {'User-Agent': 'Mozilla/5.0 (aisana-panel speed test)'}   # urllib's default agent gets 403
     result = {'ok': True}
     try:
         started = time.monotonic()
@@ -169,12 +170,14 @@ def speed_test(timeout=20):
     result['openai_ms'] = int((time.monotonic() - started) * 1000)
     try:
         started = time.monotonic()
-        with urllib.request.urlopen('https://speed.cloudflare.com/__down?bytes=5000000', timeout=timeout) as r:
+        down = urllib.request.Request('https://speed.cloudflare.com/__down?bytes=5000000', headers=agent)
+        with urllib.request.urlopen(down, timeout=timeout) as r:
             size = len(r.read())
         result['down_mbit'] = round(size * 8 / 1e6 / (time.monotonic() - started), 1)
         data = b'0' * 2000000
         started = time.monotonic()
-        request = urllib.request.Request('https://speed.cloudflare.com/__up', data=data, method='POST')
+        request = urllib.request.Request('https://speed.cloudflare.com/__up', data=data, method='POST',
+                                         headers=agent)
         urllib.request.urlopen(request, timeout=timeout).close()
         result['up_mbit'] = round(len(data) * 8 / 1e6 / (time.monotonic() - started), 1)
     except Exception as exc:
