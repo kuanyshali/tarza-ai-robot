@@ -1430,5 +1430,47 @@ class ToolTests(unittest.TestCase):
         self.assertIn('failed', sent[0]['item']['output'])
 
 
+
+class DanceMusicTests(unittest.TestCase):
+    """Nov 25: the owner's own song plays while she dances (10 s)."""
+
+    def test_dance_lasts_twenty_seconds_by_default(self):
+        if 'AISANA_DANCE_SECONDS' not in os.environ:
+            self.assertEqual(rt.DANCE_SECONDS, 20.0)
+        self.assertLessEqual(rt.aisana_legs.MAX_SECONDS, 10.0)     # the wheels still stop after 10 s
+
+    def test_finds_the_music_file(self):
+        folder = tempfile.mkdtemp()
+        self.assertIsNone(rt.find_dance_music(folder))
+        with open(os.path.join(folder, 'dance.m4a'), 'wb') as handle:
+            handle.write(b'x')
+        self.assertEqual(rt.find_dance_music(folder), os.path.join(folder, 'dance.m4a'))
+
+    def test_decodes_the_first_seconds_with_ffmpeg(self):
+        calls = []
+
+        class Done(object):
+            returncode, stdout, stderr = 0, b'\x01\x00' * rt.RATE * 10, b''
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return Done()
+        pcm = rt.decode_music('/music/dance.mp3', 10, run=run)
+        self.assertEqual(len(pcm), rt.RATE * 2 * 10)
+        self.assertIn('-t', calls[0])
+        self.assertEqual(calls[0][calls[0].index('-t') + 1], '10')
+        self.assertEqual(calls[0][calls[0].index('-ar') + 1], str(rt.RATE))
+
+    def test_bad_music_file_is_ignored(self):
+        class Failed(object):
+            returncode, stdout, stderr = 1, b'', b'Invalid data found'
+        self.assertIsNone(rt.decode_music('/music/dance.mp3', 10, run=lambda command, **kw: Failed()))
+
+    def test_player_plays_given_music_or_falls_back_to_shouts(self):
+        player = rt.ShoutPlayer()
+        self.assertFalse(player.play_for(1.0, pcm=b'\x00\x00' * 10))    # no speaker yet
+        self.assertFalse(player.play_for(1.0, pcm=None))                  # no music, no shouts
+
+
 if __name__ == '__main__':
     unittest.main()

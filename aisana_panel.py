@@ -16,6 +16,7 @@ import socketserver
 import subprocess
 import sys
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import aisana_control
@@ -31,6 +32,44 @@ NOISE = re.compile(r'Mic level|GST_ARGUS|CONSUMER|Exposure Range|Camera (?:index
 
 CAMERA_INTERVAL = 0.12              # live view ~8 frames/s; Aisana's stream gives ~10
 
+# Battery: 8S LiFePO4 pack, voltage measured by the ODrive (the Pi reports vbus_voltage).
+LEGS_URL = os.environ.get('AISANA_LEGS_URL', 'http://10.42.0.148:5000').rstrip('/')
+BATTERY_CELLS = int(os.environ.get('AISANA_BATTERY_CELLS', '8'))
+# LiFePO4 resting voltage per cell -> charge %. Flat in the middle, so the % is approximate
+# (it dips while the wheels pull current).
+LIFEPO4_CURVE = ((2.50, 0), (3.00, 10), (3.20, 20), (3.22, 30), (3.25, 40), (3.26, 50),
+                 (3.27, 60), (3.30, 70), (3.32, 80), (3.35, 90), (3.40, 100))
+
+
+def battery_percent(voltage, cells=BATTERY_CELLS):
+    """Pack voltage -> 0..100 % (linear between the curve points), or None."""
+    if voltage is None or cells <= 0:
+        return None
+    cell = float(voltage) / cells
+    if cell <= LIFEPO4_CURVE[0][0]:
+        return 0
+    for (v1, p1), (v2, p2) in zip(LIFEPO4_CURVE, LIFEPO4_CURVE[1:]):
+        if cell <= v2:
+            return int(round(p1 + (p2 - p1) * (cell - v1) / (v2 - v1)))
+    return 100
+
+
+def battery(fetch=None):
+    """{'ok', 'voltage', 'percent'} from the legs Pi; ok False if it does not answer."""
+    try:
+        if fetch is None:
+            with urllib.request.urlopen(LEGS_URL + '/motor/status', timeout=1.5) as response:
+                data = json.loads(response.read().decode('utf-8'))
+        else:
+            data = fetch()
+        voltage = data.get('vbus_voltage')
+        voltage = float(voltage) if voltage is not None else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {'ok': False, 'error': 'legs Pi does not answer'}
+    if voltage is None:
+        return {'ok': False, 'error': 'no battery reading (ODrive not connected)'}
+    return {'ok': True, 'voltage': round(voltage, 1), 'percent': battery_percent(voltage)}
+
 
 def camera_frame(port=aisana_control.CONTROL_PORT):
     """Newest JPEG from a running Aisana's camera, or None."""
@@ -41,6 +80,25 @@ def camera_frame(port=aisana_control.CONTROL_PORT):
         return base64.b64decode(reply.get('jpeg') or '')
     except (binascii.Error, ValueError):
         return None
+
+
+PHOTO_DIR = os.environ.get('AISANA_PHOTO_DIR', os.path.join(os.path.expanduser('~'), 'robot_photos'))
+
+
+def take_photo(grab=camera_frame, folder=PHOTO_DIR, now=None):
+    """The display's PHOTO button: save Aisana's newest camera picture as
+    photo-YYYYmmdd-HHMMSS.jpg in `folder`."""
+    picture = grab()
+    if not picture:
+        return {'ok': False, 'error': 'no picture (is Aisana running?)'}
+    os.makedirs(folder, exist_ok=True)
+    stem = time.strftime('photo-%Y%m%d-%H%M%S', time.localtime(now))
+    name, n = stem + '.jpg', 2
+    while os.path.exists(os.path.join(folder, name)):          # two taps in one second
+        name, n = '{}-{}.jpg'.format(stem, n), n + 1
+    with open(os.path.join(folder, name), 'wb') as handle:
+        handle.write(picture)
+    return {'ok': True, 'file': name, 'bytes': len(picture)}
 
 
 def running():
@@ -363,12 +421,15 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def reply(self, code, body, kind='application/json; charset=utf-8'):
+    def reply(self, code, body, kind='application/json; charset=utf-8', any_origin=False):
         data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', kind)
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', 'no-store')
+        if any_origin:
+            # Read-only data for the robot's display page (a local file on the Pi).
+            self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(data)
 
@@ -377,6 +438,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, PAGE.encode('utf-8'), 'text/html; charset=utf-8')
         if self.path == '/api/status':
             return self.reply(200, status())
+        if self.path.split('?')[0] == '/api/battery':
+            return self.reply(200, battery(), any_origin=True)
         if self.path.split('?')[0] in ('/camera.jpg', '/camera.mjpg') and self.via_public_link():
             # The live camera is for the robot's display and the team (robot Wi-Fi,
             # robot LAN, Tailscale), not for anyone who has the public Funnel link.
@@ -421,6 +484,12 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length).decode('utf-8') or '{}')
         except ValueError:
             return self.reply(400, {'ok': False, 'error': 'bad json'})
+        if self.path == '/api/photo':
+            if self.via_public_link():
+                return self.reply(403, {'ok': False, 'error': 'camera only on the robot network or Tailscale'},
+                                  any_origin=True)
+            result = take_photo()
+            return self.reply(200 if result['ok'] else 503, result, any_origin=True)
         if self.path == '/api/start':
             return self.reply(200, start())
         if self.path == '/api/stop':

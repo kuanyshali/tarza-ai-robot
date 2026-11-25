@@ -120,6 +120,44 @@ class PanelTests(unittest.TestCase):
             h.client_address = (address, 1234)
             self.assertEqual(aisana_panel.Handler.via_public_link(h), public, address)
 
+    def test_battery_percent_8s_lifepo4(self):
+        percent = aisana_panel.battery_percent
+        self.assertEqual(percent(27.2, cells=8), 100)        # 3.40 V/cell, rested full
+        self.assertEqual(percent(29.2, cells=8), 100)        # on the charger: never above 100
+        self.assertEqual(percent(26.56, cells=8), 80)        # Nov 25 reading on the robot
+        self.assertEqual(percent(26.08, cells=8), 50)
+        self.assertEqual(percent(24.0, cells=8), 10)
+        self.assertEqual(percent(20.0, cells=8), 0)
+        self.assertEqual(percent(18.0, cells=8), 0)
+        self.assertIsNone(percent(None))
+
+    def test_battery_from_the_legs_pi(self):
+        reading = aisana_panel.battery(fetch=lambda: {'state': 'ENABLED', 'vbus_voltage': 26.56})
+        self.assertEqual(reading, {'ok': True, 'voltage': 26.6, 'percent': 80})
+        self.assertFalse(aisana_panel.battery(fetch=lambda: {'vbus_voltage': None})['ok'])
+
+        def down():
+            raise OSError('no route to host')
+        self.assertFalse(aisana_panel.battery(fetch=down)['ok'])
+
+    def test_photo_button_saves_the_newest_picture(self):
+        import os
+        import tempfile
+        folder = os.path.join(tempfile.mkdtemp(), 'robot_photos')      # created on first photo
+        grab = lambda: b'\xff\xd8photo\xff\xd9'
+        first = aisana_panel.take_photo(grab=grab, folder=folder, now=0)
+        second = aisana_panel.take_photo(grab=grab, folder=folder, now=0)  # same second
+        self.assertTrue(first['ok'] and second['ok'])
+        self.assertNotEqual(first['file'], second['file'])
+        self.assertTrue(first['file'].startswith('photo-') and first['file'].endswith('.jpg'))
+        with open(os.path.join(folder, first['file']), 'rb') as handle:
+            self.assertEqual(handle.read(), b'\xff\xd8photo\xff\xd9')
+
+    def test_no_photo_without_a_picture(self):
+        import tempfile
+        result = aisana_panel.take_photo(grab=lambda: None, folder=tempfile.mkdtemp())
+        self.assertFalse(result['ok'])
+
     def test_page_has_the_buttons(self):
         for label in ('СТОП', 'Включить', 'Выключить', 'Помахать', 'Танцевать', 'Сказать это'):
             self.assertIn(label, aisana_panel.PAGE)
