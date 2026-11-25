@@ -786,7 +786,8 @@ class RealtimeAisana(object):
             now = time.monotonic()
             # A follow-up about the arms ("Can you open it?" right after talking about the
             # gripper, Nov 25 log) counts when the arms were moved or talked about lately.
-            recent = now - max(self.last_arm_at, self.last_arm_talk_at) < 90
+            last = max(self.last_arm_at, self.last_arm_talk_at)
+            recent = last > 0 and now - last < 90      # 0 = never (monotonic can be < 90 s after boot)
             follow_up = recent and (CONTINUE_WORDS.search(words) or UP_WORDS.search(words)
                                     or DOWN_WORDS.search(words) or OPEN_WORDS.search(words)
                                     or CLOSE_WORDS.search(words))
