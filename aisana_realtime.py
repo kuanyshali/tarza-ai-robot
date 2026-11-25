@@ -296,7 +296,37 @@ FOLLOW_PHRASES = {
     'no_camera': {'Russian': 'Не могу: камера не работает.', 'English': "I can't: my camera is not working."},
     'no_model': {'Russian': 'Не могу: нет модели для поиска людей.', 'English': "I can't: my person detector did not load."},
 }
-DANCE_SECONDS = float(os.environ.get('AISANA_DANCE_SECONDS', '8'))
+DANCE_SECONDS = float(os.environ.get('AISANA_DANCE_SECONDS', '10'))
+# The owner's own music for the dance (not in the repo): the first DANCE_SECONDS of the
+# first file found is played instead of the shouts. Any format ffmpeg reads.
+DANCE_MUSIC_DIR = os.environ.get('AISANA_DANCE_MUSIC_DIR', os.path.expanduser('~/robot_music'))
+DANCE_MUSIC_NAMES = ('dance.mp3', 'dance.m4a', 'dance.wav', 'dance.ogg', 'dance.opus')
+
+
+def find_dance_music(folder=None):
+    """Path of the dance music file, or None."""
+    folder = DANCE_MUSIC_DIR if folder is None else folder
+    for name in DANCE_MUSIC_NAMES:
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def decode_music(path, seconds, run=subprocess.run):
+    """First `seconds` of a music file as 24 kHz mono S16_LE PCM (ffmpeg), or None."""
+    try:
+        result = run(['ffmpeg', '-v', 'error', '-i', path, '-t', str(seconds), '-f', 's16le',
+                      '-ac', '1', '-ar', str(RATE), '-'],
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print('Dance music: cannot decode {} ({})'.format(path, exc))
+        return None
+    if result.returncode != 0 or len(result.stdout) < RATE:      # under 0.5 s: unusable
+        print('Dance music: cannot decode {}: {}'.format(
+            path, result.stderr.decode('utf-8', 'replace').strip()[-200:]))
+        return None
+    return result.stdout
 WAVE_FOR = re.compile(r'(\d{1,2})\s*(?:сек\w*|с\b|seconds?|secs?|s\b)', re.I)
 
 
@@ -559,12 +589,25 @@ class ShoutPlayer(object):
 
     def __init__(self):
         self.pcm = None
+        self.music = None                       # dance music PCM (find_dance_music)
         self.speaker = None
         self._stop = threading.Event()
         self.active = False
 
-    def play_for(self, seconds):
-        if not self.pcm or not self.speaker:
+    def load_music(self, seconds=None):
+        """Decode the dance music once (in the background at start-up)."""
+        path = find_dance_music()
+        if path is None:
+            return False
+        music = decode_music(path, DANCE_SECONDS if seconds is None else seconds)
+        if music:
+            self.music = music
+            print('Dance music: {} ({:.1f} s)'.format(os.path.basename(path), len(music) / 2.0 / RATE))
+        return bool(music)
+
+    def play_for(self, seconds, pcm=None):
+        pcm = pcm or self.pcm
+        if not pcm or not self.speaker:
             return False
         self.stop()
         stop = threading.Event()
@@ -582,8 +625,8 @@ class ShoutPlayer(object):
                 step = RATE * 2 // 10                       # 0.1 s of audio per write
                 position = 0
                 while time.monotonic() < end and not stop.is_set():
-                    piece = self.pcm[position:position + step]
-                    position = (position + step) % len(self.pcm)
+                    piece = pcm[position:position + step]
+                    position = (position + step) % len(pcm)
                     player.stdin.write(piece)
             except Exception:
                 pass
@@ -1827,7 +1870,10 @@ class RealtimeAisana(object):
             moving = re.search(r'Driving \S+(?: \S+)? for ([\d.]+) s', spun or '')
             if moving:
                 self.motion_until = time.monotonic() + float(moving.group(1)) + 1.0
-                self.shouts.play_for(float(moving.group(1)))
+                # The owner's dance music if there is one, else her shouts.
+                self.shouts.play_for(float(moving.group(1)), pcm=self.shouts.music)
+            elif done and self.shouts.music:
+                self.shouts.play_for(seconds, pcm=self.shouts.music)   # arms only, with music
             elif done:
                 # Nov 23: the wheels were not calibrated and she only said "I'm dancing!".
                 wheels = 'my wheels are not ready' if spun else 'my wheels are not connected'
@@ -2467,6 +2513,7 @@ class RealtimeAisana(object):
         self.mic_device = alsa_device('arecord', MIC_LABEL, 'microphone ' + MIC_LABEL)
         self.speaker = alsa_device('aplay', 'USB Composite Device', 'Xiaomi speaker')
         self.shouts.speaker = self.speaker
+        threading.Thread(target=self.shouts.load_music, daemon=True).start()
         print('Input:', self.mic_device, 'Output:', self.speaker)
         print('STT:', self.stt_model, 'Mic gain:', MIC_GAIN, 'Noise reduction:', NOISE_REDUCTION,
               'VAD threshold:', VAD_THRESHOLD)
