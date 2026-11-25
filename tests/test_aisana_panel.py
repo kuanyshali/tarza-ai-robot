@@ -158,6 +158,17 @@ class PanelTests(unittest.TestCase):
         result = aisana_panel.take_photo(grab=lambda: None, folder=tempfile.mkdtemp())
         self.assertFalse(result['ok'])
 
+    def test_internet_speed_from_the_counters(self):
+        counters = {'rx': 1000000, 'tx': 200000}
+        read = lambda name, kind: counters[kind]
+        first = aisana_panel.traffic('ethX', now=100.0, read=read)
+        self.assertEqual(first['total_mb'], 1.2)
+        self.assertNotIn('down_kbs', first)                     # needs two samples
+        counters['rx'] += 1024 * 30                              # 30 KB in 2 s down
+        counters['tx'] += 1024 * 128                             # 128 KB up (her microphone)
+        second = aisana_panel.traffic('ethX', now=102.0, read=read)
+        self.assertEqual((second['down_kbs'], second['up_kbs']), (15.0, 64.0))
+
     def test_page_has_the_buttons(self):
         for label in ('СТОП', 'Включить', 'Выключить', 'Помахать', 'Танцевать', 'Сказать это'):
             self.assertIn(label, aisana_panel.PAGE)

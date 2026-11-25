@@ -116,12 +116,75 @@ def log_tail(lines=40):
     return [line for line in text.splitlines() if not NOISE.search(line)][-lines:]
 
 
-def internet():
+def internet_device():
     try:
         route = subprocess.check_output(['ip', 'route', 'get', '8.8.8.8'], stderr=subprocess.DEVNULL)
         device = re.search(r'\bdev (\S+)', route.decode())
-        name = device.group(1) if device else '?'
+        return device.group(1) if device else None
     except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+_traffic = {}
+
+
+def traffic(name=None, now=None, read=None):
+    """Current speed (KB/s down/up) and the total since the interface came up (MB),
+    from /sys/class/net/<if>/statistics; the speed is between two panel refreshes."""
+    name = name or internet_device()
+    if not name:
+        return None
+    now = time.monotonic() if now is None else now
+
+    def counter(kind):
+        if read is not None:
+            return read(name, kind)
+        with open('/sys/class/net/{}/statistics/{}_bytes'.format(name, kind)) as handle:
+            return int(handle.read())
+    try:
+        rx, tx = counter('rx'), counter('tx')
+    except (IOError, OSError, ValueError):
+        return None
+    before = _traffic.get(name)
+    _traffic[name] = (now, rx, tx)
+    result = {'device': name, 'total_mb': round((rx + tx) / 1e6, 1)}
+    if before and now - before[0] > 0.5:
+        seconds = now - before[0]
+        result['down_kbs'] = round(max(0, rx - before[1]) / 1024.0 / seconds, 1)
+        result['up_kbs'] = round(max(0, tx - before[2]) / 1024.0 / seconds, 1)
+    return result
+
+
+def speed_test(timeout=20):
+    """Download 5 MB and upload 2 MB to Cloudflare's speed test, ping OpenAI (~7 MB of traffic)."""
+    import urllib.request
+    result = {'ok': True}
+    try:
+        started = time.monotonic()
+        urllib.request.urlopen('https://api.openai.com/v1/models', timeout=5).close()
+    except urllib.error.HTTPError:
+        pass                                          # 401 without a key: the server answered
+    except Exception as exc:
+        return {'ok': False, 'error': 'OpenAI не отвечает: {}'.format(exc)[:120]}
+    result['openai_ms'] = int((time.monotonic() - started) * 1000)
+    try:
+        started = time.monotonic()
+        with urllib.request.urlopen('https://speed.cloudflare.com/__down?bytes=5000000', timeout=timeout) as r:
+            size = len(r.read())
+        result['down_mbit'] = round(size * 8 / 1e6 / (time.monotonic() - started), 1)
+        data = b'0' * 2000000
+        started = time.monotonic()
+        request = urllib.request.Request('https://speed.cloudflare.com/__up', data=data, method='POST')
+        urllib.request.urlopen(request, timeout=timeout).close()
+        result['up_mbit'] = round(len(data) * 8 / 1e6 / (time.monotonic() - started), 1)
+    except Exception as exc:
+        result.update(ok=False, error='тест скорости не прошёл: {}'.format(exc)[:120])
+    return result
+
+
+def internet():
+    name = internet_device()
+    if not name:
         return 'нет'
     if name == 'wlan0':
         try:
@@ -215,7 +278,7 @@ def speaker_volume():
 
 def status():
     state = {'running': running(), 'internet': internet(), 'log': log_tail(),
-             'volume': speaker_volume(), 'usage': aisana_usage.summary()}
+             'volume': speaker_volume(), 'usage': aisana_usage.summary(), 'traffic': traffic()}
     if state['running']:
         state['aisana'] = aisana_control.send({'action': 'status'}) or {'ok': False, 'error': 'starting'}
     return state
@@ -308,6 +371,7 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
   <div id="lvl"><div></div></div>
   <div class="grid"><button class="off-btn" style="grid-column:span 2" onclick="micStop('Микрофон iPhone выключен, слушает USB-микрофон')">Выключить микрофон iPhone</button></div>
   <div class="grid"><button id="quiet" style="grid-column:span 2" onclick="toggleQuiet()">🤫 Тихий режим: выкл</button></div>
+  <div class="grid"><button style="grid-column:span 2" onclick="speedTest()">📶 Тест скорости интернета</button></div>
  </div>
  <div class="card">
   <div class="row"><span>🔊 Громкость колонки</span><b id="vv">—</b></div>
@@ -386,6 +450,9 @@ function up(e){e.preventDefault();if(!pressed)return;pressed=false;$('ptt').clas
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&mic)micStop('Экран был выключен: микрофон iPhone остановлен, включи снова')});
 function act(a){post('/api/action',{action:a})}
 let hTouch=0,vTouch=0,quietOn=false;
+async function speedTest(){msg('Тест скорости… (~7 МБ трафика, до 30 с)');
+ try{const j=await (await fetch('/api/speedtest',{method:'POST'})).json();
+  msg(j.ok?'Скорость: ↓ '+j.down_mbit+' Мбит/с · ↑ '+j.up_mbit+' Мбит/с · до OpenAI '+j.openai_ms+' мс':'Ошибка: '+j.error)}catch(e){msg('Нет связи с роботом')}}
 function toggleQuiet(){const on=!quietOn;post('/api/action',{action:'quiet',text:on?'on':'off'});quietOn=on;showQuiet();
  msg(on?'Тихий режим: USB-микрофон ничего не отправляет, слышно только кнопку iPhone':'USB-микрофон снова слушает')}
 function showQuiet(){$('quiet').textContent='🤫 Тихий режим: '+(quietOn?'ВКЛ (слышит только кнопку iPhone)':'выкл');$('quiet').className=quietOn?'sel':''}
@@ -406,6 +473,7 @@ async function refresh(){try{const s=await (await fetch('/api/status')).json();
  const a=s.aisana;
  if(a&&a.ok){quietOn=!!a.quiet;showQuiet()}
  h+=R('Расход сегодня',money(s.usage));
+ const t=s.traffic;if(t)h+=R('Интернет сейчас',(t.down_kbs!=null?'↓ '+t.down_kbs+' КБ/с · ↑ '+t.up_kbs+' КБ/с · ':'')+'всего '+t.total_mb+' МБ');
  if(a&&a.ok){h+=R('OpenAI',a.connected?'на связи':'подключается')+R('Руки',a.arms)+R('Ноги',a.legs)+R('Камера',a.camera)+R('Лиц в памяти',a.faces)+R('Язык',a.language)+R('Юмор',a.humor+'%')+R('Микрофон',a.quiet&&a.mic==='USB'?'тихий режим (только iPhone)':(a.mic||'USB')+(a.mic==='USB'||!a.mic?' · '+usbLevel(a):''))+R('Сейчас',a.following?'идёт за человеком':a.moving?'двигается':(a.speaking?'говорит':'слушает'))}
  else if(s.running){h+=R('Статус',(a&&a.error)||'запускается…')}
  document.getElementById('state').innerHTML=h;
@@ -495,6 +563,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, start())
         if self.path == '/api/stop':
             return self.reply(200, stop())
+        if self.path == '/api/speedtest':
+            if self.via_public_link():          # ~7 MB of the SIM's traffic: only for the team
+                return self.reply(403, {'ok': False, 'error': 'only on the robot network or Tailscale'})
+            return self.reply(200, speed_test())
         if self.path == '/api/legs':
             return self.reply(200, legs_ready())
         if self.path == '/api/volume':
