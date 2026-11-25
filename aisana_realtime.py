@@ -708,6 +708,7 @@ class RealtimeAisana(object):
         self.audio_generation = 0
         self.mute_until = 0.0
         self.follower = None                # "иди за мной" run (aisana_follow.Follower)
+        self.dance_id = 0
         self.person_detector = None
         self.heard_at = 0.0                 # end of the user's last turn (latency log)
         self.in_speech = False              # server VAD: someone is talking (turn not committed yet)
@@ -1942,6 +1943,8 @@ class RealtimeAisana(object):
         found = WAVE_FOR.search(transcript or '')
         seconds = min(DANCE_MAX_SECONDS, float(found.group(1)) if found else DANCE_SECONDS)
         spin = min(aisana_legs.MAX_SECONDS, seconds)   # every drive stays time-limited (<= 10 s)
+        self.dance_id += 1
+        dance = self.dance_id
 
         def worker():
             done = []
@@ -1969,13 +1972,19 @@ class RealtimeAisana(object):
             print('Dance (from your words) -> ' + ('; '.join(done) or 'nothing connected'))
             moving = re.search(r'Driving \S+(?: \S+)? for ([\d.]+) s', spun or '')
             if moving:
-                self.motion_until = time.monotonic() + float(moving.group(1)) + 1.0
+                self.motion_until = time.monotonic() + seconds + 1.0
+                if seconds > float(moving.group(1)) + 0.5:
+                    # Owner, Nov 25: dance the whole 20 s, not only the first 10. More drives
+                    # of <= 10 s each (every drive stays time-limited), changing direction;
+                    # "стоп" or an obstacle (stop_motion) ends the chain.
+                    threading.Thread(target=self.dance_more, daemon=True,
+                                     args=(dance, seconds - float(moving.group(1)), float(moving.group(1)))).start()
                 # The owner's dance music for the whole dance, else her shouts while she spins.
-                if self.shouts.music:
+                if getattr(self.shouts, 'music', None):
                     self.shouts.play_for(seconds, pcm=self.shouts.music)
                 else:
-                    self.shouts.play_for(float(moving.group(1)))
-            elif done and self.shouts.music:
+                    self.shouts.play_for(seconds)
+            elif done and getattr(self.shouts, 'music', None):
                 self.shouts.play_for(seconds, pcm=self.shouts.music)   # arms only, with music
             elif done:
                 # Nov 23: the wheels were not calibrated and she only said "I'm dancing!".
@@ -1988,6 +1997,26 @@ class RealtimeAisana(object):
                 self.speak_report('Robot report: neither arms nor wheels are connected, no dance.',
                                   self.reply_language() + 'In ONE short sentence say that you cannot dance now.')
         threading.Thread(target=worker, daemon=True).start()
+
+    def dance_more(self, dance, remaining, wait, sleep=None):
+        """The rest of a long dance: spins of <= MAX_SECONDS, left/right in turn."""
+        sleep = sleep or self.stop.wait
+        direction = 'spin_left'
+        while remaining > 0.5:
+            if sleep(wait + 0.2) or dance != self.dance_id or self.legs is None:
+                return
+            part = min(aisana_legs.MAX_SECONDS, remaining)
+            try:
+                result = self.legs.execute(aisana_legs.make_intent(direction, seconds=part),
+                                           self.report_legs_problem)
+            except Exception as exc:
+                print('Dance: legs failed:', exc)
+                return
+            if not result.startswith('Driving'):
+                return                                  # obstacle, not enabled...: the dance ends here
+            remaining -= part
+            wait = part
+            direction = 'spin_right' if direction == 'spin_left' else 'spin_left'
 
     def end_wave_after(self, seconds=None, finish=None):
         """Stop waving and lower the right arm after a while, unless another arm
@@ -2142,6 +2171,7 @@ class RealtimeAisana(object):
 
     def stop_motion(self):
         self.motion_until = 0.0
+        self.dance_id += 1                  # ends a long dance between its spins
         self.shouts.stop()
         if self.follower is not None:
             self.follower.cancel()

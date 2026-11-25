@@ -1313,6 +1313,20 @@ class LegsToolTests(unittest.TestCase):
         session.panel_action('quiet', 'off')
         self.assertFalse(rt.load_quiet())
 
+    def test_long_dance_spins_the_whole_time_in_parts(self):
+        # Owner, Nov 25: dance 20 s; each drive stays <= 10 s, so the rest comes as more drives.
+        session, sent = make_session()
+        session.legs = FakeLegs()
+        session.dance_id = 1
+        session.dance_more(1, 10.0, 10.0, sleep=lambda s: False)
+        self.assertEqual([(i['action'], i['seconds']) for i in session.legs.intents], [('spin_left', 10.0)])
+        session2, sent2 = make_session()
+        session2.legs = FakeLegs()
+        session2.dance_id = 1
+        session2.stop_motion()                              # "стоп" between the spins
+        session2.dance_more(1, 10.0, 10.0, sleep=lambda s: False)
+        self.assertEqual(session2.legs.intents, [])
+
     def test_polite_dance_question_dances(self):
         # Jetson log, Nov 25: "Aisana, can you dance?" -> "I can't dance"; the panel button worked.
         for text in ('Aisana, can you dance?', 'Айсана, можешь потанцевать?', 'Айсана, станцуешь?',
