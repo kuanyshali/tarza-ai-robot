@@ -1393,9 +1393,10 @@ class ToolTests(unittest.TestCase):
 class DanceMusicTests(unittest.TestCase):
     """Nov 25: the owner's own song plays while she dances (10 s)."""
 
-    def test_dance_lasts_ten_seconds_by_default(self):
+    def test_dance_lasts_twenty_seconds_by_default(self):
         if 'AISANA_DANCE_SECONDS' not in os.environ:
-            self.assertEqual(rt.DANCE_SECONDS, 10.0)
+            self.assertEqual(rt.DANCE_SECONDS, 20.0)
+        self.assertLessEqual(rt.aisana_legs.MAX_SECONDS, 10.0)     # the wheels still stop after 10 s
 
     def test_finds_the_music_file(self):
         folder = tempfile.mkdtemp()

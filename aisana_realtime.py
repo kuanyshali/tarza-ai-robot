@@ -296,7 +296,8 @@ FOLLOW_PHRASES = {
     'no_camera': {'Russian': 'Не могу: камера не работает.', 'English': "I can't: my camera is not working."},
     'no_model': {'Russian': 'Не могу: нет модели для поиска людей.', 'English': "I can't: my person detector did not load."},
 }
-DANCE_SECONDS = float(os.environ.get('AISANA_DANCE_SECONDS', '10'))
+DANCE_SECONDS = float(os.environ.get('AISANA_DANCE_SECONDS', '20'))
+DANCE_MAX_SECONDS = 30.0             # music and arms; the wheels stop after aisana_legs.MAX_SECONDS
 # The owner's own music for the dance (not in the repo): the first DANCE_SECONDS of the
 # first file found is played instead of the shouts. Any format ffmpeg reads.
 DANCE_MUSIC_DIR = os.environ.get('AISANA_DANCE_MUSIC_DIR', os.path.expanduser('~/robot_music'))
@@ -1831,8 +1832,9 @@ class RealtimeAisana(object):
         threading.Thread(target=worker, daemon=True).start()
 
     def run_dance_locally(self, item_id, transcript):
-        """Arms up and waving while she spins with shouts; afterwards arms down.
-        Time from the words ("танцуй 8 секунд", at most 10) or AISANA_DANCE_SECONDS."""
+        """Arms up and waving while she spins with shouts (or the owner's dance music);
+        afterwards arms down. Time from the words ("танцуй 8 секунд", at most 30) or
+        AISANA_DANCE_SECONDS; the wheels spin only the first aisana_legs.MAX_SECONDS (10 s)."""
         with self.arm_lock:
             self.local_items.add(item_id)
             self.responded_items.add(item_id)
@@ -1841,7 +1843,8 @@ class RealtimeAisana(object):
         self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
         self.cancel_reply()
         found = WAVE_FOR.search(transcript or '')
-        seconds = min(aisana_legs.MAX_SECONDS, float(found.group(1)) if found else DANCE_SECONDS)
+        seconds = min(DANCE_MAX_SECONDS, float(found.group(1)) if found else DANCE_SECONDS)
+        spin = min(aisana_legs.MAX_SECONDS, seconds)   # every drive stays time-limited (<= 10 s)
 
         def worker():
             done = []
@@ -1861,7 +1864,7 @@ class RealtimeAisana(object):
             spun = None
             if self.legs is not None:
                 try:
-                    spun = self.legs.execute(aisana_legs.make_intent('spin_right', seconds=seconds),
+                    spun = self.legs.execute(aisana_legs.make_intent('spin_right', seconds=spin),
                                              self.report_legs_problem)
                     done.append('legs: ' + spun)
                 except Exception as exc:
@@ -1870,8 +1873,11 @@ class RealtimeAisana(object):
             moving = re.search(r'Driving \S+(?: \S+)? for ([\d.]+) s', spun or '')
             if moving:
                 self.motion_until = time.monotonic() + float(moving.group(1)) + 1.0
-                # The owner's dance music if there is one, else her shouts.
-                self.shouts.play_for(float(moving.group(1)), pcm=self.shouts.music)
+                # The owner's dance music for the whole dance, else her shouts while she spins.
+                if self.shouts.music:
+                    self.shouts.play_for(seconds, pcm=self.shouts.music)
+                else:
+                    self.shouts.play_for(float(moving.group(1)))
             elif done and self.shouts.music:
                 self.shouts.play_for(seconds, pcm=self.shouts.music)   # arms only, with music
             elif done:
