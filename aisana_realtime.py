@@ -36,6 +36,7 @@ from aisana_legs import parse_legs_command, LEGS_ACTIONS, legs_reply
 from aisana_arm import arm_reply
 import aisana_faces
 import aisana_follow
+import aisana_usage
 import aisana_memory
 import aisana_control
 import wake_listener
@@ -51,6 +52,38 @@ SILENCE_MS = int(os.environ.get('AISANA_REALTIME_SILENCE_MS', '700'))
 # a whole minute of chatter). Cut it at a quiet moment after MAX_TURN s, at the latest
 # after MAX_TURN + 4 s, so "Айсана, ..." at the end is a short turn of its own.
 MAX_TURN = max(5.0, float(os.environ.get('AISANA_MAX_TURN', '12')))
+# Keep the conversation as TEXT: once a turn is answered its audio items are swapped
+# for their transcripts. Every reply re-reads the whole conversation and audio input
+# costs ~17x text ($10 vs $0.60 per 1M on gpt-realtime-2.1-mini, Nov 2026).
+TEXT_HISTORY = os.environ.get('AISANA_TEXT_HISTORY', '1') == '1'
+QUIET_FILE = os.environ.get('AISANA_QUIET_FILE', os.path.expanduser('~/.local/share/aisana/quiet.txt'))
+_USAGE = []
+
+
+def usage_meter():
+    """One meter per process (sessions come and go on reconnects)."""
+    if not _USAGE:
+        _USAGE.append(aisana_usage.UsageMeter())
+    return _USAGE[0]
+
+
+def load_quiet():
+    try:
+        with open(QUIET_FILE) as handle:
+            return handle.read().strip() == 'on'
+    except (IOError, OSError):
+        return False
+
+
+def save_quiet(on):
+    try:
+        folder = os.path.dirname(QUIET_FILE)
+        if folder and not os.path.isdir(folder):
+            os.makedirs(folder)
+        with open(QUIET_FILE, 'w') as handle:
+            handle.write('on\n' if on else 'off\n')
+    except (IOError, OSError) as exc:
+        print('Quiet mode not saved:', exc)
 ECHO_GUARD = os.environ.get('AISANA_ECHO_GUARD', '1') == '1'
 ECHO_TAIL_SECONDS = float(os.environ.get('AISANA_ECHO_TAIL_SECONDS', '1.0'))
 # The Xiaomi USB speaker drops the first ~0.2 s after the stream opens: lead with silence.
@@ -622,6 +655,17 @@ class RealtimeAisana(object):
         self.person_detector = None
         self.heard_at = 0.0                 # end of the user's last turn (latency log)
         self.in_speech = False              # server VAD: someone is talking (turn not committed yet)
+        self.quiet = load_quiet()           # panel "тихий режим": USB mic sends nothing
+        self.usage = usage_meter()
+        self.turn_audio_start = 0.0
+        self.item_seconds = {}              # audio length per committed turn (transcription cost)
+        self.deleted_items = set()
+        self.assistant_items = {}           # response id -> [(item id, transcript)]
+        self.textify_queue = []             # (old item id, role, text) waiting for a quiet moment
+        self.textify_pending = {}           # new item id -> (old item id, role)
+        self.textify_roles = {'user', 'assistant'}
+        self.textify_n = 0
+        self.textify_done = set()
         self.turn_started = 0.0
         self.turn_levels = collections.deque(maxlen=66)   # ~2 s of 30 ms loudness, for quiet moments
         self.split_pending = False
@@ -987,7 +1031,43 @@ class RealtimeAisana(object):
     def ignore_item(self, item_id):
         """Drop unaddressed speech so it does not pollute the conversation."""
         if item_id:
+            self.deleted_items.add(item_id)
             self.send({'type': 'conversation.item.delete', 'item_id': item_id})
+
+    def textify_later(self, old_id, role, text):
+        if TEXT_HISTORY and old_id and text and role in self.textify_roles and old_id not in self.deleted_items:
+            self.textify_queue.append((old_id, role, text))
+
+    def textify_now(self):
+        """Swap queued audio items for text items (insert after, delete once added).
+        Only between replies: an item must not vanish while a reply reads it."""
+        if self.responding or self.hold_item is not None:
+            return
+        queue, self.textify_queue = self.textify_queue, []
+        for old_id, role, text in queue:
+            if old_id in self.deleted_items or role not in self.textify_roles:
+                continue
+            self.textify_n += 1
+            new_id = 'txt{}{}'.format(role[0], self.textify_n)
+            self.textify_pending[new_id] = (old_id, role)
+            content = [{'type': 'input_text' if role == 'user' else 'output_text', 'text': text}]
+            self.send({'type': 'conversation.item.create', 'event_id': 'textify_' + new_id,
+                       'previous_item_id': old_id,
+                       'item': {'id': new_id, 'type': 'message', 'role': role, 'content': content}})
+
+    def textify_added(self, item_id):
+        pending = self.textify_pending.pop(item_id, None)
+        if pending:
+            self.deleted_items.add(pending[0])
+            self.send({'type': 'conversation.item.delete', 'item_id': pending[0]})
+
+    def textify_failed(self, event_id, error):
+        new_id = (event_id or '')[len('textify_'):]
+        pending = self.textify_pending.pop(new_id, None)
+        if pending and re.search(r'content|type|role|invalid', str(error.get('message', '')), re.I) \
+                and not re.search(r'not found|does not exist', str(error.get('message', '')), re.I):
+            self.textify_roles.discard(pending[1])     # this API refuses it: keep audio for that role
+            print('Text history: {} turns stay audio ({}).'.format(pending[1], str(error.get('message', ''))[:80]))
 
     def send(self, payload):
         if payload.get('type') == 'response.create':
@@ -1123,6 +1203,9 @@ class RealtimeAisana(object):
                 if phone_was_on:
                     phone_was_on = False
                     print('Microphone: USB again (iPhone stopped); say "Aisana, ..." to begin.')
+                if self.quiet:
+                    preroll.clear()                     # тихий режим: only the iPhone button
+                    continue
                 if self.echo_guarded():
                     continue
                 if not self.streaming():
@@ -1330,6 +1413,8 @@ class RealtimeAisana(object):
             timeout=(10, 45))
         response.raise_for_status()
         data = response.json()
+        used = data.get('usage') or {}
+        self.usage.add_vision(used.get('prompt_tokens', 0), used.get('completion_tokens', 0))
         choice = data['choices'][0]
         if not quiet:
             print('Camera: photo {} KB in {:.1f}s, answered in {:.1f}s ({} tokens)'.format(
@@ -1911,6 +1996,7 @@ class RealtimeAisana(object):
             'mic': ('iPhone (button)' if self.phone_mode == 'ptt' else 'iPhone') if self.phone_active() else 'USB',
             'ptt': self.phone_active() and self.phone_pressed,
             'usb_level': self.usb_level,
+            'quiet': self.quiet,
             'muted': bool(self.echo_guarded()),
             'moving': self.motion_active(),
             'following': self.follower is not None and self.follower.active(),
@@ -1940,6 +2026,12 @@ class RealtimeAisana(object):
         if action == 'follow':
             self.run_follow_locally('panel-{}'.format(time.monotonic()))
             return {'ok': True}
+        if action == 'quiet':
+            self.quiet = text.strip().lower() in ('on', '1', 'true', 'да')
+            save_quiet(self.quiet)
+            print('Quiet mode {}: {}.'.format('ON' if self.quiet else 'off',
+                  'only the iPhone button is heard' if self.quiet else 'the USB microphone listens again'))
+            return {'ok': True, 'quiet': self.quiet}
         if action == 'people':
             # Dry check for "follow me": who does the person detector see now? Nothing moves.
             if self.camera_stream is None:
@@ -2327,6 +2419,7 @@ class RealtimeAisana(object):
             self.speech_started_at = time.monotonic()
             self.in_speech = True
             self.turn_started = self.speech_started_at
+            self.turn_audio_start = self.speech_started_at
             if self.spotter is not None and time.monotonic() < self.stream_until:
                 self.stream_until = time.monotonic() + 20     # a long question keeps streaming
             self.start_prefetch()
@@ -2391,6 +2484,9 @@ class RealtimeAisana(object):
         elif typ == 'input_audio_buffer.committed':
             self.last_item = e.get('item_id')
             self.heard_at = time.monotonic()
+            if self.turn_audio_start:
+                self.item_seconds[e.get('item_id')] = self.heard_at - self.turn_audio_start + 0.3
+                self.turn_audio_start = self.heard_at if self.in_speech else 0.0
             if self.split_pending:
                 self.split_pending = False
                 self.split_items.add(e.get('item_id'))
@@ -2404,23 +2500,43 @@ class RealtimeAisana(object):
                 self.hold_deadline = time.monotonic() + 1.6
                 self.respond(e.get('item_id'), extend=False)
         elif typ == 'conversation.item.input_audio_transcription.completed':
+            usage = e.get('usage') or {}
+            seconds = usage.get('seconds') if usage.get('type') == 'duration' else None
+            self.usage.add_transcription(seconds if seconds is not None
+                                         else self.item_seconds.pop(e.get('item_id'), 0.0))
             self.handle_transcript(e.get('item_id'), (e.get('transcript') or '').strip())
         elif typ == 'conversation.item.input_audio_transcription.failed':
             print('Realtime transcription failed:', e.get('error', {}))
             self.stt_fallback(str(e.get('error', {})))
         elif typ == 'response.function_call_arguments.done':
             self.start_tool(e.get('call_id'), e.get('name'), e.get('arguments'))
+        elif typ in ('conversation.item.added', 'conversation.item.created', 'conversation.item.done') \
+                and ((e.get('item') or {}).get('id') or '') in self.textify_pending:
+            self.textify_added((e.get('item') or {}).get('id'))
         elif typ == 'response.output_item.done':
             item = e.get('item') or {}
+            if item.get('type') == 'message' and item.get('role') == 'assistant':
+                said = ' '.join(c.get('transcript') or c.get('text') or '' for c in item.get('content') or [])
+                if said.strip() and any(c.get('type') in ('output_audio', 'audio') for c in item.get('content') or []):
+                    self.assistant_items.setdefault(e.get('response_id'), []).append((item.get('id'), said.strip()))
             if item.get('type') == 'function_call':
                 self.start_tool(item.get('call_id'), item.get('name'), item.get('arguments'))
         elif typ == 'response.done' and (e.get('response') or {}).get('id') in self.oob_ids:
+            self.usage.add_response((e.get('response') or {}).get('usage'))
             self.oob_ids.discard((e.get('response') or {}).get('id'))
             if len(self.shout_buffer) >= RATE:                 # at least 0.5 s of shouting
                 self.shouts.pcm = bytes(self.shout_buffer)
                 print('Shouts ready: {:.1f} s'.format(len(self.shout_buffer) / (RATE * 2.0)))
         elif typ == 'response.done':
             self.responding = False
+            response = e.get('response') or {}
+            self.usage.add_response(response.get('usage'))
+            for item_id, said in self.assistant_items.pop(response.get('id'), []):
+                self.textify_later(item_id, 'assistant', said)
+            heard = self.transcripts.get(self.response_item) if self.response_item else None
+            if heard and self.response_item not in self.textify_done:
+                self.textify_done.add(self.response_item)
+                self.textify_later(self.response_item, 'user', heard)
             if self.retry_create is not None:
                 # A reply refused with "conversation_already_has_active_response" goes
                 # out now that the other one finished (Nov 25: she just stayed silent).
@@ -2436,10 +2552,15 @@ class RealtimeAisana(object):
                 self.held_audio.append(('done', b''))
             else:
                 self.queue_audio('done')
+            if self.textify_queue:
+                threading.Timer(0.4, self.textify_now).start()
         elif typ == 'error':
             error = e.get('error', {}) or {}
             if error.get('code') == 'response_cancel_not_active':
                 return                          # harmless: the reply had already ended
+            if str(error.get('event_id') or '').startswith('textify_'):
+                self.textify_failed(error.get('event_id'), error)
+                return
             if error.get('code') == 'input_audio_buffer_commit_empty':
                 self.split_pending = False      # harmless: the server ended the turn at the same moment
                 return
@@ -2606,6 +2727,8 @@ def main():
     finally:
         if camera is not None:
             camera.stop()               # waits for the camera release (Argus must close cleanly)
+        if _USAGE:
+            _USAGE[0].save()            # today's spending for the panel
         if legs is not None:
             if hasattr(legs, "close"):
                 legs.close()            # no more keep-alive: the Pi switches the motors off

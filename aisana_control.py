@@ -9,6 +9,7 @@ One JSON object per line in, one JSON object per line out:
     {"action": "say", "text": "..."}   she says exactly this
     {"action": "ask", "text": "..."}   as if someone asked her this
     {"action": "humor", "text": "60"}  humor level 0-100, silently
+    {"action": "quiet", "text": "on"}  quiet mode: the USB mic sends nothing (iPhone button only)
     {"action": "mic", "mode": "live"|"ptt", "pressed": bool, "pcm": base64}
                                        iPhone microphone: 24 kHz mono S16_LE
     {"action": "frame"}                newest camera picture (read-only): {"ok", "jpeg": base64}
@@ -24,7 +25,7 @@ import socketserver
 import threading
 
 CONTROL_PORT = 8091
-ACTIONS = ('status', 'stop', 'wave', 'dance', 'follow', 'people', 'say', 'ask', 'humor', 'mic', 'frame')
+ACTIONS = ('status', 'stop', 'wave', 'dance', 'follow', 'people', 'say', 'ask', 'humor', 'quiet', 'mic', 'frame')
 MAX_TEXT = 300
 MAX_LINE = 1 << 17                  # a mic packet (2 s of audio in base64) fits
 

@@ -9,6 +9,9 @@ import tempfile
 import aisana_realtime as rt
 
 rt.HUMOR_FILE = os.path.join(tempfile.mkdtemp(), 'humor.txt')   # never touch the real one
+rt.QUIET_FILE = os.path.join(tempfile.mkdtemp(), 'quiet.txt')
+import aisana_usage
+aisana_usage.USAGE_DIR = tempfile.mkdtemp()
 
 # Most tests were written for 'answer in the user's language'; English-only has its own tests.
 rt.FIXED_LANGUAGE = None
@@ -1262,6 +1265,44 @@ class LegsToolTests(unittest.TestCase):
         say(session, 's1', 'ну короче мы вчера там были и вообще. Айсана, какая')
         self.assertTrue(session.dialog_active())             # the next piece needs no name
         self.assertIn('conversation.item.delete', types(sent))
+
+    def test_answered_turns_are_kept_as_text_not_audio(self):
+        # Nov 25: $3.53 in 2-3 h; every reply re-reads the conversation and audio
+        # input costs ~17x text. After a reply its audio items become text.
+        session, sent = make_session()
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'u1'})
+        session.transcripts['u1'] = 'Айсана, как дела?'
+        session.response_item = 'u1'
+        session.handle({'type': 'response.output_item.done', 'response_id': 'r1', 'item': {
+            'id': 'a1', 'type': 'message', 'role': 'assistant',
+            'content': [{'type': 'output_audio', 'transcript': 'Отлично!'}]}})
+        session.handle({'type': 'response.done', 'response': {'id': 'r1', 'usage': {}}})
+        session.textify_now()
+        created = [m for m in sent if m['type'] == 'conversation.item.create' and m.get('event_id', '').startswith('textify_')]
+        self.assertEqual(sorted((m['previous_item_id'], m['item']['role'], m['item']['content'][0]['text'])
+                                for m in created),
+                         [('a1', 'assistant', 'Отлично!'), ('u1', 'user', 'Айсана, как дела?')])
+        self.assertNotIn('conversation.item.delete', types(sent))          # not before the text is in
+        for m in created:
+            session.handle({'type': 'conversation.item.added', 'item': {'id': m['item']['id']}})
+        deleted = [m['item_id'] for m in sent if m['type'] == 'conversation.item.delete']
+        self.assertEqual(sorted(deleted), ['a1', 'u1'])
+
+    def test_text_history_backs_off_when_refused(self):
+        session, sent = make_session()
+        session.textify_pending['txta1'] = ('a1', 'assistant')
+        session.handle({'type': 'error', 'error': {'event_id': 'textify_txta1',
+                        'message': "Invalid value: 'output_text'. Supported content types: output_audio"}})
+        self.assertNotIn('assistant', session.textify_roles)
+        self.assertNotIn('conversation.item.delete', types(sent))           # the audio stays
+
+    def test_quiet_mode_from_the_panel(self):
+        session, sent = make_session()
+        self.assertEqual(session.panel_action('quiet', 'on'), {'ok': True, 'quiet': True})
+        self.assertTrue(rt.load_quiet())                                    # kept after a restart
+        self.assertTrue(session.panel_status()['quiet'])
+        session.panel_action('quiet', 'off')
+        self.assertFalse(rt.load_quiet())
 
     def test_model_cannot_drive_when_not_asked(self):
         session, _ = make_session()

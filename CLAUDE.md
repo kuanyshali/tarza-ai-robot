@@ -36,6 +36,7 @@ Aisana (Айсана): university voice robot on an NVIDIA Jetson Nano. The owne
   so tests extract its functions via `ast` (see `tests/test_robot.py::isolated`).
 - `aisana_follow.py` — "иди за мной": MobileNet-SSD person detector (cv2.dnn) + follow loop; drives only
   through `LegsController.set_command` (lease: the keep-alive stops a drive nobody renews).
+- `aisana_usage.py` — daily OpenAI spending (tokens, transcription minutes, camera) -> panel; prices Nov 2026.
 - `aisana_arm.py`, `sadam_features.py`, `aisana_memory.py`, `wake_listener.py` are importable
   without hardware and tested directly.
 

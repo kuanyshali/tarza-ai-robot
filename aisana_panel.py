@@ -19,6 +19,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import aisana_control
+import aisana_usage
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get('AISANA_PANEL_PORT', '8080'))
@@ -156,7 +157,7 @@ def speaker_volume():
 
 def status():
     state = {'running': running(), 'internet': internet(), 'log': log_tail(),
-             'volume': speaker_volume()}
+             'volume': speaker_volume(), 'usage': aisana_usage.summary()}
     if state['running']:
         state['aisana'] = aisana_control.send({'action': 'status'}) or {'ok': False, 'error': 'starting'}
     return state
@@ -247,6 +248,7 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
   <button id="ptt">Зажми и говори</button>
   <div id="lvl"><div></div></div>
   <div class="grid"><button class="off-btn" style="grid-column:span 2" onclick="micStop('Микрофон iPhone выключен, слушает USB-микрофон')">Выключить микрофон iPhone</button></div>
+  <div class="grid"><button id="quiet" style="grid-column:span 2" onclick="toggleQuiet()">🤫 Тихий режим: выкл</button></div>
  </div>
  <div class="card">
   <div class="row"><span>🔊 Громкость колонки</span><b id="vv">—</b></div>
@@ -324,7 +326,11 @@ function up(e){e.preventDefault();if(!pressed)return;pressed=false;$('ptt').clas
 ['touchend','touchcancel','mouseup','mouseleave'].forEach(n=>$('ptt').addEventListener(n,up));
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&mic)micStop('Экран был выключен: микрофон iPhone остановлен, включи снова')});
 function act(a){post('/api/action',{action:a})}
-let hTouch=0,vTouch=0;
+let hTouch=0,vTouch=0,quietOn=false;
+function toggleQuiet(){const on=!quietOn;post('/api/action',{action:'quiet',text:on?'on':'off'});quietOn=on;showQuiet();
+ msg(on?'Тихий режим: USB-микрофон ничего не отправляет, слышно только кнопку iPhone':'USB-микрофон снова слушает')}
+function showQuiet(){$('quiet').textContent='🤫 Тихий режим: '+(quietOn?'ВКЛ (слышит только кнопку iPhone)':'выкл');$('quiet').className=quietOn?'sel':''}
+function money(u){if(!u)return '—';return '≈ $'+u.usd.toFixed(2)+' (ответы $'+u.replies_usd.toFixed(2)+' · слух $'+u.hearing_usd.toFixed(2)+', '+u.hearing_minutes+' мин · камера $'+u.camera_usd.toFixed(2)+')'}
 function usbLevel(a){if(a.muted)return 'не слушает, пока говорит';const v=a.usb_level||0;
  const bars=v<300?'▁':v<800?'▂▃':v<2000?'▂▃▅':'▂▃▅▇';return bars+' '+(v<300?'тишина':v<800?'тихо':v<2000?'слышит голос':'громко')}
 async function setV(v){vTouch=Date.now();$('vol').value=v;$('vv').textContent=v+'%';
@@ -339,7 +345,9 @@ async function refresh(){try{const s=await (await fetch('/api/status')).json();
  document.getElementById('net').textContent='интернет: '+s.internet;
  let h=R('Айсана',s.running?'работает':'выключена');
  const a=s.aisana;
- if(a&&a.ok){h+=R('OpenAI',a.connected?'на связи':'подключается')+R('Руки',a.arms)+R('Ноги',a.legs)+R('Камера',a.camera)+R('Лиц в памяти',a.faces)+R('Язык',a.language)+R('Юмор',a.humor+'%')+R('Микрофон',(a.mic||'USB')+(a.mic==='USB'||!a.mic?' · '+usbLevel(a):''))+R('Сейчас',a.following?'идёт за человеком':a.moving?'двигается':(a.speaking?'говорит':'слушает'))}
+ if(a&&a.ok){quietOn=!!a.quiet;showQuiet()}
+ h+=R('Расход сегодня',money(s.usage));
+ if(a&&a.ok){h+=R('OpenAI',a.connected?'на связи':'подключается')+R('Руки',a.arms)+R('Ноги',a.legs)+R('Камера',a.camera)+R('Лиц в памяти',a.faces)+R('Язык',a.language)+R('Юмор',a.humor+'%')+R('Микрофон',a.quiet&&a.mic==='USB'?'тихий режим (только iPhone)':(a.mic||'USB')+(a.mic==='USB'||!a.mic?' · '+usbLevel(a):''))+R('Сейчас',a.following?'идёт за человеком':a.moving?'двигается':(a.speaking?'говорит':'слушает'))}
  else if(s.running){h+=R('Статус',(a&&a.error)||'запускается…')}
  document.getElementById('state').innerHTML=h;
  if(Date.now()-vTouch>5000){if(s.volume==null){$('vv').textContent='нет колонки'}else{$('vol').value=s.volume;$('vv').textContent=s.volume+'%'}}
