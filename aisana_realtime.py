@@ -51,7 +51,11 @@ SILENCE_MS = int(os.environ.get('AISANA_REALTIME_SILENCE_MS', '700'))
 # Non-stop talk in the room is one endless "turn" for server VAD (Nov 25: she answered
 # a whole minute of chatter). Cut it at a quiet moment after MAX_TURN s, at the latest
 # after MAX_TURN + 4 s, so "Айсана, ..." at the end is a short turn of its own.
-MAX_TURN = max(5.0, float(os.environ.get('AISANA_MAX_TURN', '12')))
+# OFF by default (owner, Nov 25: "let her decide herself when to stop" - a 13 s cut split
+# "Aisana, who is the dean of..." in half). AISANA_MAX_TURN=12 turns it on.
+MAX_TURN = float(os.environ.get('AISANA_MAX_TURN', '0'))
+if MAX_TURN:
+    MAX_TURN = max(5.0, MAX_TURN)
 # Keep the conversation as TEXT: once a turn is answered its audio items are swapped
 # for their transcripts. Every reply re-reads the whole conversation and audio input
 # costs ~17x text ($10 vs $0.60 per 1M on gpt-realtime-2.1-mini, Nov 2026).
@@ -1277,7 +1281,7 @@ class RealtimeAisana(object):
     def maybe_split_turn(self, rms, now=None):
         """True when a long non-stop turn should be cut here (then commit)."""
         now = time.monotonic() if now is None else now
-        if not self.in_speech:
+        if not MAX_TURN or not self.in_speech:
             self.turn_levels.clear()
             return False
         self.turn_levels.append(rms)

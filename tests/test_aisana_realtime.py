@@ -1238,8 +1238,17 @@ class LegsToolTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertIn('response.create', types(sent))
 
+    def test_long_talk_is_not_cut_by_default(self):
+        # Owner, Nov 25: let the end of a phrase be decided by the model's own pause detection.
+        session, sent = make_session()
+        session.handle({'type': 'input_audio_buffer.speech_started'})
+        self.assertEqual(rt.MAX_TURN, 0)
+        self.assertFalse(session.maybe_split_turn(100, now=session.turn_started + 60))
+
     def test_long_nonstop_talk_is_cut_at_a_quiet_moment(self):
-        # Nov 25: a minute of chatter was one turn and she answered all of it.
+        # Opt-in (AISANA_MAX_TURN=12): a minute of chatter was one turn and she answered all of it.
+        original, rt.MAX_TURN = rt.MAX_TURN, 12.0
+        self.addCleanup(setattr, rt, 'MAX_TURN', original)
         session, sent = make_session()
         session.handle({'type': 'input_audio_buffer.speech_started'})
         start = session.turn_started
