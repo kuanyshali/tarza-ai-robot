@@ -81,6 +81,25 @@ def camera_frame(port=aisana_control.CONTROL_PORT):
         return None
 
 
+PHOTO_DIR = os.environ.get('AISANA_PHOTO_DIR', os.path.join(os.path.expanduser('~'), 'robot_photos'))
+
+
+def take_photo(grab=camera_frame, folder=PHOTO_DIR, now=None):
+    """The display's PHOTO button: save Aisana's newest camera picture as
+    photo-YYYYmmdd-HHMMSS.jpg in `folder`."""
+    picture = grab()
+    if not picture:
+        return {'ok': False, 'error': 'no picture (is Aisana running?)'}
+    os.makedirs(folder, exist_ok=True)
+    stem = time.strftime('photo-%Y%m%d-%H%M%S', time.localtime(now))
+    name, n = stem + '.jpg', 2
+    while os.path.exists(os.path.join(folder, name)):          # two taps in one second
+        name, n = '{}-{}.jpg'.format(stem, n), n + 1
+    with open(os.path.join(folder, name), 'wb') as handle:
+        handle.write(picture)
+    return {'ok': True, 'file': name, 'bytes': len(picture)}
+
+
 def running():
     return subprocess.call(['pgrep', '-f', PATTERN], stdout=subprocess.DEVNULL) == 0
 
@@ -457,6 +476,12 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length).decode('utf-8') or '{}')
         except ValueError:
             return self.reply(400, {'ok': False, 'error': 'bad json'})
+        if self.path == '/api/photo':
+            if self.via_public_link():
+                return self.reply(403, {'ok': False, 'error': 'camera only on the robot network or Tailscale'},
+                                  any_origin=True)
+            result = take_photo()
+            return self.reply(200 if result['ok'] else 503, result, any_origin=True)
         if self.path == '/api/start':
             return self.reply(200, start())
         if self.path == '/api/stop':

@@ -140,6 +140,24 @@ class PanelTests(unittest.TestCase):
             raise OSError('no route to host')
         self.assertFalse(aisana_panel.battery(fetch=down)['ok'])
 
+    def test_photo_button_saves_the_newest_picture(self):
+        import os
+        import tempfile
+        folder = os.path.join(tempfile.mkdtemp(), 'robot_photos')      # created on first photo
+        grab = lambda: b'\xff\xd8photo\xff\xd9'
+        first = aisana_panel.take_photo(grab=grab, folder=folder, now=0)
+        second = aisana_panel.take_photo(grab=grab, folder=folder, now=0)  # same second
+        self.assertTrue(first['ok'] and second['ok'])
+        self.assertNotEqual(first['file'], second['file'])
+        self.assertTrue(first['file'].startswith('photo-') and first['file'].endswith('.jpg'))
+        with open(os.path.join(folder, first['file']), 'rb') as handle:
+            self.assertEqual(handle.read(), b'\xff\xd8photo\xff\xd9')
+
+    def test_no_photo_without_a_picture(self):
+        import tempfile
+        result = aisana_panel.take_photo(grab=lambda: None, folder=tempfile.mkdtemp())
+        self.assertFalse(result['ok'])
+
     def test_page_has_the_buttons(self):
         for label in ('СТОП', 'Включить', 'Выключить', 'Помахать', 'Танцевать', 'Сказать это'):
             self.assertIn(label, aisana_panel.PAGE)
