@@ -299,6 +299,25 @@ class KeepAliveTests(unittest.TestCase):
         self.assertEqual([p for p, _ in pi.posts], ['/motor/heartbeat', '/motor/heartbeat'])
         self.assertLess(legs.KEEPALIVE_SECONDS, 0.35)    # faster than the Pi's stop timeout
 
+    def test_stops_a_drive_nobody_runs(self):
+        pi = StatePi('ENABLED', enabled=True)
+        pi.status = lambda: {'state': 'ENABLED', 'enabled': True, 'error': None,
+                             'connecting': False, 'command': 'forward', 'speed_kmh': 2.0}
+        c = self.controller(pi)
+        c.keepalive_step(now=0)                       # sees the motors on
+        c.keepalive_step(now=0.15)                    # heartbeat: a drive nobody owns
+        self.assertEqual(pi.posts[-1], ('/motor/command', {'command': 'stop'}))
+
+    def test_leaves_a_website_drive_alone_while_the_page_is_alive(self):
+        # Nov 25: the /control page buttons did nothing; Aisana stopped every drive at once.
+        pi = StatePi('ENABLED', enabled=True)
+        pi.status = lambda: {'state': 'ENABLED', 'enabled': True, 'error': None, 'connecting': False,
+                             'command': 'forward', 'speed_kmh': 2.0, 'others_alive': True}
+        c = self.controller(pi)
+        c.keepalive_step(now=0)
+        c.keepalive_step(now=0.15)
+        self.assertEqual([p for p, _ in pi.posts], ['/motor/heartbeat'])   # no stop
+
     def test_switches_motors_on_again_without_calibration(self):
         pi = StatePi('CONTROL LINK LOST', enabled=False)
         c = self.controller(pi)

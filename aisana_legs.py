@@ -195,9 +195,13 @@ class LegsController(object):
         if self.alive_on:
             code, data = self._post('/motor/heartbeat', timeout=0.3)
             if data.get('enabled'):
-                if data.get('command', 'stop') != 'stop' and time.monotonic() > self.motion_lease_until:
+                if (data.get('command', 'stop') != 'stop' and time.monotonic() > self.motion_lease_until
+                        and not data.get('others_alive')):
                     # The keep-alive must never keep a drive going that nobody runs any
                     # more (its loop died or hung): without it the Pi would stop after 0.35 s.
+                    # Nov 25: a drive from the Pi /control page is not ownerless while that
+                    # page still sends heartbeats (the Pi says others_alive); once the page
+                    # closes or hangs, its heartbeats stop and the drive is stopped here.
                     self._post('/motor/command', {'command': 'stop'}, timeout=0.5)
                     self._note('stopped a drive with no owner ({}).'.format(data.get('command')))
                 return KEEPALIVE_SECONDS
