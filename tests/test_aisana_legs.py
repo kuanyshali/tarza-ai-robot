@@ -377,5 +377,21 @@ class ApproachWordsTests(unittest.TestCase):
         self.assertTrue(legs.mentions_driving('Aisana, came closer.'))
 
 
+class DanceSpinTests(unittest.TestCase):
+    def test_dance_spin_is_marked_for_the_pi(self):
+        pi = StatePi('ENABLED', enabled=True)
+        c = legs.LegsController('http://pi:5000', http=pi, log=lambda t: None)
+        intent = legs.make_intent('spin_right', seconds=3)
+        intent['dance'] = True
+        c.execute(intent)
+        c.stop()
+        commands = [body for path, body in pi.posts if path == '/motor/command']
+        self.assertEqual(commands[0], {'command': 'spin_right', 'dance_seconds': 3.0})
+        plain = legs.LegsController('http://pi:5000', http=StatePi('ENABLED', enabled=True), log=lambda t: None)
+        plain.execute(legs.make_intent('spin_right', seconds=3))
+        plain.stop()
+        self.assertEqual([b for p, b in plain.http.posts if p == '/motor/command'][0], {'command': 'spin_right'})
+
+
 if __name__ == '__main__':
     unittest.main()

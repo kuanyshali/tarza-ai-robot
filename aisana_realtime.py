@@ -940,6 +940,11 @@ class RealtimeAisana(object):
         """Speak up only when the sensors show a real problem after a move."""
         self.report_problem('Arm sensor report after the last move: ', problems)
 
+    def dance_legs_problem(self, problem):
+        """Owner, Nov 25: while dancing she does not react to obstacles (no "Stop!
+        Obstacle", the music and arms go on). The Pi may still pause the wheels."""
+        print('Dance: wheels paused by the Pi ({}); dancing on.'.format(problem))
+
     def report_legs_problem(self, problem):
         self.stop_motion()
         distance = re.search(r'(\d+) cm', problem)
@@ -1964,8 +1969,9 @@ class RealtimeAisana(object):
             spun = None
             if self.legs is not None:
                 try:
-                    spun = self.legs.execute(aisana_legs.make_intent('spin_right', seconds=spin),
-                                             self.report_legs_problem)
+                    intent = aisana_legs.make_intent('spin_right', seconds=spin)
+                    intent['dance'] = True
+                    spun = self.legs.execute(intent, self.dance_legs_problem)
                     done.append('legs: ' + spun)
                 except Exception as exc:
                     print('Dance: legs failed:', exc)
@@ -2007,8 +2013,9 @@ class RealtimeAisana(object):
                 return
             part = min(aisana_legs.MAX_SECONDS, remaining)
             try:
-                result = self.legs.execute(aisana_legs.make_intent(direction, seconds=part),
-                                           self.report_legs_problem)
+                intent = aisana_legs.make_intent(direction, seconds=part)
+                intent['dance'] = True
+                result = self.legs.execute(intent, self.dance_legs_problem)
             except Exception as exc:
                 print('Dance: legs failed:', exc)
                 return

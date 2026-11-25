@@ -317,7 +317,12 @@ class LegsController(object):
         # (obstacle closer than 40 cm, motors off) is known before Aisana speaks.
         self.ensure_enabled()
         self.motion_lease_until = time.monotonic() + 0.5
-        code, data = self._post('/motor/command', {'command': action})
+        payload = {'command': action}
+        if intent.get('dance') and action in ('spin_left', 'spin_right'):
+            # Marks a dance spin for the Pi (an app that knows it lets the spin ignore the
+            # obstacle stop; the current Pi app ignores the field and keeps its interlock).
+            payload['dance_seconds'] = round(seconds, 1)
+        code, data = self._post('/motor/command', payload)
         if code != 200:
             raise LegsError(data.get('error') or 'command refused ({})'.format(code))
         self.log('Legs: {} for {:.1f} s'.format(action, seconds))
@@ -346,7 +351,7 @@ class LegsController(object):
                         # Not an obstacle (a late heartbeat): continue silently.
                         self.log('Legs: Pi stopped without an obstacle; resuming ({}).'.format(resumes))
                         self.ensure_enabled()
-                        self._post('/motor/command', {'command': action})
+                        self._post('/motor/command', payload)
                     # Fixed rate: the next heartbeat does not wait for a slow answer.
                     next_beat += HEARTBEAT_SECONDS
                     cancel.wait(max(0.0, next_beat - time.monotonic()))

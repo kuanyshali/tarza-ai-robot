@@ -1327,6 +1327,13 @@ class LegsToolTests(unittest.TestCase):
         session2.dance_more(1, 10.0, 10.0, sleep=lambda s: False)
         self.assertEqual(session2.legs.intents, [])
 
+    def test_dance_does_not_shout_about_obstacles(self):
+        session, sent = make_session()
+        session.motion_until = time.monotonic() + 10
+        session.dance_legs_problem('obstacle ahead: 30 cm away')
+        self.assertNotIn('response.create', types(sent))    # no "Stop! Obstacle"
+        self.assertTrue(session.motion_active())            # the dance goes on
+
     def test_polite_dance_question_dances(self):
         # Jetson log, Nov 25: "Aisana, can you dance?" -> "I can't dance"; the panel button worked.
         for text in ('Aisana, can you dance?', 'Айсана, можешь потанцевать?', 'Айсана, станцуешь?',
