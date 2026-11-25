@@ -7,12 +7,15 @@ Python 3.6 standard library only (runs with the system python3 on the Jetson).
 No login (the owner's choice): reach it over the robot's Wi-Fi, Tailscale or a
 tunnel, and keep the link to yourselves.
 """
+import base64
+import binascii
 import json
 import os
 import re
 import socketserver
 import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import aisana_control
@@ -23,6 +26,20 @@ LOG = os.path.join(HERE, 'realtime.log')
 PATTERN = 'python[0-9.]* -u aisana_realtime[.]py'
 NOISE = re.compile(r'Mic level|GST_ARGUS|CONSUMER|Exposure Range|Camera (?:index|mode)|Output Stream|seconds to Run|'
                    r'Frame Rate|WARN:0|^\s*$')
+
+
+CAMERA_INTERVAL = 0.12              # live view ~8 frames/s; Aisana's stream gives ~10
+
+
+def camera_frame(port=aisana_control.CONTROL_PORT):
+    """Newest JPEG from a running Aisana's camera, or None."""
+    reply = aisana_control.send({'action': 'frame'}, port=port, timeout=3.0)
+    if not reply or not reply.get('ok'):
+        return None
+    try:
+        return base64.b64decode(reply.get('jpeg') or '')
+    except (binascii.Error, ValueError):
+        return None
 
 
 def running():
@@ -352,7 +369,33 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, PAGE.encode('utf-8'), 'text/html; charset=utf-8')
         if self.path == '/api/status':
             return self.reply(200, status())
+        if self.path.split('?')[0] == '/camera.jpg':
+            picture = camera_frame()
+            if picture is None:
+                return self.reply(503, {'ok': False, 'error': 'no picture'})
+            return self.reply(200, picture, 'image/jpeg')
+        if self.path.split('?')[0] == '/camera.mjpg':
+            return self.camera_stream()
         self.reply(404, {'ok': False, 'error': 'not found'})
+
+    def camera_stream(self):
+        """Live view for the robot's display: Aisana's own camera frames (she keeps
+        the camera; this only reads her newest picture), ~8 frames/s."""
+        self.send_response(200)
+        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        try:
+            while True:
+                picture = camera_frame()
+                if picture is None:
+                    time.sleep(1.0)
+                    continue
+                self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' +
+                                 str(len(picture)).encode() + b'\r\n\r\n' + picture + b'\r\n')
+                time.sleep(CAMERA_INTERVAL)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def do_POST(self):
         limit = aisana_control.MAX_LINE if self.path == '/api/mic' else 8192
@@ -378,7 +421,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, result or {'ok': False, 'error': 'Айсана выключена'})
         if self.path == '/api/action':
             action = body.get('action')
-            if action not in aisana_control.ACTIONS or action in ('status', 'mic'):
+            if action not in aisana_control.ACTIONS or action in ('status', 'mic', 'frame'):
                 return self.reply(400, {'ok': False, 'error': 'unknown action'})
             if not running():
                 return self.reply(200, {'ok': False, 'error': 'Айсана выключена'})

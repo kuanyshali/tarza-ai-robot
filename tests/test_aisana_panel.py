@@ -29,6 +29,10 @@ class FakeSession(object):
         self.actions.append(('mic', mode, pressed, pcm))
         return {'ok': True}
 
+    def panel_frame(self):
+        import base64
+        return {'ok': True, 'jpeg': base64.b64encode(b'\xff\xd8fake\xff\xd9').decode('ascii')}
+
 
 class ControlPortTests(unittest.TestCase):
     def setUp(self):
@@ -59,6 +63,12 @@ class ControlPortTests(unittest.TestCase):
         self.assertEqual(reply, {'ok': True})
         self.assertEqual(self.session.actions[-1], ('mic', 'ptt', True, pcm))
         self.assertFalse(aisana_control.send({'action': 'mic', 'mode': 'ptt', 'pcm': '%%%'}, port=self.port)['ok'])
+
+    def test_camera_frame_is_read_only(self):
+        reply = aisana_control.send({'action': 'frame'}, port=self.port)
+        self.assertTrue(reply['ok'])
+        self.assertEqual(self.session.actions, [])                 # nothing was done to the robot
+        self.assertEqual(aisana_panel.camera_frame(port=self.port), b'\xff\xd8fake\xff\xd9')
 
     def test_listens_on_localhost_only(self):
         self.assertEqual(self.server.server.server_address[0], '127.0.0.1')
@@ -97,6 +107,9 @@ class PanelTests(unittest.TestCase):
             self.assertEqual(aisana_panel.log_tail(), ['You: Aisana, dance', 'Aisana: Dancing!'])
         finally:
             aisana_panel.LOG = original
+
+    def test_no_camera_frame_when_aisana_is_off(self):
+        self.assertIsNone(aisana_panel.camera_frame(port=free_port()))
 
     def test_page_has_the_buttons(self):
         for label in ('СТОП', 'Включить', 'Выключить', 'Помахать', 'Танцевать', 'Сказать это'):
