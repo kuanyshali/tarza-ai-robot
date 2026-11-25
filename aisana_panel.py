@@ -369,6 +369,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, PAGE.encode('utf-8'), 'text/html; charset=utf-8')
         if self.path == '/api/status':
             return self.reply(200, status())
+        if self.path.split('?')[0] in ('/camera.jpg', '/camera.mjpg') and self.via_public_link():
+            # The live camera is for the robot's display and the team (robot Wi-Fi,
+            # robot LAN, Tailscale), not for anyone who has the public Funnel link.
+            return self.reply(403, {'ok': False, 'error': 'camera only on the robot network or Tailscale'})
         if self.path.split('?')[0] == '/camera.jpg':
             picture = camera_frame()
             if picture is None:
@@ -377,6 +381,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.split('?')[0] == '/camera.mjpg':
             return self.camera_stream()
         self.reply(404, {'ok': False, 'error': 'not found'})
+
+    def via_public_link(self):
+        """Tailscale Funnel (the public https link) proxies from 127.0.0.1; the Pi
+        (10.42.0.x), the robot Wi-Fi (192.168.8.x) and Tailscale (100.x) connect directly."""
+        return self.client_address[0] in ('127.0.0.1', '::1') or bool(self.headers.get('Tailscale-Funnel-Request'))
 
     def camera_stream(self):
         """Live view for the robot's display: Aisana's own camera frames (she keeps

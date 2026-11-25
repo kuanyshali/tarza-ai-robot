@@ -111,6 +111,15 @@ class PanelTests(unittest.TestCase):
     def test_no_camera_frame_when_aisana_is_off(self):
         self.assertIsNone(aisana_panel.camera_frame(port=free_port()))
 
+    def test_camera_not_on_the_public_link(self):
+        class H(object):
+            headers = {}
+        h = H()
+        for address, public in (('127.0.0.1', True), ('10.42.0.148', False), ('192.168.8.5', False),
+                                ('100.101.2.3', False)):
+            h.client_address = (address, 1234)
+            self.assertEqual(aisana_panel.Handler.via_public_link(h), public, address)
+
     def test_page_has_the_buttons(self):
         for label in ('СТОП', 'Включить', 'Выключить', 'Помахать', 'Танцевать', 'Сказать это'):
             self.assertIn(label, aisana_panel.PAGE)
