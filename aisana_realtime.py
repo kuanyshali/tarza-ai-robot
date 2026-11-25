@@ -47,6 +47,10 @@ MODEL = os.environ.get('AISANA_REALTIME_MODEL', 'gpt-realtime-2.1-mini')
 VOICE = os.environ.get('AISANA_REALTIME_VOICE', 'marin')
 BARGE_IN = os.environ.get('AISANA_REALTIME_BARGE_IN', '0') == '1'
 SILENCE_MS = int(os.environ.get('AISANA_REALTIME_SILENCE_MS', '700'))
+# Non-stop talk in the room is one endless "turn" for server VAD (Nov 25: she answered
+# a whole minute of chatter). Cut it at a quiet moment after MAX_TURN s, at the latest
+# after MAX_TURN + 4 s, so "Айсана, ..." at the end is a short turn of its own.
+MAX_TURN = max(5.0, float(os.environ.get('AISANA_MAX_TURN', '12')))
 ECHO_GUARD = os.environ.get('AISANA_ECHO_GUARD', '1') == '1'
 ECHO_TAIL_SECONDS = float(os.environ.get('AISANA_ECHO_TAIL_SECONDS', '1.0'))
 # The Xiaomi USB speaker drops the first ~0.2 s after the stream opens: lead with silence.
@@ -617,6 +621,11 @@ class RealtimeAisana(object):
         self.follower = None                # "иди за мной" run (aisana_follow.Follower)
         self.person_detector = None
         self.heard_at = 0.0                 # end of the user's last turn (latency log)
+        self.in_speech = False              # server VAD: someone is talking (turn not committed yet)
+        self.turn_started = 0.0
+        self.turn_levels = collections.deque(maxlen=66)   # ~2 s of 30 ms loudness, for quiet moments
+        self.split_pending = False
+        self.split_items = set()            # turns cut by maybe_split_turn (may end mid-sentence)
         self.last_create = (0.0, None)      # last response.create sent (retry after "active response")
         self.retry_create = None
         self.usb_level = 0                  # USB mic loudness for the panel (RMS peak, last second)
@@ -1131,10 +1140,32 @@ class RealtimeAisana(object):
                 preroll.clear()
                 self.send({'type': 'input_audio_buffer.append',
                            'audio': base64.b64encode(pcm).decode('ascii')})
+                if self.maybe_split_turn(audioop.rms(pcm, 2)):
+                    self.send({'type': 'input_audio_buffer.commit'})
         except Exception as exc:
             if not self.stop.is_set():
                 print('Microphone/connection error:', exc)
                 self.stop.set()
+
+    def maybe_split_turn(self, rms, now=None):
+        """True when a long non-stop turn should be cut here (then commit)."""
+        now = time.monotonic() if now is None else now
+        if not self.in_speech:
+            self.turn_levels.clear()
+            return False
+        self.turn_levels.append(rms)
+        length = now - self.turn_started
+        if length < MAX_TURN:
+            return False
+        average = sum(self.turn_levels) / float(len(self.turn_levels))
+        quiet = rms < max(300.0, 0.35 * average)      # a breath between words
+        if not quiet and length < MAX_TURN + 4:
+            return False
+        print('Long talk ({:.0f} s without a pause): cut here.'.format(length))
+        self.turn_started = now
+        self.split_pending = True
+        self.turn_levels.clear()
+        return True
 
     def note_usb_level(self, rms):
         """Loudest 30 ms of the USB mic in the last second, for the panel."""
@@ -2058,6 +2089,16 @@ class RealtimeAisana(object):
         full = transcript
         transcript = request_part(transcript)
         trimmed = transcript != full
+        if item_id in self.split_items and has_wake_name(full) and len(re.findall(r'\w+', transcript)) <= 2:
+            # A long talk was cut right after her name: the request is in the next piece.
+            print('Her name at the end of a long talk; listening for the rest.')
+            self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
+            if held:
+                self.release_hold(drop=True)
+            if item_id in self.responded_items:
+                self.cancel_reply()
+            self.ignore_item(item_id)
+            return
         if trimmed:
             print('Before her name (ignored): ' + full[:len(full) - len(transcript)].strip())
         arm_intents = parse_arm_commands(transcript)
@@ -2280,8 +2321,12 @@ class RealtimeAisana(object):
                 self.send({'type': 'response.create', 'response': {
                     'conversation': 'none', 'output_modalities': ['audio'],
                     'metadata': {'purpose': 'shouts'}, 'instructions': shouts_prompt()}})
+        elif typ == 'input_audio_buffer.speech_stopped':
+            self.in_speech = False
         elif typ == 'input_audio_buffer.speech_started':
             self.speech_started_at = time.monotonic()
+            self.in_speech = True
+            self.turn_started = self.speech_started_at
             if self.spotter is not None and time.monotonic() < self.stream_until:
                 self.stream_until = time.monotonic() + 20     # a long question keeps streaming
             self.start_prefetch()
@@ -2346,6 +2391,11 @@ class RealtimeAisana(object):
         elif typ == 'input_audio_buffer.committed':
             self.last_item = e.get('item_id')
             self.heard_at = time.monotonic()
+            if self.split_pending:
+                self.split_pending = False
+                self.split_items.add(e.get('item_id'))
+            else:
+                self.in_speech = False
             # Inside an open dialogue start the answer at once, but hold its audio
             # until the transcript shows it is not a command (or 1.6 s passed).
             # While the wheels turn, wait for the transcript (her shouts are heard).
@@ -2390,6 +2440,9 @@ class RealtimeAisana(object):
             error = e.get('error', {}) or {}
             if error.get('code') == 'response_cancel_not_active':
                 return                          # harmless: the reply had already ended
+            if error.get('code') == 'input_audio_buffer_commit_empty':
+                self.split_pending = False      # harmless: the server ended the turn at the same moment
+                return
             if error.get('code') == 'conversation_already_has_active_response':
                 sent_at, payload = self.last_create
                 if payload is not None and time.monotonic() - sent_at < 5 and self.retry_create is None:

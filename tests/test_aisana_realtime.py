@@ -1235,6 +1235,34 @@ class LegsToolTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertIn('response.create', types(sent))
 
+    def test_long_nonstop_talk_is_cut_at_a_quiet_moment(self):
+        # Nov 25: a minute of chatter was one turn and she answered all of it.
+        session, sent = make_session()
+        session.handle({'type': 'input_audio_buffer.speech_started'})
+        start = session.turn_started
+        t = start
+        cut = None
+        while t < start + rt.MAX_TURN + 10:
+            t += 0.03
+            loud = int((t - start) * 100) % 50 != 0       # a short quiet 30 ms now and then
+            if session.maybe_split_turn(3000 if loud else 200, now=t):
+                cut = t - start
+                break
+        self.assertIsNotNone(cut)
+        self.assertGreaterEqual(cut, rt.MAX_TURN)
+        self.assertLess(cut, rt.MAX_TURN + 4)
+        self.assertFalse(session.maybe_split_turn(3000, now=t + 1))   # a new piece starts
+        session.handle({'type': 'input_audio_buffer.speech_stopped'})
+        self.assertFalse(session.maybe_split_turn(100, now=t + 30))   # nobody talks: never cut
+
+    def test_name_at_the_end_of_a_cut_piece_waits_for_the_rest(self):
+        session, sent = make_session()
+        session.split_pending = True
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 's1'})
+        say(session, 's1', 'ну короче мы вчера там были и вообще. Айсана, какая')
+        self.assertTrue(session.dialog_active())             # the next piece needs no name
+        self.assertIn('conversation.item.delete', types(sent))
+
     def test_model_cannot_drive_when_not_asked(self):
         session, _ = make_session()
         session.legs = FakeLegs()
