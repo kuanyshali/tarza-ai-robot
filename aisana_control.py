@@ -25,7 +25,7 @@ import socketserver
 import threading
 
 CONTROL_PORT = 8091
-ACTIONS = ('status', 'stop', 'wave', 'arm', 'dance', 'follow', 'people', 'say', 'ask', 'humor', 'quiet', 'calibrate_turns', 'mic', 'frame')
+ACTIONS = ('status', 'face', 'stop', 'wave', 'arm', 'dance', 'follow', 'people', 'say', 'ask', 'humor', 'quiet', 'calibrate_turns', 'mic', 'frame')
 MAX_TEXT = 300
 MAX_LINE = 1 << 17                  # a mic packet (2 s of audio in base64) fits
 
@@ -74,6 +74,8 @@ class ControlServer(object):
             return dict(ok=True, **session.panel_status())
         if action == 'frame':
             return session.panel_frame()
+        if action == 'face':
+            return session.face_state()
         if action == 'mic':
             try:
                 pcm = base64.b64decode(str(request.get('pcm') or ''), validate=True)

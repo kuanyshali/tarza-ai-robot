@@ -55,6 +55,14 @@ def battery_percent(voltage, cells=BATTERY_CELLS):
     return 100
 
 
+def face(port=aisana_control.CONTROL_PORT):
+    """The robot display's face: Aisana's state, or 'offline' when she is not running."""
+    reply = aisana_control.send({'action': 'face'}, port=port, timeout=1.0)
+    if not reply or not reply.get('ok'):
+        return {'ok': False, 'state': 'offline', 'voice': 0, 'mic': 0}
+    return reply
+
+
 def battery(fetch=None):
     """{'ok', 'voltage', 'percent'} from the legs Pi; ok False if it does not answer."""
     try:
@@ -568,6 +576,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, MIC_PAGE.encode('utf-8'), 'text/html; charset=utf-8')
         if self.path == '/api/status':
             return self.reply(200, status())
+        if self.path.split('?')[0] == '/api/face':
+            return self.reply(200, face(), any_origin=True)
         if self.path.split('?')[0] == '/api/battery':
             return self.reply(200, battery(), any_origin=True)
         if self.path.split('?')[0] in ('/camera.jpg', '/camera.mjpg') and self.via_public_link():
@@ -641,7 +651,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, result or {'ok': False, 'error': 'Айсана выключена'})
         if self.path == '/api/action':
             action = body.get('action')
-            if action not in aisana_control.ACTIONS or action in ('status', 'mic', 'frame'):
+            if action not in aisana_control.ACTIONS or action in ('status', 'mic', 'frame', 'face'):
                 return self.reply(400, {'ok': False, 'error': 'unknown action'})
             if not running():
                 return self.reply(200, {'ok': False, 'error': 'Айсана выключена'})

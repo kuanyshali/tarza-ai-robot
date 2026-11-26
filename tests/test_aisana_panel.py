@@ -176,6 +176,9 @@ class PanelTests(unittest.TestCase):
         self.assertNotIn('/api/mic', aisana_panel.PAGE)
         self.assertIn('href="/mic"', aisana_panel.PAGE)
 
+    def test_face_is_offline_when_aisana_is_off(self):
+        self.assertEqual(aisana_panel.face(port=free_port())['state'], 'offline')
+
     def test_page_has_the_buttons(self):
         for label in ('СТОП', 'Включить', 'Выключить', 'Помахать', 'Танцевать', 'Сказать это'):
             self.assertIn(label, aisana_panel.PAGE)

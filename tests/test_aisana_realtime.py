@@ -745,6 +745,39 @@ class StopAndGreetTests(unittest.TestCase):
         self.assertIn('no answer', rt.aisana_legs.short_error(Exception('Connection to 10.42.0.148 timed out.')))
 
 
+class FaceStateTests(unittest.TestCase):
+    """Nov 26: the animated face on the robot display."""
+
+    def test_states_in_priority_order(self):
+        session, sent = make_session()
+        self.assertEqual(session.face_state()['state'], 'idle')
+        session.dialog_until = time.monotonic() + 5
+        self.assertEqual(session.face_state()['state'], 'listen')
+        session.responding = True
+        self.assertEqual(session.face_state()['state'], 'think')
+        session.playing = True
+        self.assertEqual(session.face_state()['state'], 'speak')
+        session.shouts.active = True
+        self.assertEqual(session.face_state()['state'], 'dance')
+
+    def test_mouth_follows_when_the_voice_is_heard_not_when_it_arrived(self):
+        session, sent = make_session()
+        loud = b'\x00\x30' * (rt.RATE // 2)                    # 0.5 s of loud voice
+        session.voice_clock, session.voice_written = 100.0, 0
+        session.note_voice(b'\x00\x00' * rt.RATE, now=100.0)   # 1 s of silence first
+        session.note_voice(loud, now=100.0)                      # arrives at once, heard at 101.0
+        self.assertEqual(session.voice_level(now=100.5), 0)      # still the silent second
+        self.assertGreater(session.voice_level(now=101.2), 0.5)
+        self.assertEqual(session.voice_level(now=103.0), 0)      # long finished
+
+    def test_mic_level_is_fresh_only(self):
+        session, sent = make_session()
+        session.note_usb_level(2500)
+        self.assertAlmostEqual(session.face_state()['mic'], 0.5)
+        session.mic_at -= 1
+        self.assertEqual(session.face_state()['mic'], 0)
+
+
 class PanelActionTests(unittest.TestCase):
     def test_panel_stop_and_status(self):
         session, sent = make_session()

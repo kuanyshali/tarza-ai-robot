@@ -363,6 +363,10 @@ def dance_steps(beat_number):
 # The owner's own music for the dance (not in the repo): the first DANCE_SECONDS of a
 # song from this folder is played instead of the shouts, a random one each dance
 # (Nov 26). Any format ffmpeg reads.
+# Face on the robot display (Nov 26): loudness that counts as "full" for the animation.
+FACE_VOICE_FULL = 6000.0
+FACE_MIC_FULL = 5000.0
+VOICE_LATENCY = 0.08                  # aplay's own buffer before a sample is heard (approx.)
 DANCE_MUSIC_DIR = os.environ.get('AISANA_DANCE_MUSIC_DIR', os.path.expanduser('~/robot_music'))
 DANCE_MUSIC_NAMES = ('dance.mp3', 'dance.m4a', 'dance.wav', 'dance.ogg', 'dance.opus')
 DANCE_MUSIC_TYPES = ('.mp3', '.m4a', '.wav', '.ogg', '.opus', '.flac', '.aac')
@@ -825,6 +829,9 @@ class RealtimeAisana(object):
         self.retry_item = None              # the user turn of the queued retry_create
         self.next_create_item = None        # set by respond() for its own response.create
         self.usb_level = 0                  # USB mic loudness for the panel (RMS peak, last second)
+        self.mic_now, self.mic_at = 0, 0.0  # latest USB mic loudness (face on the robot display)
+        self.voice_track = collections.deque(maxlen=600)   # (time it is heard, RMS) per 50 ms of her voice
+        self.voice_clock, self.voice_written = 0.0, 0
         self.usb_level_peak = 0
         self.usb_level_at = 0.0
         self.first_audio_pending = False
@@ -1305,10 +1312,13 @@ class RealtimeAisana(object):
                 with self.play_lock:
                     self.playback = p
                     self.playing = True
+                self.voice_clock = time.monotonic() + PLAYBACK_LEAD_MS / 1000.0 + VOICE_LATENCY
+                self.voice_written = 0
                 try:
                     p.stdin.write(b'\x00\x00' * (RATE * PLAYBACK_LEAD_MS // 1000))
                 except (IOError, OSError, ValueError):
                     pass
+            self.note_voice(chunk)
             try:
                 p.stdin.write(chunk)
             except (IOError, OSError, ValueError):
@@ -1416,7 +1426,52 @@ class RealtimeAisana(object):
         self.turn_levels.clear()
         return True
 
+    def note_voice(self, chunk, now=None):
+        """Remember how loud each 50 ms of her voice is and WHEN it will be heard: the
+        Realtime API sends audio faster than it plays, so the face's mouth follows this
+        schedule, not the moment the bytes arrived."""
+        now = time.monotonic() if now is None else now
+        if self.voice_clock + self.voice_written / float(RATE) < now:
+            self.voice_clock, self.voice_written = now, 0      # playback caught up (gap)
+        step = RATE // 20 * 2                                  # 50 ms of S16_LE mono
+        for i in range(0, len(chunk) - 1, step):
+            piece = chunk[i:i + step]
+            heard_at = self.voice_clock + self.voice_written / float(RATE)
+            self.voice_track.append((heard_at, audioop.rms(piece, 2)))
+            self.voice_written += len(piece) // 2
+
+    def voice_level(self, now=None):
+        """Loudness of her voice that is playing right now, 0..1."""
+        now = time.monotonic() if now is None else now
+        level = 0
+        for heard_at, rms in reversed(self.voice_track):
+            if heard_at <= now:
+                level = rms if now - heard_at < 0.1 else 0
+                break
+        return min(1.0, level / FACE_VOICE_FULL)
+
+    def face_state(self):
+        """What the face on the robot display shows (read-only, polled ~5 times a second)."""
+        now = time.monotonic()
+        voice = self.voice_level(now)
+        mic = min(1.0, self.mic_now / FACE_MIC_FULL) if now - self.mic_at < 0.3 else 0.0
+        if self.shouts.active:
+            state = 'dance'
+        elif self.playing or voice > 0:
+            state = 'speak'
+        elif self.responding:
+            state = 'think'
+        elif self.motion_active() or (self.follower is not None and self.follower.active()):
+            state = 'drive'
+        elif self.dialog_active() or (self.phone_active() and self.phone_pressed):
+            state = 'listen'
+        else:
+            state = 'idle'
+        return {'ok': True, 'state': state, 'voice': round(voice, 2), 'mic': round(mic, 2),
+                'quiet': bool(self.quiet)}
+
     def note_usb_level(self, rms):
+        self.mic_now, self.mic_at = rms, time.monotonic()
         """Loudest 30 ms of the USB mic in the last second, for the panel."""
         now = time.monotonic()
         if now - self.usb_level_at > 1.0:
