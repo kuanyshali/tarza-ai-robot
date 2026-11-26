@@ -708,10 +708,38 @@ class StopAndGreetTests(unittest.TestCase):
         self.assertEqual(session.legs.intents[0]['action'], 'spin_right')
         self.assertEqual(session.legs.intents[0]['seconds'], 1.0)
         actions = [c[:4] for c in session.arm.calls]
-        self.assertEqual(actions[0], ('position', 'both', 3, 'shoulder'))
-        self.assertEqual(actions[1][0], 'hand_shake')
+        self.assertEqual(actions[0], ('position', 'right', 3, 'shoulder'))   # one arm up...
+        self.assertEqual(actions[2], ('position', 'left', 1, 'shoulder'))    # ...the other down
+        self.assertIn('hand_shake', [a[0] for a in actions])
         self.assertEqual(actions[-1], ('position', 'both', 0, 'whole'))
         self.assertFalse(rt.POLITE_ASK_RE.search('Ты умеешь танцевать?'))   # a question, not a request
+
+    def test_dance_arms_take_turns_then_go_down(self):
+        # Owner, Nov 26: arms up and down in turn, different arms.
+        session, _ = make_session()
+        arm = session.arm = FakeArm()
+        session.dance_id, session.wave_id = 5, 7
+        clock = [0.0]
+        real = rt.time.monotonic
+        rt.time.monotonic = lambda: clock[0]
+        try:
+            def sleep(s):
+                clock[0] += s
+                return False
+            session.dance_arms(arm, 5, 7, 10.0, sleep=sleep)
+        finally:
+            rt.time.monotonic = real
+        ups = [c[1] for c in arm.calls if c[0] == 'position' and c[2] == 3 and c[3] == 'shoulder']
+        self.assertEqual(ups[:3], ['left', 'right', 'both'])            # beats 1, 2, 3 (both up)
+        self.assertEqual(arm.calls[-1][:4], ('position', 'both', 0, 'whole'))
+        self.assertEqual(arm.calls[-2][0], 'hand_still')
+
+    def test_stop_ends_the_dance_arms_where_they_are(self):
+        session, _ = make_session()
+        arm = session.arm = FakeArm()
+        session.dance_id, session.wave_id = 1, 1
+        session.dance_arms(arm, 1, 1, 10.0, sleep=lambda s: session.stop_motion() or False)
+        self.assertEqual(arm.calls, [])                                 # no new pose, no "arms down"
 
     def test_short_legs_errors(self):
         self.assertIn('no answer', rt.aisana_legs.short_error(Exception('Connection to 10.42.0.148 timed out.')))

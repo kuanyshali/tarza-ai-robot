@@ -344,6 +344,21 @@ FOLLOW_PHRASES = {
 }
 DANCE_SECONDS = float(os.environ.get('AISANA_DANCE_SECONDS', '20'))
 DANCE_MAX_SECONDS = 30.0             # music and arms; the wheels stop after aisana_legs.MAX_SECONDS
+# Owner, Nov 26: during the dance the arms go up and down in turn (one up, the other
+# down). One beat = one swap; the shoulder steppers are slow (15 deg/s), the elbows
+# fast, so the elbows swing the whole way and the shoulders only partly.
+DANCE_BEAT = max(1.5, float(os.environ.get('AISANA_DANCE_BEAT', '2.5')))
+
+
+def dance_steps(beat_number):
+    """Arm intents for one beat: even beats right up / left down, odd beats the
+    other way; every 4th beat both arms up together for a change."""
+    if beat_number % 4 == 3:
+        return [make_intent('position', 'both', 3, 'shoulder'),
+                make_intent('position', 'both', 4, 'elbow')]
+    up, down = ('right', 'left') if beat_number % 2 == 0 else ('left', 'right')
+    return [make_intent('position', up, 3, 'shoulder'), make_intent('position', up, 4, 'elbow'),
+            make_intent('position', down, 1, 'shoulder'), make_intent('position', down, 0, 'elbow')]
 # The owner's own music for the dance (not in the repo): the first DANCE_SECONDS of the
 # first file found is played instead of the shouts. Any format ffmpeg reads.
 DANCE_MUSIC_DIR = os.environ.get('AISANA_DANCE_MUSIC_DIR', os.path.expanduser('~/robot_music'))
@@ -1968,11 +1983,10 @@ class RealtimeAisana(object):
             if arm is not None:
                 try:
                     self.wave_id += 1
-                    arm.execute_many([make_intent('position', 'both', 3, 'shoulder'),
-                                      make_intent('hand_shake', 'right')], verify=False)
-                    done.append('arms up, right hand waving')
-                    self.end_wave_after(seconds + 0.5, finish=[make_intent('hand_still', 'right'),
-                                                               make_intent('position', 'both', 0)])
+                    arm.execute_many(dance_steps(0) + [make_intent('hand_shake', 'right')], verify=False)
+                    done.append('arms up and down in turn, right hand waving')
+                    threading.Thread(target=self.dance_arms, daemon=True,
+                                     args=(arm, dance, self.wave_id, seconds)).start()
                 except Exception as exc:
                     print('Dance: arms failed:', exc)
             spun = None
@@ -2065,6 +2079,40 @@ class RealtimeAisana(object):
                 except Exception:
                     pass
         threading.Thread(target=worker, daemon=True).start()
+
+    def dance_arms(self, arm, dance, wave, seconds, sleep=None):
+        """The arm moves of the dance: a new pose every DANCE_BEAT seconds, then
+        hand still and arms down. "стоп" (stop_motion), another arm command
+        (wave_id) or a new dance ends it early; after "стоп" the arms stay put."""
+        sleep = sleep or self.stop.wait
+        end = time.monotonic() + seconds
+        beat = 0
+
+        def still_dancing():
+            return dance == self.dance_id and wave == self.wave_id and self.arm is arm
+
+        while True:
+            pause = min(DANCE_BEAT, end - time.monotonic())
+            if pause <= 0.05:
+                break
+            if sleep(pause) or not still_dancing():
+                return
+            if end - time.monotonic() < 1.0:
+                break                                    # no new pose right before the end
+            beat += 1
+            try:
+                arm.execute_many(dance_steps(beat), verify=False)
+            except Exception as exc:
+                print('Dance: arms failed:', exc)
+                return
+        if not still_dancing():
+            return
+        try:
+            arm.execute_many([make_intent('hand_still', 'right'), make_intent('position', 'both', 0)],
+                             verify=False)
+            print('Dance: done, arms down.')
+        except Exception as exc:
+            print('Dance: could not lower the arms:', exc)
 
     def dance_more(self, dance, remaining, wait, sleep=None):
         """The rest of a long dance: spins of <= MAX_SECONDS, left/right in turn."""
