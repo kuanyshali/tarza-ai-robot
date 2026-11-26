@@ -1337,6 +1337,19 @@ class LegsToolTests(unittest.TestCase):
         self.assertNotIn('tool1', session.cut_ids)
         self.assertIsNone(session.retry_create)              # the noise reply is not sent again
 
+    def test_cancelled_reply_audio_is_not_played(self):
+        # Jetson log, Nov 26: the noise reply was cancelled but "They're a confident bunch—" was heard.
+        session, sent = make_session()
+        played = []
+        session.queue_audio = lambda kind, chunk=b'': played.append(kind)
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'n2'})
+        session.respond('n2', extend=False)
+        session.handle({'type': 'response.created', 'response': {'id': 'own2'}})
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'n2', 'transcript': ''})
+        session.handle({'type': 'response.output_audio.delta', 'response_id': 'own2', 'delta': 'AAAA'})
+        self.assertNotIn('audio', played)
+
     def test_noise_turn_still_cuts_its_own_reply(self):
         session, sent = make_session()
         session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'n1'})

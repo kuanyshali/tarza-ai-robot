@@ -2798,6 +2798,8 @@ class RealtimeAisana(object):
             self.first_audio_pending = self.response_item is not None
         elif typ == 'response.output_audio.delta' and e.get('response_id') in self.oob_ids:
             self.shout_buffer.extend(base64.b64decode(e.get('delta', '')))     # recorded, not played
+        elif typ == 'response.output_audio.delta' and e.get('response_id') in self.cut_ids:
+            pass        # a cancelled reply still streams a little: never play it (Nov 26: "They're a confident bunch—")
         elif typ == 'response.output_audio.delta':
             self.echo_guard_active = True
             if self.first_audio_pending and not self.playback_interrupted and self.heard_at:
