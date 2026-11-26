@@ -1238,6 +1238,33 @@ class LegsToolTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertIn('response.create', types(sent))
 
+    def test_noise_turn_does_not_cut_a_web_search_answer(self):
+        # Jetson log, Nov 26: noise during the Kia answer cut it twice ("Aisana (cut): Kia Motors,").
+        session, sent = make_session()
+        session.expect_tool_response = True                  # the web search answer is playing
+        session.handle({'type': 'response.created', 'response': {'id': 'tool1'}})
+        session.respond('n0', extend=False)                  # a reply started for the noise turn: busy
+        session.last_create, session.create_item = (time.monotonic(), {'type': 'response.create'}), 'n0'
+        session.handle({'type': 'error', 'error': {'code': 'conversation_already_has_active_response'}})
+        self.assertEqual(session.retry_item, 'n0')
+        del sent[:]
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'n0', 'transcript': ''})
+        self.assertNotIn('response.cancel', types(sent))
+        self.assertNotIn('tool1', session.cut_ids)
+        self.assertIsNone(session.retry_create)              # the noise reply is not sent again
+
+    def test_noise_turn_still_cuts_its_own_reply(self):
+        session, sent = make_session()
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'n1'})
+        session.respond('n1', extend=False)
+        session.handle({'type': 'response.created', 'response': {'id': 'own1'}})
+        del sent[:]
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'n1', 'transcript': ''})
+        self.assertIn('response.cancel', types(sent))
+        self.assertIn('own1', session.cut_ids)
+
     def test_long_talk_is_not_cut_by_default(self):
         # Owner, Nov 25: let the end of a phrase be decided by the model's own pause detection.
         session, sent = make_session()

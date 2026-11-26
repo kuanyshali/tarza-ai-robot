@@ -733,6 +733,9 @@ class RealtimeAisana(object):
         self.split_items = set()            # turns cut by maybe_split_turn (may end mid-sentence)
         self.last_create = (0.0, None)      # last response.create sent (retry after "active response")
         self.retry_create = None
+        self.create_item = None             # the user turn of the last respond() (None: a tool answer)
+        self.retry_item = None              # the user turn of the queued retry_create
+        self.next_create_item = None        # set by respond() for its own response.create
         self.usb_level = 0                  # USB mic loudness for the panel (RMS peak, last second)
         self.usb_level_peak = 0
         self.usb_level_at = 0.0
@@ -812,6 +815,7 @@ class RealtimeAisana(object):
         a noisy room kept the window open and every remark started a reply)."""
         if item_id:
             self.responded_items.add(item_id)
+        self.next_create_item = item_id
         if extend:
             self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
         if force_arm or force_tool:
@@ -1138,6 +1142,7 @@ class RealtimeAisana(object):
     def send(self, payload):
         if payload.get('type') == 'response.create':
             self.last_create = (time.monotonic(), payload)
+            self.create_item, self.next_create_item = self.next_create_item, None
         with self.send_lock:
             started = time.monotonic()
             self.ws.send(json.dumps(payload))
@@ -2326,8 +2331,7 @@ class RealtimeAisana(object):
             self.noise_items.add(item_id)
             if held:
                 self.release_hold(drop=True)
-            if item_id in self.responded_items:
-                self.cancel_reply()
+            self.drop_reply_for(item_id)
             self.ignore_item(item_id)
             return
         if WAKE_GATE and not has_wake_name(transcript) and is_stray_word(transcript):
@@ -2335,8 +2339,7 @@ class RealtimeAisana(object):
             print('Stray word; ignored.')
             if held:
                 self.release_hold(drop=True)
-            if item_id in self.responded_items:
-                self.cancel_reply()
+            self.drop_reply_for(item_id)
             self.ignore_item(item_id)
             return
         full = transcript
@@ -2348,8 +2351,7 @@ class RealtimeAisana(object):
             self.dialog_until = time.monotonic() + DIALOG_TIMEOUT
             if held:
                 self.release_hold(drop=True)
-            if item_id in self.responded_items:
-                self.cancel_reply()
+            self.drop_reply_for(item_id)
             self.ignore_item(item_id)
             return
         if trimmed:
@@ -2489,6 +2491,16 @@ class RealtimeAisana(object):
         else:
             print('Not addressed to Aisana; ignored.')
             self.ignore_item(item_id)
+
+    def drop_reply_for(self, item_id):
+        """Noise, a stray word or a bare name: drop only the reply started for
+        THIS turn. A reply to something else (a web search answer) keeps
+        playing (Jetson log, Nov 26: a noise turn during the Kia answer cut it
+        twice, and the queued noise reply was cut again)."""
+        if self.retry_item == item_id:
+            self.retry_create, self.retry_item = None, None
+        if item_id in self.responded_items and self.responding and self.response_item == item_id:
+            self.cancel_reply()
 
     def cancel_reply(self):
         if self.responding:
@@ -2708,7 +2720,7 @@ class RealtimeAisana(object):
             if self.retry_create is not None:
                 # A reply refused with "conversation_already_has_active_response" goes
                 # out now that the other one finished (Nov 25: she just stayed silent).
-                payload, self.retry_create = self.retry_create, None
+                payload, self.retry_create, self.retry_item = self.retry_create, None, None
                 threading.Thread(target=self.send, args=(payload,), daemon=True).start()
             holding = self.holding()
             if self.response_item:
@@ -2736,6 +2748,7 @@ class RealtimeAisana(object):
                 sent_at, payload = self.last_create
                 if payload is not None and time.monotonic() - sent_at < 5 and self.retry_create is None:
                     self.retry_create = payload  # send it again when the current reply is done
+                    self.retry_item = self.create_item
                     print('Reply queued: another reply was still running.')
                     return
             print('Realtime API error:', error)
