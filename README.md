@@ -33,6 +33,18 @@ journalctl -u aisana-panel -n 30      # лог пульта
 
 Служба камеры `nvargus-daemon` сломалась (обычно после грубого выключения Айсаны). `start.sh` теперь сам перезапускает эту службу при каждом запуске (правило sudo ставит `./install_panel_service.sh`, без пароля и только для этой команды). Вручную: `./stop.sh; sudo systemctl restart nvargus-daemon; ./start.sh`.
 
+### Интернет: Altel основной, Wi-Fi запасной
+
+Основной канал — только USB-роутер 4G Altel (`eth1`). Запасной — Wi-Fi `hommedumonde` (пароль хранится только в NetworkManager): подключается сам, когда появляется в эфире, и не используется, пока USB работает. Остальные Wi-Fi сети (в т.ч. NU-Campus) сами не подключаются.
+
+`net_watchdog.sh` (служба `aisana-net`) каждые 20 с проверяет интернет через USB. После трёх неудач подряд трафик идёт через Wi-Fi, а USB-подключение переподключается; когда USB снова отвечает, он опять основной.
+
+```bash
+sudo ./net_watchdog.sh --install   # один раз
+journalctl -u aisana-net -f        # что делает сторож
+sudo ./net_watchdog.sh --remove
+```
+
 ### Университетский Wi-Fi NU_Campus
 
 `NU_Campus_WiFi` — WPA2-Enterprise (логин и пароль от университетской почты). Запустите на Джетсоне сами и введите логин и пароль (в git и в чат они не попадают, хранятся только в системном файле NetworkManager, доступном root):
