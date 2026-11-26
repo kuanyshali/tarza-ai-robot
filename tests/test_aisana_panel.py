@@ -169,6 +169,13 @@ class PanelTests(unittest.TestCase):
         second = aisana_panel.traffic('ethX', now=102.0, read=read)
         self.assertEqual((second['down_kbs'], second['up_kbs']), (15.0, 64.0))
 
+    def test_microphone_has_its_own_page(self):
+        # Owner, Nov 26: a separate page with a big microphone button, none on the panel.
+        self.assertIn('id="big"', aisana_panel.MIC_PAGE)
+        self.assertIn('/api/mic', aisana_panel.MIC_PAGE)
+        self.assertNotIn('/api/mic', aisana_panel.PAGE)
+        self.assertIn('href="/mic"', aisana_panel.PAGE)
+
     def test_page_has_the_buttons(self):
         for label in ('СТОП', 'Включить', 'Выключить', 'Помахать', 'Танцевать', 'Сказать это'):
             self.assertIn(label, aisana_panel.PAGE)
