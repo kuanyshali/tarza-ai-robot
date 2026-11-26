@@ -757,6 +757,7 @@ class RealtimeAisana(object):
         self.mute_until = 0.0
         self.follower = None                # "иди за мной" run (aisana_follow.Follower)
         self.dance_id = 0
+        self.dance_until = 0.0              # a dance (arms, music) is going on until then
         self.person_detector = None
         self.heard_at = 0.0                 # end of the user's last turn (latency log)
         self.in_speech = False              # server VAD: someone is talking (turn not committed yet)
@@ -1939,10 +1940,7 @@ class RealtimeAisana(object):
     def watch_faces(self):
         """Greets people she knows when they come into view (at most once per half hour)."""
         while not self.stop.wait(FACE_SCAN_SECONDS):
-            busy = (self.responding or self.playing or self.echo_guard_active or self.motion_active()
-                    or self.hold_item is not None or time.monotonic() - self.speech_started_at < 3
-                    or not self.ready)
-            if busy:
+            if self.greeting_would_interrupt():
                 continue
             frame = self.camera_stream.latest(max_age=1.0, wait=0)
             if frame is None:
@@ -1962,8 +1960,11 @@ class RealtimeAisana(object):
                 if title:
                     self.vip_seen(name)
                 away = now - self.seen_at.get(name, -1e9)
+                due = FACE_GREET and away > 120 and now - self.greeted_at.get(name, -1e9) > FACE_GREET_MINUTES * 60
+                if due and self.greeting_would_interrupt():
+                    break                   # she got busy while looking: greet them later, not now
                 self.seen_at[name] = now
-                if FACE_GREET and away > 120 and now - self.greeted_at.get(name, -1e9) > FACE_GREET_MINUTES * 60:
+                if due:
                     self.greeted_at[name] = now
                     print('Face seen: {} -> greeting'.format(name))
                     self.dialog_until = now + DIALOG_TIMEOUT
@@ -1973,6 +1974,20 @@ class RealtimeAisana(object):
                     else:
                         self.say_phrase('{} (you know them) just came into view.'.format(name), 'greet', name)
                     break
+
+    def greeting_would_interrupt(self):
+        """True while a face greeting would cut in: she speaks, thinks, moves, dances,
+        plays music, someone talks to her or a conversation is going on (owner, Nov 26:
+        "О, Куанышали" in the middle of a dance or an answer)."""
+        now = time.monotonic()
+        return bool(self.responding or self.playing or self.echo_guard_active or self.motion_active()
+                    or self.hold_item is not None or self.in_speech or not self.ready
+                    or now - self.speech_started_at < 3
+                    or now - self.heard_at < 8                  # a reply or a tool answer is on its way
+                    or now < self.dialog_until                  # in a conversation
+                    or now < self.dance_until
+                    or getattr(self.shouts, 'active', False)    # dance music or shouts
+                    or self.phone_active())
 
     def wave_hello(self, seconds=None):
         """Greeting gesture: right arm up, hand waves, then the arm goes back down."""
@@ -2003,6 +2018,7 @@ class RealtimeAisana(object):
         spin = min(aisana_legs.MAX_SECONDS, seconds)   # every drive stays time-limited (<= 10 s)
         self.dance_id += 1
         dance = self.dance_id
+        self.dance_until = time.monotonic() + seconds + 2.0
 
         def worker():
             done = []
@@ -2334,6 +2350,7 @@ class RealtimeAisana(object):
 
     def stop_motion(self):
         self.motion_until = 0.0
+        self.dance_until = 0.0
         self.dance_id += 1                  # ends a long dance between its spins
         self.shouts.stop()
         if self.follower is not None:

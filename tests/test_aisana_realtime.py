@@ -865,6 +865,26 @@ class ConversationMemoryTests(unittest.TestCase):
 
 
 class FaceMemoryRealtimeTests(unittest.TestCase):
+    def test_no_face_greeting_while_busy(self):
+        # Owner, Nov 26: "О, Куанышали" in the middle of a dance or an answer.
+        session, _ = make_session()
+        session.ready = True
+        session.heard_at = session.speech_started_at = -1e9
+        self.assertFalse(session.greeting_would_interrupt())       # idle: greeting is fine
+        for busy in ('responding', 'playing', 'in_speech'):
+            setattr(session, busy, True)
+            self.assertTrue(session.greeting_would_interrupt(), busy)
+            setattr(session, busy, False)
+        session.dance_until = time.monotonic() + 20                 # dancing (arms, music)
+        self.assertTrue(session.greeting_would_interrupt())
+        session.stop_motion()                                       # "стоп" ends the dance
+        self.assertFalse(session.greeting_would_interrupt())
+        session.dialog_until = time.monotonic() + 10                # a conversation is going on
+        self.assertTrue(session.greeting_would_interrupt())
+        session.dialog_until = 0.0
+        session.heard_at = time.monotonic()                         # her answer is on its way
+        self.assertTrue(session.greeting_would_interrupt())
+
     def setUp(self):
         self.original = rt.WAKE_GATE
         rt.WAKE_GATE = True
