@@ -641,6 +641,48 @@ PROMPT = (
 
 
 
+def stale_audio_processes(device, proc='/proc', uid=None):
+    """PIDs of aplay/arecord left from an earlier run that still hold `device`:
+    their parent is gone (ppid 1) and they belong to this user. Jetson, Nov 26:
+    after a restart an orphaned aplay hung on the speaker; every new reply went
+    nowhere (the log had the text, the speaker stayed silent)."""
+    uid = os.getuid() if uid is None else uid
+    found = []
+    try:
+        names = os.listdir(proc)
+    except OSError:
+        return found
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc, name, 'cmdline'), 'rb') as f:
+                args = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0') if a]
+            with open(os.path.join(proc, name, 'status')) as f:
+                status = f.read()
+        except (IOError, OSError):
+            continue
+        if not args or os.path.basename(args[0]) not in ('aplay', 'arecord') or device not in args:
+            continue
+        ppid = re.search(r'^PPid:\s*(\d+)', status, re.M)
+        owner = re.search(r'^Uid:\s*(\d+)', status, re.M)
+        if ppid and ppid.group(1) == '1' and owner and int(owner.group(1)) == uid:
+            found.append(int(name))
+    return found
+
+
+def free_audio_device(device, description):
+    """Stop leftovers of an earlier run that keep `device` busy."""
+    for pid in stale_audio_processes(device):
+        print('{}: an old sound process ({}) still held it; stopped.'.format(description, pid))
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                break
+            time.sleep(0.3)
+
+
 def alsa_device(command, expected, description):
     output = subprocess.check_output([command, '-l'], stderr=subprocess.STDOUT).decode(
         'utf-8', errors='replace')
@@ -753,6 +795,7 @@ class RealtimeAisana(object):
         self.speech_started_at = 0
         self.playback_interrupted = False
         self.audio_queue = queue.Queue(maxsize=256)
+        self.speaker_note = 0.0
         self.audio_generation = 0
         self.mute_until = 0.0
         self.follower = None                # "иди за мной" run (aisana_follow.Follower)
@@ -1269,7 +1312,14 @@ class RealtimeAisana(object):
             try:
                 p.stdin.write(chunk)
             except (IOError, OSError, ValueError):
-                pass
+                if p.poll() is not None and p.returncode != 0:
+                    # aplay could not open the speaker (busy or unplugged): free it and
+                    # start a new aplay with the next piece instead of writing into nothing.
+                    if time.monotonic() - self.speaker_note > 10:
+                        self.speaker_note = time.monotonic()
+                        print('Speaker: could not play (aplay exit {}); freeing it.'.format(p.returncode))
+                    free_audio_device(self.speaker, 'Speaker')
+                    p = None
         if p:
             try:
                 p.terminate()
@@ -2876,6 +2926,8 @@ class RealtimeAisana(object):
             raise RuntimeError('Realtime mode needs websocket-client: python3 -m pip install --user "websocket-client==1.3.1"')
         self.mic_device = alsa_device('arecord', MIC_LABEL, 'microphone ' + MIC_LABEL)
         self.speaker = alsa_device('aplay', 'USB Composite Device', 'Xiaomi speaker')
+        free_audio_device(self.speaker, 'Speaker')
+        free_audio_device(self.mic_device, 'Microphone')
         self.shouts.speaker = self.speaker
         threading.Thread(target=self.shouts.load_music, daemon=True).start()
         print('Input:', self.mic_device, 'Output:', self.speaker)

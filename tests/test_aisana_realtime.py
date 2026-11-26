@@ -864,6 +864,30 @@ class ConversationMemoryTests(unittest.TestCase):
         self.assertTrue(session.history.cleared)
 
 
+class StaleSpeakerTests(unittest.TestCase):
+    """Jetson, Nov 26: an orphaned aplay from the last run kept the speaker busy."""
+
+    def make_proc(self, root, pid, args, ppid, uid):
+        import os
+        folder = os.path.join(root, str(pid))
+        os.makedirs(folder)
+        with open(os.path.join(folder, 'cmdline'), 'wb') as f:
+            f.write(b'\0'.join(a.encode() for a in args) + b'\0')
+        with open(os.path.join(folder, 'status'), 'w') as f:
+            f.write('Name:\t{}\nPPid:\t{}\nUid:\t{}\t{}\t{}\t{}\n'.format(args[0], ppid, uid, uid, uid, uid))
+
+    def test_only_orphans_on_our_device(self):
+        import tempfile
+        root = tempfile.mkdtemp()
+        play = ['aplay', '-q', '-D', 'plughw:3,0', '-t', 'raw']
+        self.make_proc(root, 100, play, 1, 1000)                       # orphan: ours
+        self.make_proc(root, 101, play, 555, 1000)                     # still has its parent
+        self.make_proc(root, 102, ['aplay', '-D', 'plughw:0,3'], 1, 1000)   # another device
+        self.make_proc(root, 103, play, 1, 0)                          # someone else's
+        self.make_proc(root, 104, ['python3', '-D', 'plughw:3,0'], 1, 1000)
+        self.assertEqual(rt.stale_audio_processes('plughw:3,0', proc=root, uid=1000), [100])
+
+
 class FaceMemoryRealtimeTests(unittest.TestCase):
     def test_no_face_greeting_while_busy(self):
         # Owner, Nov 26: "О, Куанышали" in the middle of a dance or an answer.
