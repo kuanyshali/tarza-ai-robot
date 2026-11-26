@@ -1552,6 +1552,25 @@ class DanceMusicTests(unittest.TestCase):
             self.assertEqual(rt.DANCE_SECONDS, 20.0)
         self.assertLessEqual(rt.aisana_legs.MAX_SECONDS, 10.0)     # the wheels still stop after 10 s
 
+    def test_dance_picks_a_random_song_not_twice_in_a_row(self):
+        # Nov 26: two songs in ~/robot_music, a random one each dance.
+        folder = tempfile.mkdtemp()
+        for name in ('lambada.mp3', 'skazki.mp3', 'notes.txt'):
+            with open(os.path.join(folder, name), 'wb') as handle:
+                handle.write(b'x')
+        original = rt.DANCE_MUSIC_DIR
+        rt.DANCE_MUSIC_DIR = folder
+        try:
+            self.assertEqual([os.path.basename(p) for p in rt.find_all_dance_music()],
+                             ['lambada.mp3', 'skazki.mp3'])
+            player = rt.ShoutPlayer()
+            self.assertTrue(player.load_music(decode=lambda path, seconds: os.path.basename(path).encode()))
+            first = player.pick_music(choice=lambda options: options[0])
+            second = player.pick_music(choice=lambda options: options[0])
+            self.assertNotEqual(first, second)               # the other song next time
+        finally:
+            rt.DANCE_MUSIC_DIR = original
+
     def test_finds_the_music_file(self):
         folder = tempfile.mkdtemp()
         self.assertIsNone(rt.find_dance_music(folder))

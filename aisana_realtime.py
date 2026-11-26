@@ -15,6 +15,7 @@ import json
 import os
 import queue
 import requests
+import random
 import re
 import signal
 import subprocess
@@ -359,10 +360,23 @@ def dance_steps(beat_number):
     up, down = ('right', 'left') if beat_number % 2 == 0 else ('left', 'right')
     return [make_intent('position', up, 3, 'shoulder'), make_intent('position', up, 4, 'elbow'),
             make_intent('position', down, 1, 'shoulder'), make_intent('position', down, 0, 'elbow')]
-# The owner's own music for the dance (not in the repo): the first DANCE_SECONDS of the
-# first file found is played instead of the shouts. Any format ffmpeg reads.
+# The owner's own music for the dance (not in the repo): the first DANCE_SECONDS of a
+# song from this folder is played instead of the shouts, a random one each dance
+# (Nov 26). Any format ffmpeg reads.
 DANCE_MUSIC_DIR = os.environ.get('AISANA_DANCE_MUSIC_DIR', os.path.expanduser('~/robot_music'))
 DANCE_MUSIC_NAMES = ('dance.mp3', 'dance.m4a', 'dance.wav', 'dance.ogg', 'dance.opus')
+DANCE_MUSIC_TYPES = ('.mp3', '.m4a', '.wav', '.ogg', '.opus', '.flac', '.aac')
+
+
+def find_all_dance_music(folder=None):
+    """Every song in the dance music folder (sorted paths)."""
+    folder = DANCE_MUSIC_DIR if folder is None else folder
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    return [os.path.join(folder, n) for n in names
+            if n.lower().endswith(DANCE_MUSIC_TYPES) and os.path.isfile(os.path.join(folder, n))]
 
 
 def find_dance_music(folder=None):
@@ -655,20 +669,35 @@ class ShoutPlayer(object):
     def __init__(self):
         self.pcm = None
         self.music = None                       # dance music PCM (find_dance_music)
+        self.songs = []                         # [(name, pcm)] all dance songs, picked at random
+        self.last_song = None
         self.speaker = None
         self._stop = threading.Event()
         self.active = False
 
-    def load_music(self, seconds=None):
-        """Decode the dance music once (in the background at start-up)."""
-        path = find_dance_music()
-        if path is None:
-            return False
-        music = decode_music(path, DANCE_SECONDS if seconds is None else seconds)
-        if music:
-            self.music = music
-            print('Dance music: {} ({:.1f} s)'.format(os.path.basename(path), len(music) / 2.0 / RATE))
-        return bool(music)
+    def load_music(self, seconds=None, decode=None):
+        """Decode every dance song once (in the background at start-up)."""
+        decode = decode or decode_music
+        songs = []
+        for path in find_all_dance_music():
+            music = decode(path, DANCE_SECONDS if seconds is None else seconds)
+            if music:
+                songs.append((os.path.basename(path), music))
+                print('Dance music: {} ({:.1f} s)'.format(os.path.basename(path), len(music) / 2.0 / RATE))
+        if songs:
+            self.songs = songs
+            self.music = songs[0][1]
+        return bool(songs)
+
+    def pick_music(self, choice=random.choice):
+        """A random dance song (not the same one twice in a row), or None."""
+        if not self.songs:
+            return self.music
+        options = [s for s in self.songs if s[0] != self.last_song] or self.songs
+        name, music = choice(options)
+        self.last_song = name
+        print('Dance music now:', name)
+        return music
 
     def play_for(self, seconds, pcm=None):
         pcm = pcm or self.pcm
@@ -2010,11 +2039,11 @@ class RealtimeAisana(object):
                                      args=(dance, seconds - float(moving.group(1)), float(moving.group(1)))).start()
                 # The owner's dance music for the whole dance, else her shouts while she spins.
                 if getattr(self.shouts, 'music', None):
-                    self.shouts.play_for(seconds, pcm=self.shouts.music)
+                    self.shouts.play_for(seconds, pcm=self.shouts.pick_music())
                 else:
                     self.shouts.play_for(seconds)
             elif done and getattr(self.shouts, 'music', None):
-                self.shouts.play_for(seconds, pcm=self.shouts.music)   # arms only, with music
+                self.shouts.play_for(seconds, pcm=self.shouts.pick_music())   # arms only, with music
             elif done:
                 # Nov 23: the wheels were not calibrated and she only said "I'm dancing!".
                 wheels = 'my wheels are not ready' if spun else 'my wheels are not connected'
