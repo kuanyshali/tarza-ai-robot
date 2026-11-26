@@ -2230,6 +2230,20 @@ class RealtimeAisana(object):
                 return {'ok': False, 'error': 'arms not connected'}
             self.wave_hello()
             return {'ok': True}
+        if action == 'arm':
+            # PS5 controller / panel buttons: both arms to one position 0..4.
+            if text not in ('0', '1', '2', '3', '4'):
+                return {'ok': False, 'error': 'arm position must be 0..4'}
+            if self.arm is None:
+                self.reconnect_arm()
+            if self.arm is None:
+                return {'ok': False, 'error': 'arms not connected'}
+            intents = [make_intent('position', 'both', int(text))]
+            self.wave_id += 1                    # a newer arm command cancels a running wave
+            result = self.arm.execute_many(intents, verify=False)
+            self.last_arm_at = time.monotonic()
+            self.arm.watch(intents, self.report_arm_problem)
+            return {'ok': True, 'arms': result}
         if action == 'dance':
             self.run_dance_locally('panel-{}'.format(time.monotonic()), '')
             return {'ok': True}

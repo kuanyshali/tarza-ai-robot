@@ -755,6 +755,17 @@ class PanelActionTests(unittest.TestCase):
         self.assertEqual(status['arms'], 'ready')
         self.assertEqual(status['legs'], 'not connected')
 
+    def test_panel_moves_both_arms_to_a_position(self):
+        # Nov 26: PS5 controller buttons -> both arms to position 0..4.
+        session, sent = make_session()
+        session.arm = FakeArm()
+        self.assertTrue(session.panel_action('arm', '3')['ok'])
+        self.assertEqual(session.arm.calls, [('position', 'both', 3, 'whole', None, None)])
+        self.assertEqual(session.arm.watched[0]['position'], 3)
+        for bad in ('5', '-1', 'x', '', '3; x'):
+            self.assertFalse(session.panel_action('arm', bad)['ok'])
+        self.assertEqual(len(session.arm.calls), 1)      # nothing else was sent
+
     def test_panel_say_speaks_exactly(self):
         session, sent = make_session()
         session.panel_action('say', 'Welcome to Nazarbayev University!')
