@@ -125,7 +125,8 @@ PHONE_MODES = ('live', 'ptt')            # always on / push to talk
 WAKE_PATTERN = re.compile(
     r'^\W*(?:(?:ok|okay|окей|ок|эй|hey|привет)\W+)?'
     r'(?:айсан\w*|айсон\w*|эйсан\w*|асан[аеуы]\b|асама\b|айсама\b|айсам\b|асына\b|aisan\w*|aysan\w*|aissan\w*|'
-    r'آيسان\w*|ايسان\w*|أيسان\w*|عيسان\w*|إيسان\w*)', re.I)
+    r'آيسان\w*|ايسان\w*|أيسان\w*|عيسان\w*|إيسان\w*|'
+    r'アイサ\S*|アイザナ\S*|あいさな\S*|愛紗奈\S*|愛沙奈\S*)', re.I)   # Japanese (Nov 27)
 STOP_PATTERN = re.compile(
     r'(?:^|\W)(?:стоп|остановись|остановитесь|замри|stop|freeze|тоқта\w*|اسكت|وقف)(?:\W|$)', re.I)
 SLEEP_PATTERN = re.compile(
@@ -136,7 +137,8 @@ SLEEP_PATTERN = re.compile(
 # Айсана, позиция ноль." Inflected forms ("про Айсану", "Айсане") do not count.
 WAKE_ANYWHERE = re.compile(
     r'(?<!\w)(?:айсана|айсанна|айсанаа|эйсана|айсона|асана|асама|айсама|айсам|асына|aisana|aysana|aissana|aisanna|'
-    r'آيسانا|ايسانا|أيسانا|عيسانا|إيسانا)(?!\w)', re.I)
+    r'آيسانا|ايسانا|أيسانا|عيسانا|إيسانا)(?!\w)|'
+    r'(?:アイサナ|アイサーナ|アイザナ|あいさな|愛紗奈|愛沙奈)', re.I)   # Japanese has no spaces: no boundaries
 
 
 VOICE_STYLES = {
@@ -187,8 +189,11 @@ def shout_request(text):
     return words or None
 
 
-def confirm_instruction(phrase, transcript):
-    """The fixed short confirmation, plus whatever the user asked her to shout."""
+def confirm_instruction(phrase, transcript, language=None):
+    """The fixed short confirmation, plus whatever the user asked her to shout.
+    Japanese has no fixed phrases: the model says the same thing in Japanese."""
+    if language == 'Japanese':
+        return 'Say this in Japanese (translate it), short and lively, nothing else: "{}"'.format(phrase)
     shout = shout_request(transcript)
     if shout:
         return ('Say "{}" and then shout "{}!" loudly, stretched and playful. Nothing else.'.format(
@@ -443,6 +448,9 @@ SHOUT_ECHO_RE = re.compile(
 def language_of(text):
     """Language of the user's words by script: the reply must use the same one."""
     text = text or ''
+    if re.search(r'[\u3040-\u30ff]', text) or (re.search(r'[\u4e00-\u9fff]', text)
+                                                and not re.search(r'[a-zA-Zа-яА-ЯёЁ\u0600-\u06FF]', text)):
+        return 'Japanese'                  # kana (or kanji alone): Japanese, Nov 27
     if re.search(r'[\u0600-\u06FF]', text):
         return 'Egyptian Arabic'
     if re.search(r'[әғқңөұүһі]', text.casefold()):
@@ -462,7 +470,8 @@ SANA_START = re.compile(r'(?:^|[.!?…]\s*)\W*сана(?:\s*[,!]|\s+(?=\w))', re
 
 NAME_AT = re.compile(
     r'(?<!\w)(?:айсан\w*|айсон\w*|эйсан\w*|асан[аеуы]\b|асама\b|айсама\b|айсам\b|асына\b|сана\b|'
-    r'aisan\w*|aysan\w*|aissan\w*|آيسان\w*|ايسان\w*|أيسان\w*|عيسان\w*|إيسان\w*)', re.I)
+    r'aisan\w*|aysan\w*|aissan\w*|آيسان\w*|ايسان\w*|أيسان\w*|عيسان\w*|إيسان\w*|'
+    r'アイサナ|アイサーナ|アイザナ|あいさな|愛紗奈|愛沙奈)', re.I)
 
 
 def request_part(text):
@@ -500,11 +509,13 @@ def is_stop_phrase(text):
 # Prose with the name only, no command list: on noise STT sometimes returns its
 # hint verbatim, and an echoed command once opened the grippers. An echoed name
 # alone is harmless. Jetson log, Nov 20: in a noisy room "Айсана" came out as "Сана".
-STT_PROMPT = ('Разговор в университете с роботом по имени Айсана (Aisana). К ней обращаются по имени: '
-              'Айсана, ... Speech may be Russian, Kazakh, English or Egyptian Arabic.')
+STT_PROMPT = ('Разговор в университете с роботом по имени Айсана (Aisana, アイサナ). К ней обращаются по имени: '
+              'Айсана, ... Speech may be Russian, Kazakh, English, Egyptian Arabic or Japanese.')
 # Hints used now or earlier; STT may still return them verbatim on noise.
 KNOWN_HINTS = (
     STT_PROMPT,
+    'Разговор в университете с роботом по имени Айсана (Aisana). К ней обращаются по имени: '
+    'Айсана, ... Speech may be Russian, Kazakh, English or Egyptian Arabic.',
     'Speech may be Russian, Kazakh, English or Egyptian Arabic. The robot is called Aisana.',
     'Aisana, Aysana, Айсана, Эйсана, آيسانا. Russian, Kazakh, English, Egyptian Arabic.',
     'поверни налево, поверни направо, развернись, развернись на 360, проедь вперёд, езжай назад, '
@@ -585,7 +596,7 @@ def tool_definitions():
          'parameters': {'type': 'object', 'properties': {
              'city': {'type': 'string', 'description': 'City name in English; empty means Astana'},
              'day': {'type': 'string', 'enum': ['now', 'tomorrow']},
-             'language': {'type': 'string', 'enum': ['Russian', 'Kazakh', 'English', 'Egyptian Arabic']}},
+             'language': {'type': 'string', 'enum': ['Russian', 'Kazakh', 'English', 'Egyptian Arabic', 'Japanese']}},
              'required': ['city', 'day', 'language'], 'additionalProperties': False}},
     ]
     tools.append(
@@ -615,7 +626,7 @@ def tool_definitions():
              'description': 'Live web search for news, elections, results, prices, office holders and other facts that change. Never guess such facts.',
              'parameters': {'type': 'object', 'properties': {
                  'query': {'type': 'string', 'description': 'The question, in the user language'},
-                 'language': {'type': 'string', 'enum': ['Russian', 'Kazakh', 'English', 'Egyptian Arabic']}},
+                 'language': {'type': 'string', 'enum': ['Russian', 'Kazakh', 'English', 'Egyptian Arabic', 'Japanese']}},
                  'required': ['query', 'language'], 'additionalProperties': False}})
     return tools
 
@@ -625,7 +636,7 @@ def tool_definitions():
 PROMPT = (
     'You are Aisana (Айсана), a female robot at a university, with a camera, two arms and wheels. '
     'In Russian always use feminine forms for yourself (рада, сделала, увидела). '
-    'LANGUAGE: reply in the language of the user\'s latest words (Russian, Kazakh, English, Arabic). '
+    'LANGUAGE: reply in the language of the user\'s latest words (Russian, Kazakh, English, Arabic, Japanese). '
     'LENGTH: one short sentence, two at most (under 30 words), unless asked to explain; never a list '
     'of options or advice. While you speak you cannot hear anyone. No filler, no offers of help, '
     'no follow-up questions, no greetings, no apologies. '
@@ -1134,7 +1145,7 @@ class RealtimeAisana(object):
             if self.shouts.play_for(float(moving.group(1))):
                 return SILENT_RESULT + result
         return '{} {}'.format(result, confirm_instruction(legs_reply(intent, self.user_language),
-                                                           transcript or ''))
+                                                           transcript or '', self.user_language))
 
     def run_pending_legs(self, item_id):
         """Safety net: a clear drive command the model ignored."""
@@ -1795,9 +1806,11 @@ class RealtimeAisana(object):
         prompt = PROMPT
         if FIXED_LANGUAGE:
             prompt = prompt.replace(
-                'LANGUAGE: reply in the language of the user\'s latest words (Russian, Kazakh, English, Arabic). ',
+                'LANGUAGE: reply in the language of the user\'s latest words (Russian, Kazakh, English, Arabic, Japanese). ',
                 'LANGUAGE: always speak {0} only, even when the user speaks Russian, Kazakh or another '
-                'language (you understand them, you answer in {0}). '.format(FIXED_LANGUAGE))
+                'language (you understand them, you answer in {0}). ONE EXCEPTION: when the user speaks '
+                'Japanese to you, answer in Japanese (natural, polite Japanese), and switch back to {0} '
+                'as soon as they speak another language. '.format(FIXED_LANGUAGE))
         if time.monotonic() < self.vip_until:
             return (prompt + 'GUESTS: senior university guests are here. Be polite, warm and respectful; '
                     'no sarcasm, no teasing, no jokes about anyone. ' + voice_style_instructions())
@@ -1941,7 +1954,7 @@ class RealtimeAisana(object):
     def say_phrase(self, report, kind, name=''):
         """A memory event: the report for the model's context plus a fixed phrase."""
         phrase = memory_phrase(kind, self.user_language, name)
-        instructions = confirm_instruction(phrase, '')
+        instructions = confirm_instruction(phrase, '', self.user_language)
         if self.user_language not in MEMORY_PHRASES:
             instructions = 'Say this in {}, nothing else: "{}"'.format(self.user_language, phrase)
         self.speak_report('Robot report (true, stored permanently on the robot): ' + report, instructions)
@@ -2174,7 +2187,7 @@ class RealtimeAisana(object):
                 phrase = ('Танцую руками: колёса пока не готовы.' if self.user_language == 'Russian'
                           else 'Dancing with my arms only, {}.'.format(wheels))
                 self.speak_report('Robot report: dancing with the arms only. ' + (spun or ''),
-                                  confirm_instruction(phrase, ''))
+                                  confirm_instruction(phrase, '', self.user_language))
             else:
                 self.speak_report('Robot report: neither arms nor wheels are connected, no dance.',
                                   self.reply_language() + 'In ONE short sentence say that you cannot dance now.')
@@ -2499,7 +2512,7 @@ class RealtimeAisana(object):
         self.cancel_reply()
 
         def say(kind):
-            self.speak_report('Robot report: follow me: ' + kind + '.', confirm_instruction(self.follow_phrase(kind), ''))
+            self.speak_report('Robot report: follow me: ' + kind + '.', confirm_instruction(self.follow_phrase(kind), '', self.user_language))
 
         def worker():
             if self.follower is not None and self.follower.active():
@@ -2548,6 +2561,8 @@ class RealtimeAisana(object):
                 self.queue_audio(kind, chunk)
 
     def reply_language(self):
+        if self.user_language == 'Japanese':
+            return 'Reply in Japanese only (the user spoke Japanese to you). '
         if FIXED_LANGUAGE:
             return 'Reply in {} only, even if the user speaks another language. '.format(FIXED_LANGUAGE)
         return 'Reply in {} only (the language of the user\'s latest words). '.format(self.user_language)
@@ -2556,8 +2571,13 @@ class RealtimeAisana(object):
         print('You:', transcript)
         if ARM_WORDS.search(transcript or ''):
             self.last_arm_talk_at = time.monotonic()
+        detected = language_of(transcript)
         if not FIXED_LANGUAGE:
-            self.user_language = language_of(transcript) or self.user_language
+            self.user_language = detected or self.user_language
+        elif detected:
+            # Fixed language (English), except Japanese: asked in Japanese, she answers
+            # in Japanese (owner, Nov 27), and goes back with the next non-Japanese words.
+            self.user_language = 'Japanese' if detected == 'Japanese' else FIXED_LANGUAGE
         with self.transcript_cond:
             self.transcripts[item_id] = transcript
             self.transcript_cond.notify_all()
@@ -2645,7 +2665,7 @@ class RealtimeAisana(object):
             phrase = {'Russian': 'Стою.', 'English': 'Stopped.', 'Kazakh': 'Тоқтадым.',
                       'Egyptian Arabic': 'وقفت.'}.get(self.user_language, 'Stopped.')
             threading.Thread(target=self.speak_report, daemon=True, args=(
-                'Robot report: wheels and arms were stopped.', confirm_instruction(phrase, ''))).start()
+                'Robot report: wheels and arms were stopped.', confirm_instruction(phrase, '', self.user_language))).start()
             return
         if addressed and not stop and CALIBRATE_TURNS_RE.search(transcript):
             if held:
@@ -2830,7 +2850,7 @@ class RealtimeAisana(object):
                     # A fixed short phrase: commands get "Еду вперёд.", turnarounds "Уииииии!".
                     phrase = (arm_reply(arm_intents[-1], self.user_language) if arm_intents
                               else legs_reply(drive, self.user_language))
-                    instructions = confirm_instruction(phrase, self.transcripts.get(item_id, ''))
+                    instructions = confirm_instruction(phrase, self.transcripts.get(item_id, ''), self.user_language)
                 self.send({'type': 'response.create', 'response': {'metadata': OWN, 'tool_choice': 'none', 'instructions': instructions}})
             except Exception as exc:
                 if not self.stop.is_set():

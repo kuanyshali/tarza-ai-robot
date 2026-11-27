@@ -921,6 +921,31 @@ class PanelArmTests(unittest.TestCase):
         self.assertGreater(session.wave_id, wave)          # the wave timer won't move the arm
 
 
+class JapaneseTests(unittest.TestCase):
+    """Owner, Nov 27: asked in Japanese, she answers in Japanese (no mix-up)."""
+
+    def test_detect(self):
+        self.assertEqual(rt.language_of('アイサナ、こんにちは。元気ですか？'), 'Japanese')
+        self.assertEqual(rt.language_of('今日は天気'), 'Japanese')
+        self.assertEqual(rt.language_of('Aisana, hello'), 'English')
+        self.assertEqual(rt.language_of('Айсана, привет'), 'Russian')
+
+    def test_name_in_japanese(self):
+        for text in ('アイサナ、こんにちは', 'アイサナさん、元気？', 'ねえ、アイサナ、今何時？'):
+            self.assertTrue(rt.has_wake_name(text), text)
+
+    def test_fixed_english_but_japanese_answers_in_japanese(self):
+        session, _ = make_session()
+        session.handle_transcript('j1', 'アイサナ、こんにちは')
+        self.assertEqual(session.user_language, 'Japanese')
+        self.assertIn('Japanese', session.reply_language())
+        self.assertIn('Japanese', rt.confirm_instruction('Stopped.', '', 'Japanese'))
+        session.handle_transcript('j2', 'Aisana, how are you?')
+        self.assertEqual(session.user_language, rt.FIXED_LANGUAGE or 'English')
+        if rt.FIXED_LANGUAGE:
+            self.assertIn('Japanese', session.instructions())
+
+
 class StaleSpeakerTests(unittest.TestCase):
     """Jetson, Nov 26: an orphaned aplay from the last run kept the speaker busy."""
 
