@@ -378,7 +378,8 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
   <div class="armpos">
    <button onclick="armPos('0')">0<small>вниз</small></button><button onclick="armPos('1')">1</button><button onclick="armPos('2')">2</button><button onclick="armPos('3')">3</button><button onclick="armPos('4')">4<small>вверх</small></button>
   </div>
-  <div class="grid"><button onclick="act('wave')">👋 Помахать</button><button class="off-btn" onclick="armPos('off')">💤 Кисть / захват выкл</button></div>
+  <div class="grid"><button onclick="act('wave')">👋 Помахать</button><button onclick="act('wave_stop')">✋ Перестать махать</button></div>
+  <div class="grid"><button class="off-btn" style="grid-column:span 2" onclick="armPos('off')">💤 Кисть / захват выкл сразу</button></div>
  </div>
  <div class="card">
   <textarea id="text" placeholder="Текст для Айсаны"></textarea>

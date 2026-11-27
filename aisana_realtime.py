@@ -2383,6 +2383,17 @@ class RealtimeAisana(object):
                 return {'ok': False, 'error': 'arms not connected'}
             self.wave_hello()
             return {'ok': True}
+        if action == 'wave_stop':
+            # Panel / PS5 D-pad down: the hand stops waving, goes to the centre and its
+            # servo switches OFF (checked6 "r g n"); the arm stays where it is.
+            if self.arm is None:
+                self.reconnect_arm()
+            if self.arm is None:
+                return {'ok': False, 'error': 'arms not connected'}
+            self.wave_id += 1                    # the wave timer will not lower the arm later
+            result = self.arm.execute_many([make_intent('hand_still', 'right')], verify=False)
+            print('Panel: stop waving (hand centred, servo off).')
+            return {'ok': True, 'arms': result}
         if action == 'arm':
             # PS5 controller / panel buttons: "2" (both arms, PS5), "right 3", "left 0",
             # "both 4", or "<side> off" = hand / gripper servo OFF (checked6 "g f").

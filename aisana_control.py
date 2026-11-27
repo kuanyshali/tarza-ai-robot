@@ -25,7 +25,7 @@ import socketserver
 import threading
 
 CONTROL_PORT = 8091
-ACTIONS = ('status', 'face', 'stop', 'wave', 'arm', 'dance', 'follow', 'people', 'say', 'ask', 'humor', 'quiet', 'calibrate_turns', 'mic', 'frame')
+ACTIONS = ('status', 'face', 'stop', 'wave', 'wave_stop', 'arm', 'dance', 'follow', 'people', 'say', 'ask', 'humor', 'quiet', 'calibrate_turns', 'mic', 'frame')
 MAX_TEXT = 300
 MAX_LINE = 1 << 17                  # a mic packet (2 s of audio in base64) fits
 

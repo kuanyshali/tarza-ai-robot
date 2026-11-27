@@ -911,6 +911,15 @@ class PanelArmTests(unittest.TestCase):
         self.assertFalse(session.panel_action('arm', 'right 7')['ok'])
         self.assertFalse(session.panel_action('arm', 'top 1')['ok'])
 
+    def test_stop_waving(self):
+        # Nov 27: a separate "stop waving" (panel, PS5 D-pad down): "r g n", the arm stays.
+        session, _ = make_session()
+        session.arm = FakeArm()
+        wave = session.wave_id
+        self.assertTrue(session.panel_action('wave_stop')['ok'])
+        self.assertEqual([c[:2] for c in session.arm.calls], [('hand_still', 'right')])
+        self.assertGreater(session.wave_id, wave)          # the wave timer won't move the arm
+
 
 class StaleSpeakerTests(unittest.TestCase):
     """Jetson, Nov 26: an orphaned aplay from the last run kept the speaker busy."""
