@@ -18,15 +18,32 @@ WEATHER_WORDS = re.compile(
     r'погод\w*|температур\w*|ауа рай\w*|күн рай\w*|'
     r'الطقس|الجو|حرارة|درجة الحرارة)'
 )
+# Topics that need live data on their own ("кто президент?", "who won?").
 RECENT_WORDS = re.compile(
-    r'(?i)(?:\b(?:today|yesterday|tomorrow|latest|current|recent|'
-    r'now|breaking|news|election|elections|results|score|winner|'
-    r'president|prime minister|stock price|exchange rate|live|'
-    r'who won|who is the)\b|'
-    r'сегодня|вчера|завтра|сейчас|последн\w*|свеж\w*|новост\w*|'
-    r'выбор\w*|результат\w*|побед\w*|президент\w*|'
-    r'бүгін|кеше|ертең|жаңалық\w*|сайлау\w*|'
-    r'النهارده|امبارح|أمس|اليوم|بكره|الأخبار|انتخابات|فاز|النتيجة|الرئيس)'
+    r'(?i)(?:\b(?:breaking|news|election|elections|results|score|winner|'
+    r'president|prime minister|stock price|exchange rate|who won)\b|'
+    r'новост\w*|выбор[ыаов]\w*|результат\w*|побед\w*|президент\w*|премьер\w*|'
+    r'курс (?:доллара|валют|тенге|евро|рубля)|счёт матча|счет матча|'
+    r'жаңалық\w*|сайлау\w*|'
+    r'الأخبار|انتخابات|فاز|النتيجة|الرئيس)'
+)
+# Time words alone ("что ты СЕЙЧАС видишь?", "как ты сегодня?") are NOT news;
+# they need a world-event cue as well.
+TIME_WORDS = re.compile(
+    r'(?i)(?:\b(?:today|yesterday|tomorrow|latest|current|recent|now|live)\b|'
+    r'сегодня|вчера|завтра|сейчас|последн\w*|свеж\w*|'
+    r'бүгін|кеше|ертең|النهارده|امبارح|أمس|اليوم|بكره)'
+)
+EVENT_WORDS = re.compile(
+    r'(?i)(?:\b(?:happened|happening|going on|in the world|match|game|price|'
+    r'died|announced)\b|случил\w*|произошл\w*|происход\w*|в мире|в стране|матч\w*|'
+    r'игр[аеуы]\b|цен[аыу]\b|умер\w*|погиб\w*|объяв\w*|болды ма|не болды|'
+    r'حصل|بيحصل|ماتش|سعر)'
+)
+# A follow-up to a news answer sounds like a continuation: "А в Сенате?".
+NEWS_FOLLOWUP = re.compile(
+    r'(?i)^(?:а|и|ну а|а что|а кто|а как|what about|how about|and|ал|ал енді|'
+    r'و|طب|طيب)\b'
 )
 
 CONDITIONS = {
@@ -93,10 +110,14 @@ def wants_tomorrow(question):
 def online_search_intent(question, recent_context=False):
     if weather_intent(question):
         return False
-    if RECENT_WORDS.search(question or ''):
+    text = (question or '').strip()
+    if RECENT_WORDS.search(text):
         return True
-    # Follow-up on fresh news, e.g. "what about the Senate?"
-    return recent_context and bool((question or '').strip())
+    if TIME_WORDS.search(text) and EVENT_WORDS.search(text):
+        return True
+    # Follow-up on fresh news, e.g. "what about the Senate?". Only short
+    # continuations count; "спасибо" or "расскажи анекдот" return to chat.
+    return bool(recent_context and len(text.split()) <= 8 and NEWS_FOLLOWUP.search(text))
 
 
 def _weather_description(code, language):

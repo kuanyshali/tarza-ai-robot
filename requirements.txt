@@ -1,0 +1,7 @@
+# Jetson Nano (Python 3.6). System python3 has no pip there:
+#   realtime mode:  .venv/bin/python -m pip install -r requirements.txt
+#   robot.py:       sudo apt install python3-serial   (requests and cv2 are already system-wide)
+# opencv (cv2) comes with JetPack; do not pip-install it on the Jetson.
+requests
+pyserial==3.5             # USB link to the Arm team's Arduino Mega
+websocket-client==1.3.1   # realtime mode (aisana_realtime.py, aisana_stream.py)

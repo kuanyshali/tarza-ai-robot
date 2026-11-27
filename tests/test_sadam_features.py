@@ -33,6 +33,25 @@ class WebWeatherTests(unittest.TestCase):
         self.assertFalse(feature.online_search_intent('Tell me a joke'))
         self.assertTrue(feature.online_search_intent('А в Сенате?', recent_context=True))
 
+    def test_time_words_alone_do_not_trigger_search(self):
+        for phrase in ('что ты сейчас видишь?', 'что у меня сейчас в руке?',
+                       'как ты сегодня?', 'что ты делала вчера?',
+                       'какой последний вопрос я задал?', 'what do you see now?'):
+            with self.subTest(phrase=phrase):
+                self.assertFalse(feature.online_search_intent(phrase))
+        for phrase in ('Что сегодня случилось в мире?', 'What happened today?',
+                       'Кто победил вчера в матче?'):
+            with self.subTest(phrase=phrase):
+                self.assertTrue(feature.online_search_intent(phrase))
+
+    def test_news_context_does_not_stick_to_ordinary_chat(self):
+        for phrase in ('спасибо', 'расскажи анекдот', 'сколько будет два плюс два?',
+                       'как дела?', 'thanks!'):
+            with self.subTest(phrase=phrase):
+                self.assertFalse(feature.online_search_intent(phrase, recent_context=True))
+        self.assertTrue(feature.online_search_intent('What about the Senate?', recent_context=True))
+        self.assertFalse(feature.online_search_intent('А в Сенате?', recent_context=False))
+
     def test_weather_uses_real_api_data(self):
         calls = []
         def get(url, **kwargs):

@@ -17,7 +17,7 @@ RATE = 16000
 CHUNK = 3200  # 100 ms of PCM16 mono
 WAKE_WORDS = (
     'айсана', 'эйсана', 'айсанаа', 'aisana', 'aysana',
-    'صدام', 'سدام'
+    'آيسانا', 'ايسانا', 'أيسانا'
 )
 # Strict, word-boundary-matched local activation. No fuzzy matching:
 # incidental background conversations must not wake the robot.
@@ -59,7 +59,7 @@ def record_wake_phrase(model, filename='speech.wav', mic_device='plughw:2,0',
     last_loud = None
     start = None
     noise = 0.0
-    print('Wake listener: offline, waiting for "Sadam"...')
+    print('Wake listener: offline, waiting for "Aisana"...')
     process = subprocess.Popen(
         ['arecord', '-q', '-D', mic_device, '-t', 'raw',
          '-f', 'S16_LE', '-r', str(RATE), '-c', '1'],
@@ -144,3 +144,69 @@ def load_vosk_model(path):
         )
     SetLogLevel(-1)
     return Model(path)
+
+
+# -- realtime mode: spot the name in the live microphone stream ----------------
+# Vosk's small Russian model does not know the word "Айсана". With a small
+# grammar it reliably hears it as the two words "ай" + "сана" with confidence 1.0;
+# the other entries soak up similar sounds ("а сам" -> "а сана", "айфон" -> "ай"
+# with lower confidence). Tested with synthetic speech: 6 of 6 calls found, 1
+# false hit in 10 other phrases ("купи мне айфон"). A false hit costs little:
+# the cloud transcript must still contain the name before she answers.
+SPOTTER_GRAMMAR = ['ай сана', 'а сана', 'оксана', 'асана', '[unk]']
+SPOTTER_CONFIDENCE = float(os.environ.get('AISANA_LOCAL_WAKE_CONFIDENCE', '0.95'))
+
+
+def name_in_words(words, confidence=SPOTTER_CONFIDENCE):
+    """Vosk word list [{'word', 'conf', 'start', 'end'}] -> True if "ай сана" was said."""
+    for first, second in zip(words, words[1:]):
+        if (first.get('word') == 'ай' and second.get('word') == 'сана'
+                and first.get('conf', 0) >= confidence and second.get('conf', 0) >= confidence
+                and second.get('start', 0) - first.get('end', 0) < 0.35):
+            return True
+    return False
+
+
+class WakeSpotter(object):
+    """Feed 24 kHz PCM16 mono chunks; feed() returns True when the name is heard."""
+
+    def __init__(self, model, rate=24000, recognizer=None):
+        self.rate = rate
+        self.state = None
+        if recognizer is None:
+            from vosk import KaldiRecognizer
+            recognizer = KaldiRecognizer(model, RATE, json.dumps(SPOTTER_GRAMMAR, ensure_ascii=False))
+            recognizer.SetWords(True)
+        self.recognizer = recognizer
+
+    def feed(self, pcm):
+        if self.rate != RATE:
+            pcm, self.state = audioop.ratecv(pcm, 2, 1, self.rate, RATE, self.state)
+        if not self.recognizer.AcceptWaveform(pcm):
+            return False                  # Vosk gives word confidences only at a pause
+        try:
+            words = json.loads(self.recognizer.Result()).get('result') or []
+        except (ValueError, TypeError, AttributeError):
+            return False
+        return name_in_words(words)
+
+
+def spotter_from_environment():
+    """WakeSpotter when AISANA_LOCAL_WAKE=1 and Vosk + model are installed, else None."""
+    if os.environ.get('AISANA_LOCAL_WAKE', '0') != '1':
+        return None
+    path = os.path.expanduser(os.environ.get(
+        'AISANA_VOSK_MODEL', os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          'models', 'vosk-model-small-ru-0.22')))
+    try:
+        spotter = WakeSpotter(load_vosk_model(path))
+    except Exception as exc:
+        hint = ''
+        if 'undefined symbol' in str(exc):
+            # Jetson log, Nov 20: every Vosk ARM64 wheel needs a newer libstdc++
+            # than Ubuntu 18.04 (JetPack 4) ships.
+            hint = ' Vosk needs a newer libstdc++ than JetPack 4 has; see README.'
+        print('Local wake word off ({}); all speech goes to the cloud as before.{}'.format(exc, hint))
+        return None
+    print('Local wake word: ON (Vosk). Outside a conversation nothing is sent until "Айсана".')
+    return spotter

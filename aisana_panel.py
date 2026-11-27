@@ -1,0 +1,704 @@
+"""Phone control panel for Aisana:  python3 aisana_panel.py   ->  http://<jetson>:8080
+
+Buttons: start / stop Aisana, emergency STOP, wave, dance, speaker volume, humor slider, "say this", "ask her",
+live status (arms, legs, camera, internet) and the last log lines.
+/mic: a separate page with one big microphone button for the iPhone (hold, tap or
+always on; https only).
+Python 3.6 standard library only (runs with the system python3 on the Jetson).
+No login (the owner's choice): reach it over the robot's Wi-Fi, Tailscale or a
+tunnel, and keep the link to yourselves.
+"""
+import base64
+import binascii
+import json
+import os
+import re
+import socketserver
+import subprocess
+import sys
+import time
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import aisana_control
+import aisana_usage
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PORT = int(os.environ.get('AISANA_PANEL_PORT', '8080'))
+LOG = os.path.join(HERE, 'realtime.log')
+PATTERN = 'python[0-9.]* -u aisana_realtime[.]py'
+NOISE = re.compile(r'Mic level|GST_ARGUS|CONSUMER|Exposure Range|Camera (?:index|mode)|Output Stream|seconds to Run|'
+                   r'Frame Rate|WARN:0|^\s*$')
+
+
+CAMERA_INTERVAL = 0.12              # live view ~8 frames/s; Aisana's stream gives ~10
+
+# Battery: 8S LiFePO4 pack, voltage measured by the ODrive (the Pi reports vbus_voltage).
+LEGS_URL = os.environ.get('AISANA_LEGS_URL', 'http://10.42.0.148:5000').rstrip('/')
+BATTERY_CELLS = int(os.environ.get('AISANA_BATTERY_CELLS', '8'))
+# LiFePO4 resting voltage per cell -> charge %. Flat in the middle, so the % is approximate
+# (it dips while the wheels pull current).
+LIFEPO4_CURVE = ((2.50, 0), (3.00, 10), (3.20, 20), (3.22, 30), (3.25, 40), (3.26, 50),
+                 (3.27, 60), (3.30, 70), (3.32, 80), (3.35, 90), (3.40, 100))
+
+
+def battery_percent(voltage, cells=BATTERY_CELLS):
+    """Pack voltage -> 0..100 % (linear between the curve points), or None."""
+    if voltage is None or cells <= 0:
+        return None
+    cell = float(voltage) / cells
+    if cell <= LIFEPO4_CURVE[0][0]:
+        return 0
+    for (v1, p1), (v2, p2) in zip(LIFEPO4_CURVE, LIFEPO4_CURVE[1:]):
+        if cell <= v2:
+            return int(round(p1 + (p2 - p1) * (cell - v1) / (v2 - v1)))
+    return 100
+
+
+def face(port=aisana_control.CONTROL_PORT):
+    """The robot display's face: Aisana's state, or 'offline' when she is not running."""
+    reply = aisana_control.send({'action': 'face'}, port=port, timeout=1.0)
+    if not reply or not reply.get('ok'):
+        return {'ok': False, 'state': 'offline', 'voice': 0, 'mic': 0}
+    return reply
+
+
+def battery(fetch=None):
+    """{'ok', 'voltage', 'percent'} from the legs Pi; ok False if it does not answer."""
+    try:
+        if fetch is None:
+            with urllib.request.urlopen(LEGS_URL + '/motor/status', timeout=1.5) as response:
+                data = json.loads(response.read().decode('utf-8'))
+        else:
+            data = fetch()
+        voltage = data.get('vbus_voltage')
+        voltage = float(voltage) if voltage is not None else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {'ok': False, 'error': 'legs Pi does not answer'}
+    if voltage is None:
+        return {'ok': False, 'error': 'no battery reading (ODrive not connected)'}
+    return {'ok': True, 'voltage': round(voltage, 1), 'percent': battery_percent(voltage)}
+
+
+def camera_frame(port=aisana_control.CONTROL_PORT):
+    """Newest JPEG from a running Aisana's camera, or None."""
+    reply = aisana_control.send({'action': 'frame'}, port=port, timeout=3.0)
+    if not reply or not reply.get('ok'):
+        return None
+    try:
+        return base64.b64decode(reply.get('jpeg') or '')
+    except (binascii.Error, ValueError):
+        return None
+
+
+PHOTO_DIR = os.environ.get('AISANA_PHOTO_DIR', os.path.join(os.path.expanduser('~'), 'robot_photos'))
+
+
+def take_photo(grab=camera_frame, folder=PHOTO_DIR, now=None):
+    """The display's PHOTO button: save Aisana's newest camera picture as
+    photo-YYYYmmdd-HHMMSS.jpg in `folder`."""
+    picture = grab()
+    if not picture:
+        return {'ok': False, 'error': 'no picture (is Aisana running?)'}
+    os.makedirs(folder, exist_ok=True)
+    stem = time.strftime('photo-%Y%m%d-%H%M%S', time.localtime(now))
+    name, n = stem + '.jpg', 2
+    while os.path.exists(os.path.join(folder, name)):          # two taps in one second
+        name, n = '{}-{}.jpg'.format(stem, n), n + 1
+    with open(os.path.join(folder, name), 'wb') as handle:
+        handle.write(picture)
+    return {'ok': True, 'file': name, 'bytes': len(picture)}
+
+
+def running():
+    return subprocess.call(['pgrep', '-f', PATTERN], stdout=subprocess.DEVNULL) == 0
+
+
+def log_tail(lines=40):
+    try:
+        with open(LOG, 'rb') as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell() - 60000))
+            text = handle.read().decode('utf-8', 'replace')
+    except OSError:
+        return []
+    return [line for line in text.splitlines() if not NOISE.search(line)][-lines:]
+
+
+def internet_device():
+    try:
+        route = subprocess.check_output(['ip', 'route', 'get', '8.8.8.8'], stderr=subprocess.DEVNULL)
+        device = re.search(r'\bdev (\S+)', route.decode())
+        return device.group(1) if device else None
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+_traffic = {}
+
+
+def traffic(name=None, now=None, read=None):
+    """Current speed (KB/s down/up) and the total since the interface came up (MB),
+    from /sys/class/net/<if>/statistics; the speed is between two panel refreshes."""
+    name = name or internet_device()
+    if not name:
+        return None
+    now = time.monotonic() if now is None else now
+
+    def counter(kind):
+        if read is not None:
+            return read(name, kind)
+        with open('/sys/class/net/{}/statistics/{}_bytes'.format(name, kind)) as handle:
+            return int(handle.read())
+    try:
+        rx, tx = counter('rx'), counter('tx')
+    except (IOError, OSError, ValueError):
+        return None
+    before = _traffic.get(name)
+    _traffic[name] = (now, rx, tx)
+    result = {'device': name, 'total_mb': round((rx + tx) / 1e6, 1)}
+    if before and now - before[0] > 0.5:
+        seconds = now - before[0]
+        result['down_kbs'] = round(max(0, rx - before[1]) / 1024.0 / seconds, 1)
+        result['up_kbs'] = round(max(0, tx - before[2]) / 1024.0 / seconds, 1)
+    return result
+
+
+def speed_test(timeout=20):
+    """Download 5 MB and upload 2 MB to Cloudflare's speed test, ping OpenAI (~7 MB of traffic)."""
+    import urllib.request
+    agent = {'User-Agent': 'Mozilla/5.0 (aisana-panel speed test)'}   # urllib's default agent gets 403
+    result = {'ok': True}
+    try:
+        started = time.monotonic()
+        urllib.request.urlopen('https://api.openai.com/v1/models', timeout=5).close()
+    except urllib.error.HTTPError:
+        pass                                          # 401 without a key: the server answered
+    except Exception as exc:
+        return {'ok': False, 'error': 'OpenAI не отвечает: {}'.format(exc)[:120]}
+    result['openai_ms'] = int((time.monotonic() - started) * 1000)
+    try:
+        started = time.monotonic()
+        down = urllib.request.Request('https://speed.cloudflare.com/__down?bytes=5000000', headers=agent)
+        with urllib.request.urlopen(down, timeout=timeout) as r:
+            size = len(r.read())
+        result['down_mbit'] = round(size * 8 / 1e6 / (time.monotonic() - started), 1)
+        data = b'0' * 2000000
+        started = time.monotonic()
+        request = urllib.request.Request('https://speed.cloudflare.com/__up', data=data, method='POST',
+                                         headers=agent)
+        urllib.request.urlopen(request, timeout=timeout).close()
+        result['up_mbit'] = round(len(data) * 8 / 1e6 / (time.monotonic() - started), 1)
+    except Exception as exc:
+        result.update(ok=False, error='тест скорости не прошёл: {}'.format(exc)[:120])
+    return result
+
+
+def internet():
+    name = internet_device()
+    if not name:
+        return 'нет'
+    if name == 'wlan0':
+        try:
+            out = subprocess.check_output(['nmcli', '-t', '-g', 'GENERAL.CONNECTION', 'device', 'show', 'wlan0'],
+                                          stderr=subprocess.DEVNULL).decode('utf-8', 'replace').strip()
+        except (OSError, subprocess.CalledProcessError):
+            out = ''
+        return 'Wi-Fi ' + out if out else 'Wi-Fi'
+    return {'eth1': 'роутер 4G Altel (USB)'}.get(name, name)
+
+
+SPEAKER_LABEL = os.environ.get('AISANA_SPEAKER_LABEL', 'USB Composite Device')   # Xiaomi
+SPEAKER_CONTROL = os.environ.get('AISANA_SPEAKER_CONTROL', 'PCM')
+VOLUME_FILE = os.environ.get('AISANA_VOLUME_FILE', os.path.expanduser('~/.local/share/aisana/volume.txt'))
+_last_card = {'card': None}
+
+
+def speaker_card(cards_text=None):
+    """ALSA card number of the speaker, found by its label every time (the number
+    changes after a USB reconnect). None if it is not plugged in: no fallback."""
+    if cards_text is None:
+        try:
+            with open('/proc/asound/cards') as handle:
+                cards_text = handle.read()
+        except (IOError, OSError):
+            return None
+    for line in cards_text.splitlines():
+        found = re.match(r'\s*(\d+)\s+\[[^\]]*\]:\s.*-\s*(.+?)\s*$', line)
+        if found and found.group(2) == SPEAKER_LABEL:
+            return int(found.group(1))
+    return None
+
+
+def parse_volume(amixer_text):
+    found = re.search(r'\[(\d+)%\]', amixer_text)
+    return int(found.group(1)) if found else None
+
+
+def get_volume(card):
+    try:
+        out = subprocess.check_output(['amixer', '-c', str(card), 'sget', SPEAKER_CONTROL],
+                                      stderr=subprocess.DEVNULL).decode('utf-8', 'replace')
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return parse_volume(out)
+
+
+def saved_volume():
+    try:
+        with open(VOLUME_FILE) as handle:
+            return max(0, min(100, int(handle.read().strip())))
+    except (IOError, OSError, ValueError):
+        return None
+
+
+def set_volume(value, remember=True):
+    card = speaker_card()
+    if card is None:
+        return {'ok': False, 'error': 'колонка Xiaomi не подключена'}
+    value = max(0, min(100, int(value)))
+    code = subprocess.call(['amixer', '-q', '-c', str(card), 'sset', SPEAKER_CONTROL,
+                            '{}%'.format(value), 'unmute'], stderr=subprocess.DEVNULL)
+    if code != 0:
+        return {'ok': False, 'error': 'amixer не смог поменять громкость'}
+    if remember:
+        try:
+            folder = os.path.dirname(VOLUME_FILE)
+            if folder and not os.path.isdir(folder):
+                os.makedirs(folder)
+            with open(VOLUME_FILE, 'w') as handle:
+                handle.write('{}\n'.format(value))
+        except (IOError, OSError):
+            pass
+    return {'ok': True, 'volume': get_volume(card)}
+
+
+def speaker_volume():
+    """Current volume in %, or None. After a replug (new card) the saved level is
+    put back, because the speaker comes back at its default level."""
+    card = speaker_card()
+    if card is None:
+        _last_card['card'] = None
+        return None
+    if card != _last_card['card']:
+        _last_card['card'] = card
+        level = saved_volume()
+        if level is not None:
+            set_volume(level, remember=False)
+    return get_volume(card)
+
+
+def status():
+    state = {'running': running(), 'internet': internet(), 'log': log_tail(),
+             'volume': speaker_volume(), 'usage': aisana_usage.summary(), 'traffic': traffic()}
+    if state['running']:
+        state['aisana'] = aisana_control.send({'action': 'status'}) or {'ok': False, 'error': 'starting'}
+    return state
+
+
+def start():
+    if running():
+        return {'ok': True, 'note': 'already running'}
+    with open(os.devnull, 'wb') as null:
+        subprocess.Popen(['setsid', 'nohup', './start.sh'], cwd=HERE, stdout=null, stderr=null,
+                         stdin=subprocess.DEVNULL)
+    return {'ok': True}
+
+
+_legs_job = {'proc': None}
+
+
+def legs_ready():
+    """The "Колёса" button: ./legs_ready.sh in the background (wait for the ODrive,
+    enable, calibrate only if needed); its lines go to the log on the page."""
+    proc = _legs_job['proc']
+    if proc is not None and proc.poll() is None:
+        return {'ok': True, 'note': 'already running'}
+    log = open(LOG, 'ab')
+    try:
+        _legs_job['proc'] = subprocess.Popen(['./legs_ready.sh'], cwd=HERE, stdout=log, stderr=log,
+                                             stdin=subprocess.DEVNULL)
+    finally:
+        log.close()
+    return {'ok': True}
+
+
+def stop():
+    subprocess.call(['./stop.sh'], cwd=HERE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {'ok': True}
+
+
+PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Айсана — пульт</title>
+<style>
+ body{font-family:-apple-system,system-ui,sans-serif;margin:0;background:#0f1115;color:#e8e8ea}
+ header{padding:16px 18px;font-size:20px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+ .dot{width:12px;height:12px;border-radius:50%;display:inline-block;margin-right:8px;background:#666}
+ .on{background:#3ecf6e}.off{background:#e5484d}
+ main{padding:0 14px 30px;max-width:640px;margin:auto}
+ .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}
+ .grid.h5{grid-template-columns:repeat(5,1fr);gap:6px}.grid.h5 button{font-size:13px;padding:10px 2px}
+ button{border:0;border-radius:14px;padding:16px;font-size:17px;font-weight:600;color:#fff;background:#2b2f3a}
+ button:active{transform:scale(.98)}
+ .stop{background:#e5484d;font-size:22px;grid-column:span 2;padding:22px}
+ .go{background:#3b82f6}.off-btn{background:#444a57}
+ .card{background:#181b22;border-radius:14px;padding:12px 14px;margin:10px 0}
+ .row{display:flex;justify-content:space-between;padding:4px 0;font-size:15px}
+ .row span:last-child{color:#b8bcc8;text-align:right;max-width:60%}
+ textarea{width:100%;box-sizing:border-box;border-radius:12px;border:0;padding:12px;font-size:16px;background:#232733;color:#fff;min-height:64px}
+ pre{white-space:pre-wrap;font-size:12px;line-height:1.35;color:#aeb3c2;max-height:340px;overflow:auto;margin:0}
+ #msg{min-height:20px;font-size:14px;color:#9aa0ad;margin:6px 2px}
+ .sel{outline:3px solid #3b82f6}
+ .arms,.armpos{display:grid;gap:8px;margin:8px 0}
+ .arms{grid-template-columns:repeat(3,1fr)}
+ .armpos{grid-template-columns:repeat(5,1fr)}
+ .arms button{padding:10px 4px;font-size:15px;background:#232733}
+ .arms button.sel{background:#3b3f4c;outline:2px solid #3b82f6}
+ .armpos button{padding:16px 2px;font-size:22px;font-weight:700;line-height:1.1}
+ .armpos small{display:block;font-size:11px;font-weight:500;color:#cfd3dc}
+</style></head><body>
+<header><span><span id="dot" class="dot"></span>Айсана</span><span id="net" style="font-size:13px;color:#9aa0ad"></span></header>
+<main>
+ <div class="grid">
+  <button class="stop" onclick="act('stop')">СТОП</button>
+  <button class="go" onclick="post('/api/start')">Включить</button>
+  <button class="off-btn" onclick="if(confirm('Выключить Айсану?'))post('/api/stop')">Выключить</button>
+  <button onclick="act('dance')">💃 Танцевать</button>
+  <button onclick="act('follow')">👣 Иди за мной</button>
+  <button onclick="if(confirm('Калибровка поворотов: Айсана сделает полный оборот и несколько поворотов (~1 мин). Вокруг должно быть свободно. Начать?'))act('calibrate_turns')">🧭 Калибровка поворотов</button>
+  <button class="off-btn" onclick="act('stop')">✋ Стой</button>
+  <button style="grid-column:span 2" onclick="if(confirm('Подготовить колёса? Если нужна калибровка, колёса немного покрутятся.'))post('/api/legs')">🛞 Колёса: включить / откалибровать</button>
+ </div>
+ <div class="card">
+  <div class="row"><span>🦾 Руки</span><span id="armmsg"></span></div>
+  <div class="arms">
+   <button data-side="both" class="side sel">Обе</button><button data-side="right" class="side">Правая</button><button data-side="left" class="side">Левая</button>
+  </div>
+  <div class="armpos">
+   <button onclick="armPos('0')">0<small>вниз</small></button><button onclick="armPos('1')">1</button><button onclick="armPos('2')">2</button><button onclick="armPos('3')">3</button><button onclick="armPos('4')">4<small>вверх</small></button>
+  </div>
+  <div class="grid"><button onclick="act('wave')">👋 Помахать</button><button onclick="act('wave_stop')">✋ Перестать махать</button></div>
+  <div class="grid"><button class="off-btn" style="grid-column:span 2" onclick="armPos('off')">💤 Кисть / захват выкл сразу</button></div>
+ </div>
+ <div class="card">
+  <textarea id="text" placeholder="Текст для Айсаны"></textarea>
+  <div class="grid"><button onclick="talk('say')">Сказать это</button><button onclick="talk('ask')">Спросить её</button></div>
+ </div>
+ <div class="card">
+  <a href="/mic" style="display:block;text-align:center;padding:14px;border-radius:14px;background:#7c3aed;color:#fff;font-weight:600;text-decoration:none;font-size:17px">🎤 Микрофон iPhone — отдельная страница /mic</a>
+  <div class="grid"><button id="quiet" style="grid-column:span 2" onclick="toggleQuiet()">🤫 Тихий режим: выкл</button></div>
+  <div class="grid"><button style="grid-column:span 2" onclick="speedTest()">📶 Тест скорости интернета</button></div>
+ </div>
+ <div class="card">
+  <div class="row"><span>🔊 Громкость колонки</span><b id="vv">—</b></div>
+  <input id="vol" type="range" min="0" max="100" step="5" style="width:100%"
+   oninput="vTouch=Date.now();$('vv').textContent=this.value+'%'"
+   onchange="setV(this.value)">
+  <div class="grid h5">
+   <button onclick="setV(30)">30</button><button onclick="setV(50)">50</button><button onclick="setV(70)">70</button><button onclick="setV(85)">85</button><button onclick="setV(100)">100</button>
+  </div>
+  <div class="grid"><button style="grid-column:span 2" onclick="testV()">Проверить звук</button></div>
+ </div>
+ <div class="card">
+  <div class="row"><span>😏 Юмор и сарказм</span><b id="hv">—</b></div>
+  <input id="humor" type="range" min="0" max="100" step="5" style="width:100%"
+   oninput="hTouch=Date.now();document.getElementById('hv').textContent=this.value+'%'"
+   onchange="hTouch=Date.now();post('/api/action',{action:'humor',text:this.value})">
+  <div class="grid h5">
+   <button onclick="setH(0)">0 серьёзно</button><button onclick="setH(25)">25</button><button onclick="setH(45)">45</button><button onclick="setH(75)">75</button><button onclick="setH(100)">100 TARS</button>
+  </div>
+ </div>
+ <div id="msg"></div>
+ <div class="card" id="state"></div>
+ <div class="card"><pre id="log"></pre></div>
+</main>
+<script>
+const msg=t=>{document.getElementById('msg').textContent=t};
+async function post(url,body){try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});const j=await r.json();msg(j.ok?'Готово':'Ошибка: '+(j.error||''));setTimeout(refresh,800)}catch(e){msg('Нет связи с роботом')}}
+const $=id=>document.getElementById(id);
+function act(a){post('/api/action',{action:a})}
+let armSide='both';
+document.querySelectorAll('.arms .side').forEach(b=>b.addEventListener('click',()=>{armSide=b.dataset.side;
+ document.querySelectorAll('.arms .side').forEach(x=>x.classList.toggle('sel',x===b))}));
+async function armPos(p){const names={both:'обе руки',right:'правая рука',left:'левая рука'};
+ try{const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'arm',text:armSide+' '+p})});
+  const j=await r.json();
+  $('armmsg').textContent=j.ok?(p==='off'?'выключено: '+names[armSide]:names[armSide]+' → '+p):'Ошибка: '+(j.error||'');
+  msg(j.ok?'Готово':'Ошибка: '+(j.error||''))}catch(e){msg('Нет связи с роботом')}}
+let hTouch=0,vTouch=0,quietOn=false;
+async function speedTest(){msg('Тест скорости… (~7 МБ трафика, до 30 с)');
+ try{const j=await (await fetch('/api/speedtest',{method:'POST'})).json();
+  msg(j.ok?'Скорость: ↓ '+j.down_mbit+' Мбит/с · ↑ '+j.up_mbit+' Мбит/с · до OpenAI '+j.openai_ms+' мс':'Ошибка: '+j.error)}catch(e){msg('Нет связи с роботом')}}
+function toggleQuiet(){const on=!quietOn;post('/api/action',{action:'quiet',text:on?'on':'off'});quietOn=on;showQuiet();
+ msg(on?'Тихий режим: USB-микрофон ничего не отправляет, слышно только кнопку iPhone':'USB-микрофон снова слушает')}
+function showQuiet(){$('quiet').textContent='🤫 Тихий режим: '+(quietOn?'ВКЛ (слышит только кнопку iPhone)':'выкл');$('quiet').className=quietOn?'sel':''}
+function money(u){if(!u)return '—';return '≈ $'+u.usd.toFixed(2)+' (ответы $'+u.replies_usd.toFixed(2)+' · слух $'+u.hearing_usd.toFixed(2)+', '+u.hearing_minutes+' мин · камера $'+u.camera_usd.toFixed(2)+')'}
+function usbLevel(a){if(a.muted)return 'не слушает, пока говорит';const v=a.usb_level||0;
+ const bars=v<300?'▁':v<800?'▂▃':v<2000?'▂▃▅':'▂▃▅▇';return bars+' '+(v<300?'тишина':v<800?'тихо':v<2000?'слышит голос':'громко')}
+async function setV(v){vTouch=Date.now();$('vol').value=v;$('vv').textContent=v+'%';
+ try{const j=await (await fetch('/api/volume',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({volume:Number(v)})})).json();
+  msg(j.ok?'Громкость '+j.volume+'%':'Ошибка: '+j.error)}catch(e){msg('Нет связи с роботом')}}
+function testV(){post('/api/action',{action:'say',text:'Testing my volume. Can you hear me well?'})}
+function setH(v){hTouch=Date.now();document.getElementById('humor').value=v;document.getElementById('hv').textContent=v+'%';post('/api/action',{action:'humor',text:String(v)})}
+function talk(a){const t=document.getElementById('text').value.trim();if(!t)return msg('Напиши текст');post('/api/action',{action:a,text:t})}
+const R=(k,v)=>`<div class="row"><span>${k}</span><span>${v}</span></div>`;
+async function refresh(){try{const s=await (await fetch('/api/status')).json();
+ document.getElementById('dot').className='dot '+(s.running?'on':'off');
+ document.getElementById('net').textContent='интернет: '+s.internet;
+ let h=R('Айсана',s.running?'работает':'выключена');
+ const a=s.aisana;
+ if(a&&a.ok){quietOn=!!a.quiet;showQuiet()}
+ h+=R('Расход сегодня',money(s.usage));
+ const t=s.traffic;if(t)h+=R('Интернет сейчас',(t.down_kbs!=null?'↓ '+t.down_kbs+' КБ/с · ↑ '+t.up_kbs+' КБ/с · ':'')+'всего '+t.total_mb+' МБ');
+ if(a&&a.ok){h+=R('OpenAI',a.connected?'на связи':'подключается')+R('Руки',a.arms)+R('Ноги',a.legs)+R('Камера',a.camera)+R('Лиц в памяти',a.faces)+R('Язык',a.language)+R('Юмор',a.humor+'%')+R('Микрофон',a.quiet&&a.mic==='USB'?'тихий режим (только iPhone)':(a.mic||'USB')+(a.mic==='USB'||!a.mic?' · '+usbLevel(a):''))+R('Сейчас',a.following?'идёт за человеком':a.moving?'двигается':(a.speaking?'говорит':'слушает'))}
+ else if(s.running){h+=R('Статус',(a&&a.error)||'запускается…')}
+ document.getElementById('state').innerHTML=h;
+ if(Date.now()-vTouch>5000){if(s.volume==null){$('vv').textContent='нет колонки'}else{$('vol').value=s.volume;$('vv').textContent=s.volume+'%'}}
+ if(a&&a.ok&&Date.now()-hTouch>5000){document.getElementById('humor').value=a.humor;document.getElementById('hv').textContent=a.humor+'%'}
+ const log=document.getElementById('log');const atEnd=log.scrollTop+log.clientHeight>=log.scrollHeight-20;
+ log.textContent=(s.log||[]).join('\n');if(atEnd)log.scrollTop=log.scrollHeight;
+}catch(e){document.getElementById('dot').className='dot off';msg('Нет связи с роботом')}}
+refresh();setInterval(refresh,3000);
+</script></body></html>"""
+
+
+MIC_PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#0f1115">
+<title>Айсана — микрофон</title>
+<style>
+ html,body{height:100%;margin:0;background:#0f1115;color:#e8e8ea;font-family:-apple-system,system-ui,sans-serif;
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+ body{display:flex;flex-direction:column;align-items:center;justify-content:space-between;
+  padding:max(14px,env(safe-area-inset-top)) 16px max(18px,env(safe-area-inset-bottom));box-sizing:border-box}
+ header{width:100%;display:flex;justify-content:space-between;align-items:center;font-size:15px;color:#9aa0ad}
+ .dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:7px;background:#666;vertical-align:middle}
+ .on{background:#3ecf6e}.off{background:#e5484d}
+ #stop{border:0;border-radius:12px;background:#e5484d;color:#fff;font-weight:700;font-size:16px;padding:10px 16px}
+ #big{position:relative;width:min(78vw,56vh);height:min(78vw,56vh);border-radius:50%;border:0;color:#fff;
+  font-size:min(6.4vw,4.6vh);font-weight:700;line-height:1.25;padding:0 9%;background:#2b2f3a;
+  touch-action:none;transition:background .15s,transform .08s;box-shadow:0 0 0 0 rgba(62,207,110,.5)}
+ #big .icon{display:block;font-size:min(22vw,16vh);line-height:1;margin-bottom:10px}
+ #big.ready{background:#7c3aed}#big.talk{background:#3ecf6e;color:#062;transform:scale(.97)}
+ #big.live{background:#3b82f6}
+ #state{font-size:19px;font-weight:600;min-height:26px;text-align:center}
+ #hint{font-size:14px;color:#9aa0ad;min-height:38px;text-align:center;max-width:420px}
+ .modes{display:flex;gap:8px;width:100%;max-width:460px}
+ .modes button{flex:1;border:0;border-radius:12px;padding:13px 4px;font-size:14px;font-weight:600;color:#fff;background:#232733}
+ .modes button.sel{background:#3b3f4c;outline:2px solid #7c3aed}
+ .low{display:flex;gap:8px;width:100%;max-width:460px}
+ .low button,.low a{flex:1;border:0;border-radius:12px;padding:12px 4px;font-size:14px;font-weight:600;color:#cfd3dc;
+  background:#181b22;text-align:center;text-decoration:none}
+</style></head><body>
+<header><span><span id="dot" class="dot"></span><span id="robot">Айсана…</span></span><button id="stop">СТОП</button></header>
+<div id="state">Микрофон выключен</div>
+<button id="big"><span class="icon">🎤</span><span id="label">Нажми, чтобы включить микрофон</span></button>
+<div id="hint">Говори прямо в телефон, Айсана слышит тебя вместо своего микрофона.</div>
+<div class="modes">
+ <button data-mode="hold">Зажать</button><button data-mode="tap">Нажать / ещё раз</button><button data-mode="live">Всё время</button>
+</div>
+<div class="low"><button id="offbtn">Выключить микрофон</button><a href="/">Пульт</a></div>
+<script>
+const $=id=>document.getElementById(id);
+let mode='hold';try{mode=localStorage.getItem('aisanaMicMode')||'hold'}catch(e){}
+let mic=null,pressed=false,sending=false,lastSent=0,parts=[],wake=null,starting=false,robotSpeaking=false;
+function show(){
+ document.querySelectorAll('.modes button').forEach(b=>b.className=b.dataset.mode===mode?'sel':'');
+ const big=$('big');let cls='',label,state;
+ if(!mic){label='Нажми, чтобы включить микрофон';state='Микрофон выключен'}
+ else if(mode==='live'){cls='live';label='Слушаю всё время';state='Говори: «Айсана, …»'}
+ else if(pressed){cls='talk';label=mode==='hold'?'Говори… отпусти, когда закончишь':'Говори… нажми ещё раз, чтобы отправить';state='Айсана слушает тебя'}
+ else{cls='ready';label=mode==='hold'?'Зажми и говори':'Нажми и говори';state=robotSpeaking?'Айсана говорит…':'Готов'}
+ big.className=cls;$('label').textContent=label;$('state').textContent=state}
+function hint(t){$('hint').textContent=t}
+async function micOn(){
+ if(mic||starting)return !!mic;
+ if(!window.isSecureContext||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+  hint('Микрофон работает только по https-ссылке: https://mmae603-desktop.tail16cc45.ts.net/mic');return false}
+ starting=true;let stream;
+ try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}})}
+ catch(e){starting=false;hint('Нет доступа к микрофону: разреши его в Safari (аА → Настройки сайта → Микрофон)');return false}
+ const AC=window.AudioContext||window.webkitAudioContext;const ctx=new AC();
+ try{await ctx.resume()}catch(e){}
+ const src=ctx.createMediaStreamSource(stream);const node=ctx.createScriptProcessor(4096,1,1);
+ const ratio=ctx.sampleRate/24000;let prev=0,pos=0;
+ node.onaudioprocess=e=>{
+  const inp=e.inputBuffer.getChannelData(0),n=inp.length;
+  let peak=0;for(let i=0;i<n;i+=16){const v=Math.abs(inp[i]);if(v>peak)peak=v}
+  const sending=mic&&(mode==='live'||pressed);
+  $('big').style.boxShadow='0 0 0 '+(sending?Math.min(40,Math.round(peak*90)):0)+'px rgba(62,207,110,.35)';
+  if(!sending){prev=inp[n-1];pos=0;return}
+  const out=new Int16Array(Math.ceil((n-pos)/ratio)+1);let k=0,t=pos;
+  while(t<n){const i=Math.floor(t),f=t-i,a=i===0?prev:inp[i-1],b=inp[i];
+   let v=a+(b-a)*f;v=v<-1?-1:v>1?1:v;out[k++]=v*32767;t+=ratio}
+  pos=t-n;prev=inp[n-1];parts.push(out.subarray(0,k))};
+ src.connect(node);node.connect(ctx.destination);
+ mic={stream,ctx,node,src};pressed=false;starting=false;
+ try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen')}catch(e){}
+ hint(mode==='live'?'Телефон слушает всё время: обращайся «Айсана, …». Не блокируй экран.'
+  :'Имя «Айсана» говорить не нужно. Не блокируй экран, пока пользуешься.');
+ show();return true}
+function micOff(note){if(!mic)return;try{mic.node.disconnect();mic.src.disconnect();mic.stream.getTracks().forEach(t=>t.stop());mic.ctx.close()}catch(e){}
+ mic=null;pressed=false;parts=[];try{if(wake)wake.release()}catch(e){}wake=null;$('big').style.boxShadow='none';show();if(note)hint(note)}
+function b64(bytes){let s='';for(let i=0;i<bytes.length;i+=0x8000)s+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));return btoa(s)}
+async function micSend(){
+ if(!mic||sending)return;
+ let len=0;parts.forEach(p=>len+=p.length);
+ if(!len&&Date.now()-lastSent<700&&!(mic.wasPressed&&!pressed))return;   // heartbeat keeps the USB mic muted
+ const pcm=new Int16Array(len);let o=0;parts.forEach(p=>{pcm.set(p,o);o+=p.length});parts=[];
+ const body={mode:mode==='live'?'live':'ptt',pressed:pressed,pcm:b64(new Uint8Array(pcm.buffer))};mic.wasPressed=pressed;
+ sending=true;lastSent=Date.now();
+ try{const r=await fetch('/api/mic',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json();if(!j.ok)hint('Микрофон: '+(j.error||'ошибка'))}catch(e){hint('Нет связи с роботом')}
+ sending=false}
+setInterval(micSend,100);
+function press(on){if(pressed===on)return;pressed=on;show();if(!on)micSend()}
+async function down(e){e.preventDefault();
+ if(!mic){await micOn();return}             // the first tap only switches the microphone on
+ if(mode==='hold')press(true);else if(mode==='tap')press(!pressed)}
+function up(e){e.preventDefault();if(mode==='hold'&&pressed)press(false)}
+const big=$('big');
+['touchstart','mousedown'].forEach(n=>big.addEventListener(n,down,{passive:false}));
+['touchend','touchcancel','mouseup','mouseleave'].forEach(n=>big.addEventListener(n,up,{passive:false}));
+document.querySelectorAll('.modes button').forEach(b=>b.addEventListener('click',()=>{
+ if(pressed)press(false);mode=b.dataset.mode;try{localStorage.setItem('aisanaMicMode',mode)}catch(e){}
+ if(mic)hint(mode==='live'?'Телефон слушает всё время: обращайся «Айсана, …».':mode==='hold'?'Зажми кнопку и говори.':'Нажми один раз — говори — нажми ещё раз.');show()}));
+$('offbtn').addEventListener('click',()=>micOff('Микрофон телефона выключен, Айсана снова слушает свой USB-микрофон.'));
+$('stop').addEventListener('click',async()=>{try{await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'stop'})});hint('СТОП отправлен')}catch(e){hint('Нет связи с роботом')}});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&mic)micOff('Экран был выключен: микрофон остановлен. Нажми кнопку, чтобы включить снова.')});
+async function refresh(){try{const s=await (await fetch('/api/status')).json();const a=s.aisana||{};
+ $('dot').className='dot '+(s.running&&a.ok?'on':'off');
+ robotSpeaking=!!a.speaking;
+ $('robot').textContent=!s.running?'Айсана выключена':!a.ok?'Айсана запускается…':(a.speaking?'Айсана говорит':'Айсана слушает');
+ show()}catch(e){$('dot').className='dot off';$('robot').textContent='нет связи'}}
+show();refresh();setInterval(refresh,2000);
+</script></body></html>"""
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def reply(self, code, body, kind='application/json; charset=utf-8', any_origin=False):
+        data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode('utf-8')
+        self.send_response(code)
+        self.send_header('Content-Type', kind)
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'no-store')
+        if any_origin:
+            # Read-only data for the robot's display page (a local file on the Pi).
+            self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path in ('/', '/index.html'):
+            return self.reply(200, PAGE.encode('utf-8'), 'text/html; charset=utf-8')
+        if self.path.split('?')[0] in ('/mic', '/mic/'):
+            return self.reply(200, MIC_PAGE.encode('utf-8'), 'text/html; charset=utf-8')
+        if self.path == '/api/status':
+            return self.reply(200, status())
+        if self.path.split('?')[0] == '/api/face':
+            return self.reply(200, face(), any_origin=True)
+        if self.path.split('?')[0] == '/api/battery':
+            return self.reply(200, battery(), any_origin=True)
+        if self.path.split('?')[0] in ('/camera.jpg', '/camera.mjpg') and self.via_public_link():
+            # The live camera is for the robot's display and the team (robot Wi-Fi,
+            # robot LAN, Tailscale), not for anyone who has the public Funnel link.
+            return self.reply(403, {'ok': False, 'error': 'camera only on the robot network or Tailscale'})
+        if self.path.split('?')[0] == '/camera.jpg':
+            picture = camera_frame()
+            if picture is None:
+                return self.reply(503, {'ok': False, 'error': 'no picture'})
+            return self.reply(200, picture, 'image/jpeg')
+        if self.path.split('?')[0] == '/camera.mjpg':
+            return self.camera_stream()
+        self.reply(404, {'ok': False, 'error': 'not found'})
+
+    def via_public_link(self):
+        """Tailscale Funnel (the public https link) proxies from 127.0.0.1; the Pi
+        (10.42.0.x), the robot Wi-Fi (192.168.8.x) and Tailscale (100.x) connect directly."""
+        return self.client_address[0] in ('127.0.0.1', '::1') or bool(self.headers.get('Tailscale-Funnel-Request'))
+
+    def camera_stream(self):
+        """Live view for the robot's display: Aisana's own camera frames (she keeps
+        the camera; this only reads her newest picture), ~8 frames/s."""
+        self.send_response(200)
+        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        try:
+            while True:
+                picture = camera_frame()
+                if picture is None:
+                    time.sleep(1.0)
+                    continue
+                self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' +
+                                 str(len(picture)).encode() + b'\r\n\r\n' + picture + b'\r\n')
+                time.sleep(CAMERA_INTERVAL)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def do_POST(self):
+        limit = aisana_control.MAX_LINE if self.path == '/api/mic' else 8192
+        length = min(int(self.headers.get('Content-Length') or 0), limit)
+        try:
+            body = json.loads(self.rfile.read(length).decode('utf-8') or '{}')
+        except ValueError:
+            return self.reply(400, {'ok': False, 'error': 'bad json'})
+        if self.path == '/api/photo':
+            if self.via_public_link():
+                return self.reply(403, {'ok': False, 'error': 'camera only on the robot network or Tailscale'},
+                                  any_origin=True)
+            result = take_photo()
+            return self.reply(200 if result['ok'] else 503, result, any_origin=True)
+        if self.path == '/api/start':
+            return self.reply(200, start())
+        if self.path == '/api/stop':
+            return self.reply(200, stop())
+        if self.path == '/api/speedtest':
+            if self.via_public_link():          # ~7 MB of the SIM's traffic: only for the team
+                return self.reply(403, {'ok': False, 'error': 'only on the robot network or Tailscale'})
+            return self.reply(200, speed_test())
+        if self.path == '/api/legs':
+            return self.reply(200, legs_ready())
+        if self.path == '/api/volume':
+            try:
+                return self.reply(200, set_volume(int(body.get('volume'))))
+            except (TypeError, ValueError):
+                return self.reply(400, {'ok': False, 'error': 'volume must be 0-100'})
+        if self.path == '/api/mic':
+            result = aisana_control.send({'action': 'mic', 'mode': body.get('mode'),
+                                          'pressed': bool(body.get('pressed')), 'pcm': body.get('pcm', '')})
+            return self.reply(200, result or {'ok': False, 'error': 'Айсана выключена'})
+        if self.path == '/api/action':
+            action = body.get('action')
+            if action not in aisana_control.ACTIONS or action in ('status', 'mic', 'frame', 'face'):
+                return self.reply(400, {'ok': False, 'error': 'unknown action'})
+            if not running():
+                return self.reply(200, {'ok': False, 'error': 'Айсана выключена'})
+            result = aisana_control.send({'action': action, 'text': body.get('text', '')})
+            return self.reply(200, result or {'ok': False, 'error': 'Айсана не отвечает'})
+        self.reply(404, {'ok': False, 'error': 'not found'})
+
+
+class Server(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def main():
+    server = Server(('0.0.0.0', PORT), Handler)
+    print('Aisana panel: http://<jetson>:{}  (Ctrl+C to stop)'.format(PORT))
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

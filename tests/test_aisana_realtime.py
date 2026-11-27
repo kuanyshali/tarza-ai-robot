@@ -1,0 +1,1768 @@
+"""Offline tests for realtime wake gating and tools; no network or audio."""
+import base64
+import json
+import time
+import unittest
+
+import os
+import tempfile
+import aisana_realtime as rt
+
+rt.HUMOR_FILE = os.path.join(tempfile.mkdtemp(), 'humor.txt')   # never touch the real one
+rt.QUIET_FILE = os.path.join(tempfile.mkdtemp(), 'quiet.txt')
+import aisana_usage
+aisana_usage.USAGE_DIR = tempfile.mkdtemp()
+
+# Most tests were written for 'answer in the user's language'; English-only has its own tests.
+rt.FIXED_LANGUAGE = None
+
+
+class FakeArm(object):
+    def __init__(self):
+        self.calls = []
+        self.stopped = 0
+
+    def execute(self, action, arm='both', position=None, joint='whole',
+                direction=None, degrees=None):
+        self.calls.append((action, arm, position, joint, direction, degrees))
+        return 'Sent to the Arduino.'
+
+    def execute_many(self, intents, verify=True):
+        self.calls.extend((i['action'], i['arm'], i['position'], i['joint'], i['direction'], i['degrees'])
+                          for i in intents)
+        self.verified = verify
+        return 'Sent to the Arduino.'
+
+    def watch(self, intents, report, first=0.8, second=2.5):
+        self.watched = intents
+        self.report = report
+
+    def emergency_stop(self):
+        self.stopped += 1
+
+    def close(self):
+        pass
+
+
+def make_session():
+    session = rt.RealtimeAisana()
+    session.history = None              # never write the real ~/.local history in tests
+    sent = []
+    session.send = sent.append
+    return session, sent
+
+
+def types(sent):
+    return [message['type'] for message in sent]
+
+
+class WakePhraseTests(unittest.TestCase):
+    def test_wake_name_variants(self):
+        for text in ('Айсана, что ты видишь?', 'эйсана привет', 'Aisana, hello',
+                     'Окей, Айсана, какая погода?', 'آيسانا، إزيك؟'):
+            with self.subTest(text=text):
+                self.assertTrue(rt.has_wake_name(text))
+        # From the Jetson log: the name came at the end of the phrase.
+        self.assertTrue(rt.has_wake_name('Позицию ноль верни. Айсана, позиция ноль.'))
+        self.assertTrue(rt.has_wake_name('подними руки, Aisana'))
+        for text in ('что ты видишь?', 'я сказал айсане привет', 'поговорим про айсану',
+                     'hello there', ''):
+            with self.subTest(text=text):
+                self.assertFalse(rt.has_wake_name(text))
+
+    def test_stt_prompt_echo_is_not_a_request(self):
+        self.assertTrue(rt.is_prompt_echo('Айсана, Айсана, Айсана, Эйсана, آيسانا.'))
+        self.assertFalse(rt.is_prompt_echo('Айсана, правая рука, позиция один.'))
+        self.assertFalse(rt.is_prompt_echo('Айсана, привет'))
+
+    def test_stop_and_sleep_only_for_short_phrases(self):
+        self.assertTrue(rt.is_stop_phrase('Айсана, стоп!'))
+        self.assertTrue(rt.is_stop_phrase('stop'))
+        self.assertFalse(rt.is_stop_phrase('расскажи, почему автобус не сделал стоп у университета'))
+        self.assertTrue(rt.is_sleep_phrase('Айсана, отбой'))
+
+
+class ReconnectTests(unittest.TestCase):
+    def test_dropped_connection_reconnects_and_keeps_devices(self):
+        runs, sleeps = [], []
+        arm, legs = FakeArm(), FakeLegs()
+        original = (rt.connect_from_environment, rt.aisana_legs.connect_from_environment,
+                    rt.RealtimeAisana.run, rt.reconnect_pause, rt.KEY, rt.websocket)
+
+        def fake_run(session, manage_devices=True):
+            runs.append((session.arm, session.legs, manage_devices))
+            if len(runs) == 1:
+                raise IOError('The write operation timed out')
+            raise KeyboardInterrupt
+
+        try:
+            rt.connect_from_environment = lambda: arm
+            rt.aisana_legs.connect_from_environment = lambda: legs
+            rt.RealtimeAisana.run = fake_run
+            rt.reconnect_pause = sleeps.append
+            rt.KEY, rt.websocket = 'key', object()
+            with self.assertRaises(KeyboardInterrupt):
+                rt.main()
+        finally:
+            (rt.connect_from_environment, rt.aisana_legs.connect_from_environment,
+             rt.RealtimeAisana.run, rt.reconnect_pause, rt.KEY, rt.websocket) = original
+        self.assertEqual(len(runs), 2)                      # reconnected once
+        self.assertTrue(all(r == (arm, legs, False) for r in runs))   # same devices
+        self.assertEqual(len(sleeps), 1)
+        self.assertEqual(legs.stops, 1)                     # wheels stopped on exit
+
+
+class LanguageAndSilenceTests(unittest.TestCase):
+    def test_reply_language_follows_user_words(self):
+        self.assertEqual(rt.language_of('Aisana, go forward for one second.'), 'English')
+        self.assertEqual(rt.language_of('Айсана, проедь вперёд'), 'Russian')
+        self.assertEqual(rt.language_of('Ана нәрсе автомат'), 'Kazakh')
+        self.assertEqual(rt.language_of('آيسانا، روحي قدام'), 'Egyptian Arabic')
+        session, sent = make_session()
+        session.legs = FakeLegs()
+        say(session, 'g1', 'Aisana, go forward for one second.')
+        time.sleep(0.2)
+        self.assertIn('"Driving forward."', sent[-1]['response']['instructions'])
+
+    def test_stay_silent_for_chatter(self):
+        session, sent = make_session()
+        say(session, 's1', 'Инерция же.')
+        session.handle({'type': 'response.function_call_arguments.done', 'call_id': 'c2',
+                        'name': 'stay_silent', 'arguments': '{}'})
+        self.assertEqual(sent[-1]['item']['output'], 'silent')
+        self.assertNotEqual(sent[-1]['type'], 'response.create')
+
+    def test_cannot_stay_silent_when_called_by_name(self):
+        session, sent = make_session()
+        say(session, 's2', 'Айсана, привет')
+        session.handle({'type': 'response.function_call_arguments.done', 'call_id': 'c3',
+                        'name': 'stay_silent', 'arguments': '{}'})
+        self.assertEqual(sent[-1]['type'], 'response.create')
+
+    def test_shout_request_with_command(self):
+        # Jetson log: "Вперёд 2 секунды и крикни «We»" only got "Еду вперёд."
+        self.assertEqual(rt.shout_request('Вперёд 2 секунды и крикни «We».'), 'We')
+        text = rt.confirm_instruction('Еду вперёд.', 'Вперёд 2 секунды и крикни «We».')
+        self.assertIn('"Еду вперёд"', text)
+        self.assertIn('"We!"', text)
+        self.assertIsNone(rt.shout_request('Айсана, вперёд'))
+        self.assertTrue(rt.has_wake_name('Асама, разведись.'))
+
+    def test_tools_include_stay_silent(self):
+        self.assertIn('stay_silent', [tool['name'] for tool in rt.tool_definitions()])
+
+
+class FakeShouts(object):
+    def __init__(self, pcm=b'\x01\x00' * 100):
+        self.pcm = pcm
+        self.played = []
+        self.stopped = 0
+
+    def play_for(self, seconds):
+        if not self.pcm:
+            return False
+        self.played.append(seconds)
+        return True
+
+    def stop(self):
+        self.stopped += 1
+
+
+class MotionAndChatterTests(unittest.TestCase):
+    """From the Jetson log of Nov 19, evening."""
+
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_spin_shouts_the_whole_time_and_says_nothing(self):
+        session, sent = make_session()
+        session.legs, session.shouts = FakeLegs(), FakeShouts()
+        say(session, 'm1', 'Айсана, развернись')
+        time.sleep(0.2)
+        self.assertEqual(session.shouts.played, [2.0])        # FakeLegs drives 2.0 s
+        self.assertNotIn('response.create', [m['type'] for m in sent])
+        self.assertTrue(session.motion_active())
+
+    def test_own_shouts_ignored_but_stop_works_while_moving(self):
+        session, sent = make_session()
+        session.legs, session.shouts, session.arm = FakeLegs(), FakeShouts(), FakeArm()
+        session.motion_until = time.monotonic() + 5
+        say(session, 'm2', 'Уииии вжух')
+        self.assertEqual(session.legs.stops, 0)
+        self.assertEqual(sent[-1], {'type': 'conversation.item.delete', 'item_id': 'm2'})
+        say(session, 'm3', 'стоп')
+        self.assertEqual(session.legs.stops, 1)
+        self.assertGreaterEqual(session.shouts.stopped, 1)
+        self.assertFalse(session.motion_active())
+
+    def test_thinking_aloud_is_held_and_dropped_for_commands(self):
+        # "Окей, дай мне мгновенье подумать." was played before "Уииии!".
+        session, sent = make_session()
+        session.legs, session.shouts = FakeLegs(), FakeShouts()
+        session.dialog_until = time.monotonic() + 20
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'h1'})
+        session.handle({'type': 'response.created', 'response': {'id': 'r1'}})
+        session.handle({'type': 'response.output_audio.delta', 'response_id': 'r1',
+                        'delta': base64.b64encode(b'\x00\x01' * 50).decode()})
+        self.assertTrue(session.audio_queue.empty())          # held, not played
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'h1', 'transcript': 'развернись'})
+        self.assertTrue(session.audio_queue.empty())          # dropped: it was a command
+
+    def test_answer_to_a_question_is_released(self):
+        session, sent = make_session()
+        session.dialog_until = time.monotonic() + 20
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'h2'})
+        session.handle({'type': 'response.created', 'response': {'id': 'r2'}})
+        session.handle({'type': 'response.output_audio.delta', 'response_id': 'r2',
+                        'delta': base64.b64encode(b'\x00\x01' * 50).decode()})
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'h2', 'transcript': 'а сколько тебе лет?'})
+        self.assertFalse(session.audio_queue.empty())
+
+    def test_shouts_recorded_silently_at_start(self):
+        session, sent = make_session()
+        session.handle({'type': 'session.updated'})
+        request = sent[-1]['response']
+        self.assertEqual((request['conversation'], request['metadata']['purpose']), ('none', 'shouts'))
+        session.handle({'type': 'response.created', 'response': {'id': 'o1', 'metadata': {'purpose': 'shouts'}}})
+        session.handle({'type': 'response.output_audio.delta', 'response_id': 'o1',
+                        'delta': base64.b64encode(b'\x00\x01' * rt.RATE).decode()})
+        self.assertTrue(session.audio_queue.empty())          # never played
+        self.assertFalse(session.responding)
+        session.handle({'type': 'response.done', 'response': {'id': 'o1'}})
+        self.assertEqual(len(session.shouts.pcm), 2 * rt.RATE)
+
+    def test_obstacle_phrase_is_exact(self):
+        # "Я остановился из-за препятствия в двух метрах" for 29 cm.
+        session, sent = make_session()
+        session.user_language = 'Russian'
+        session.report_legs_problem('obstacle ahead: 29 cm away')
+        time.sleep(1.0)
+        self.assertIn('Стоп! Препятствие в 29 сантиметрах.', sent[-1]['response']['instructions'])
+        session.expect_tool_response = False          # that reply has been played
+        session.report_legs_problem('obstacle ahead: 2 cm away')
+        time.sleep(1.0)
+        self.assertIn('Сработал датчик', sent[-1]['response']['instructions'])
+
+    def test_repeat_last_drive_n_times(self):
+        session, sent = make_session()
+        session.legs, session.shouts = FakeLegs(), FakeShouts()
+        session.last_drive = {'action': 'spin_right', 'seconds': None, 'meters': None, 'degrees': 180}
+        session.last_drive_at = time.monotonic()
+        say(session, 'p1', 'Айсана, повтори десять раз')
+        time.sleep(0.2)
+        self.assertEqual(session.legs.intents[0]['degrees'], 1800)
+
+    def test_say_ka_is_not_a_shout(self):
+        self.assertIsNone(rt.shout_request('Скажи-ка, покрутись 10 раз.'))
+        self.assertEqual(rt.shout_request('крикни «Ура»'), 'Ура')
+
+
+class HumorAndCameraTests(unittest.TestCase):
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_tars_style_humor_setting(self):
+        text = rt.humor_instructions(75)
+        self.assertIn('красавчик', text)
+        self.assertIn('never joke about', text.replace("Never", 'never'))
+        self.assertIn('NEVER mention the humor level', text)   # no "юмор 100%" in every answer
+        self.assertIn('no jokes', rt.humor_instructions(10))
+
+    def test_iphone_push_to_talk(self):
+        session, sent = make_session()
+        session.responding = True                             # she is talking
+        self.assertEqual(session.phone_audio('ptt', True, b'\x01\x00' * 2400), {'ok': True})
+        self.assertTrue(session.phone_active())                # USB mic is muted now
+        self.assertTrue(session.dialog_active())               # no "Aisana" needed
+        self.assertIn('response.cancel', types(sent))          # pressing interrupts her
+        appended = [m for m in sent if m['type'] == 'input_audio_buffer.append']
+        self.assertEqual(len(appended), 1)                     # sent despite her talking
+        del sent[:]
+        session.phone_audio('ptt', False, b'')                 # released
+        silence = base64.b64decode([m for m in sent if m['type'] == 'input_audio_buffer.append'][0]['audio'])
+        self.assertGreater(len(silence), rt.RATE * 2 * rt.SILENCE_MS // 1000)   # ends the turn now
+        self.assertFalse(any(silence))
+        del sent[:]
+        session.phone_audio('ptt', False, b'')                 # heartbeat: nothing sent
+        self.assertEqual(sent, [])
+
+    def test_iphone_always_on_keeps_echo_guard(self):
+        session, sent = make_session()
+        session.phone_audio('live', False, b'\x01\x00' * 100)
+        self.assertEqual(types(sent), ['input_audio_buffer.append'])
+        self.assertFalse(session.dialog_active())              # still needs her name
+        session.playing = True
+        session.phone_audio('live', False, b'\x01\x00' * 100)
+        self.assertEqual(types(sent), ['input_audio_buffer.append'])   # her own voice is not sent
+        self.assertFalse(session.phone_audio('karaoke', False, b'')['ok'])
+        self.assertFalse(session.phone_audio('live', False, b'\x01')['ok'])
+
+    def test_panel_shows_usb_mic_level(self):
+        session, sent = make_session()
+        session.note_usb_level(1500)
+        session.usb_level_at = time.monotonic() - 2           # a second has passed
+        session.note_usb_level(100)
+        self.assertEqual(session.panel_status()['usb_level'], 1500)
+
+    def test_usb_mic_back_when_phone_stops(self):
+        session, sent = make_session()
+        session.phone_audio('live', False, b'')
+        self.assertTrue(session.phone_active())
+        session.phone_until = time.monotonic() - 0.1          # no packets for PHONE_TIMEOUT
+        self.assertFalse(session.phone_active())
+
+    def test_background_talk_does_not_keep_the_dialogue_open(self):
+        # Jetson log, Nov 23: in a noisy room every remark started a reply and
+        # pushed the follow-up window further, muting the mic again and again.
+        session, sent = make_session()
+        session.dialog_until = time.monotonic() + 3
+        before = session.dialog_until
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'b1'})
+        self.assertIn('response.create', types(sent))           # still answered fast
+        self.assertEqual(session.dialog_until, before)           # but the window did not grow
+
+    def test_held_reply_does_not_mute_the_mic(self):
+        session, sent = make_session()
+        session.dialog_until = time.monotonic() + 5
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'b2'})
+        session.handle({'type': 'response.created', 'response': {'id': 'r1'}})
+        self.assertTrue(session.holding())
+        self.assertFalse(session.echo_guarded())                 # nothing is audible yet
+        session.hold_item = None
+        self.assertTrue(session.echo_guarded())                  # an ordinary reply mutes it
+
+    def test_weather_with_her_name_always_uses_the_tool(self):
+        session, sent = make_session()
+        say(session, 'w1', "Aisana, what's the weather in Astana?")
+        deadline = time.time() + 2
+        forced = []
+        while time.time() < deadline and not forced:
+            forced = [m for m in sent if m['type'] == 'response.create'
+                      and (m.get('response') or {}).get('tool_choice', {}).get('name') == 'get_weather']
+            time.sleep(0.02)
+        self.assertTrue(forced)
+        session2, sent2 = make_session()
+        session2.dialog_until = time.monotonic() + 5
+        say(session2, 'w2', 'Погода сегодня ужасная, конечно.')    # a remark, not a question
+        time.sleep(0.1)
+        self.assertFalse([m for m in sent2 if (m.get('response') or {}).get('tool_choice', {}) == {'type': 'function', 'name': 'get_weather'}])
+
+    def test_panel_sets_humor_silently_and_keeps_it(self):
+        session, sent = make_session()
+        result = session.panel_action('humor', '80')
+        self.assertEqual(result, {'ok': True, 'humor': 80})
+        kinds = types(sent)
+        self.assertIn('session.update', kinds)
+        self.assertNotIn('response.create', kinds)           # no spoken confirmation
+        self.assertEqual(rt.load_humor(), 80)                # next start uses it
+        self.assertEqual(session.panel_action('humor', '250')['humor'], 100)
+        self.assertFalse(session.panel_action('humor', 'lots')['ok'])
+
+    def test_voice_command_changes_humor(self):
+        session, sent = make_session()
+        say(session, 'u1', 'Айсана, юмор 60 процентов')
+        self.assertEqual(session.humor, 60)
+        update = [m for m in sent if m['type'] == 'session.update'][0]
+        self.assertIn('humor level is 60%', update['session']['instructions'])
+        self.assertEqual(sent[-1]['type'], 'response.create')
+
+    def test_who_is_in_front_answers_in_first_person_at_once(self):
+        # Jetson log: "Секунду, я посмотрю..." then "На снимке изображён человек..."
+        session, sent = make_session()
+        session.inspect_camera = lambda question, detail=None: 'Вижу человека в тёмной футболке.'
+        say(session, 'c1', 'Айсана, кто перед тобой?')
+        time.sleep(0.2)
+        self.assertIn('own eyes', sent[-2]['item']['content'][0]['text'])
+        self.assertIn('FIRST PERSON', sent[-1]['response']['instructions'])
+        self.assertIn('Never mention a photo', sent[-1]['response']['instructions'])
+        # The model's own camera call for the same words stays silent (no double answer).
+        self.assertTrue(session.run_tool('inspect_camera', {'question': 'кто?'}).startswith(rt.SILENT_RESULT))
+
+    def test_late_model_reply_to_camera_question_is_cut(self):
+        # Jetson log: the reply started at commit arrived after the transcript and
+        # only "Сейчас быстро проверю..." was played; the real answer was lost.
+        session, sent = make_session()
+        session.inspect_camera = lambda question, detail=None: 'Вижу человека.'
+        session.last_item = 'c2'
+        say(session, 'c2', 'Айсана, кто перед тобой?')
+        session.handle({'type': 'response.created', 'response': {'id': 'r1'}})
+        self.assertIn({'type': 'response.cancel'}, sent)
+        session.handle({'type': 'response.output_audio.delta', 'response_id': 'r1', 'delta': 'AAAA'})
+        self.assertTrue(session.audio_queue.empty())
+        session.handle({'type': 'response.done', 'response': {'id': 'r1'}})
+        time.sleep(0.3)
+        own = [m for m in sent if m['type'] == 'response.create' and 'FIRST PERSON' in str(m)]
+        self.assertEqual(len(own), 1)
+        # Our own answer is played, not cut.
+        session.handle({'type': 'response.created', 'response': {'id': 'r2', 'metadata': rt.OWN}})
+        self.assertFalse(session.playback_interrupted)
+
+    def test_camera_phrases(self):
+        for text in ('Айсана, кто перед тобой?', 'что ты сейчас видишь?', 'что у меня в руке?',
+                     'прочитай что тут написано', 'what do you see?', 'who is in front of you?'):
+            with self.subTest(text=text):
+                self.assertTrue(rt.CAMERA_RE.search(text))
+        self.assertFalse(rt.CAMERA_RE.search('как дела?'))
+        self.assertTrue(rt.READ_RE.search('прочитай что тут написано'))
+        self.assertFalse(rt.READ_RE.search('кто перед тобой?'))
+
+    def test_her_own_shouts_are_ignored(self):
+        # Jetson log: "Уи" -> "I'm staying quiet."
+        for text in ('Уи', 'Уиииии!', 'Вжууух, уиии', 'Wheee!'):
+            with self.subTest(text=text):
+                self.assertTrue(rt.SHOUT_ECHO_RE.match(text))
+        self.assertFalse(rt.SHOUT_ECHO_RE.match('Ура, получилось'))
+        session, sent = make_session()
+        session.dialog_until = time.monotonic() + 20
+        say(session, 'w1', 'Уи')
+        # The reply started at commit was held; it is dropped and never played.
+        self.assertEqual(sent[-1], {'type': 'conversation.item.delete', 'item_id': 'w1'})
+        self.assertIsNone(session.hold_item)
+        self.assertTrue(session.audio_queue.empty())
+
+
+class FakeStream(object):
+    def __init__(self):
+        self.frame = 'frame'
+
+    def latest(self, max_age=1.5, wait=3.0):
+        return self.frame
+
+
+class FakeFaces(object):
+    threshold = 1.0
+
+    def __init__(self, name=None):
+        self.name = name
+        self.remembered = []
+        self.forgotten = []
+        self.things = []
+
+    def faces(self, frame):
+        return [{'box': (0, 0, 9, 9), 'vector': 'v', 'name': self.name, 'distance': 0.3, 'where': 'center'}]
+
+    def identify(self, vector):
+        return self.name, 0.3
+
+    def remember(self, name, vectors):
+        self.remembered.append((name, len(vectors)))
+        self.name = name
+
+    def learn(self, name, vector, distance):
+        return False
+
+    def forget(self, name):
+        self.forgotten.append(name)
+        self.name = None
+        return 1
+
+    def names(self):
+        return [self.name] if self.name else []
+
+    def things_text(self):
+        return ''
+
+
+class LogFixesTests(unittest.TestCase):
+    """Jetson log of Nov 19, 23:40."""
+
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_own_answers_cannot_call_the_camera_again(self):
+        # "Сейчас быстро посмотрю..." + inspect_camera instead of the real answer.
+        session, sent = make_session()
+        session.inspect_camera = lambda question, detail=None: 'Вижу человека.'
+        say(session, 'c1', 'Айсана, кто перед тобой?')
+        time.sleep(0.2)
+        self.assertEqual(sent[-1]['response']['tool_choice'], 'none')
+
+    def test_stray_word_in_dialogue_is_ignored(self):
+        session, sent = make_session()
+        session.dialog_until = time.monotonic() + 20
+        say(session, 'p1', 'Pairing.')
+        self.assertEqual(sent[-1], {'type': 'conversation.item.delete', 'item_id': 'p1'})
+        for text in ('Вперёд', 'Назад', 'Развернись', 'Налево'):
+            self.assertFalse(rt.is_stray_word(text), text)        # one-word commands still work
+        for text in ('Да', 'спасибо', 'Почему?', 'Айсана'):
+            self.assertFalse(rt.is_stray_word(text) and not rt.has_wake_name(text), text)
+
+    def test_sana_at_the_start_of_a_sentence_is_her_name(self):
+        # Jetson log (Nov 20, noisy room): "...конкретно. Сана, какая погода у нас?" was ignored.
+        for text in ('Нет, у нас видоса-то вот этого нету конкретно. Сана, какая погода у нас?',
+                     'Сана, развернись', 'Сана какая погода'):
+            self.assertTrue(rt.has_wake_name(text), text)
+        for text in ('Это моя подруга сана из группы', 'сана', 'Мы с Санами пойдём'):
+            self.assertFalse(rt.has_wake_name(text), text)
+
+    def test_stt_hint_echo_is_never_a_request(self):
+        self.assertTrue(rt.is_prompt_echo(rt.STT_PROMPT))
+        self.assertNotIn('развернись', rt.STT_PROMPT)            # no command can be echoed
+
+    def test_misheard_turnaround(self):
+        self.assertTrue(rt.has_wake_name('Айсам, развелись.'))
+        for text in ('Айсана, развелись.', 'Айсана, разберись.'):
+            self.assertEqual(rt.parse_legs_command(text)['action'], 'spin_right', text)
+        self.assertIsNone(rt.parse_legs_command('Айсана, разберись с этим кодом'))
+
+
+class HearingTests(unittest.TestCase):
+    def test_new_stt_model_falls_back_when_refused(self):
+        session, sent = make_session()
+        session.stt_model = 'gpt-transcribe'
+        session.handle({'type': 'error', 'error': {'message': "Invalid value: 'gpt-transcribe'. Supported transcription models: ..."}})
+        self.assertEqual(session.stt_model, rt.STT_FALLBACK)
+        self.assertEqual(sent[-1]['session']['audio']['input']['transcription']['model'], rt.STT_FALLBACK)
+        sent[:] = []
+        session.handle({'type': 'error', 'error': {'message': 'transcription failed again: model'}})
+        self.assertEqual(sent, [])                       # only once
+
+    def test_unrelated_errors_keep_the_model(self):
+        session, sent = make_session()
+        session.handle({'type': 'error', 'error': {'message': 'conversation_already_has_active_response'}})
+        self.assertEqual(session.stt_model, rt.STT_MODEL)
+
+
+class FakeHistory(object):
+    def __init__(self, turns=()):
+        self.turns = list(turns)
+        self.saved = []
+        self.cleared = False
+
+    def recent_turns(self, limit=12):
+        return self.turns[-limit:]
+
+    def remember_turn(self, question, answer):
+        self.saved.append((question, answer))
+
+    def clear_history(self):
+        self.cleared = True
+
+
+class BackgroundTalkTests(unittest.TestCase):
+    """Jetson log, Nov 20: Сегодня тачку пригнал с кореи. Айсана, как у тебя дела?"""
+
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_only_words_from_her_name_on(self):
+        self.assertEqual(rt.request_part('Сегодня тачку пригнал с кореи. Айсана, как у тебя дела?'),
+                         'Айсана, как у тебя дела?')
+        for text in ('Скажи, Айсана, какая погода', 'Как у тебя дела, Айсана?', 'Окей, Айсана, вперёд',
+                     'Ну короче. Айсана.', 'Это моя подруга Сана из группы. Пошли.'):
+            self.assertEqual(rt.request_part(text), text)
+
+    def test_she_answers_only_the_request(self):
+        session, sent = make_session()
+        say(session, 'b1', 'Сегодня тачку пригнал с кореи. Айсана, как у тебя дела?')
+        deadline = time.time() + 3
+        while not any(m.get('type') == 'response.create' for m in sent) and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertIn({'type': 'conversation.item.delete', 'item_id': 'b1'}, sent)
+        text = [m for m in sent if m['type'] == 'conversation.item.create'][-1]['item']['content'][0]['text']
+        self.assertEqual(text, 'Айсана, как у тебя дела?')
+        self.assertEqual(sent[-1]['response']['metadata'], rt.OWN)
+        self.assertNotIn('tool_choice', sent[-1]['response'])     # weather/camera tools still allowed
+
+    def test_command_after_background_talk_ignores_the_talk(self):
+        session, sent = make_session()
+        legs = FakeLegs()
+        session.legs = legs
+        say(session, 'b2', 'Вчера поворот проехали. Айсана, как дела?')
+        time.sleep(0.2)
+        self.assertEqual(legs.intents, [])                           # "поворот" before her name never drives
+
+
+class EnglishAndGuestsTests(unittest.TestCase):
+    """Nov 23: English only for the presentation; respectful greetings for titled guests."""
+
+    def setUp(self):
+        self.original = rt.WAKE_GATE, rt.FIXED_LANGUAGE
+        rt.WAKE_GATE, rt.FIXED_LANGUAGE = True, 'English'
+
+    def tearDown(self):
+        rt.WAKE_GATE, rt.FIXED_LANGUAGE = self.original
+
+    def test_shouts_in_english(self):
+        self.assertIn('English exclamations', rt.shouts_prompt())
+        self.assertNotIn('Уииии', rt.shouts_prompt())
+
+    def test_english_even_for_russian_words(self):
+        session, sent = make_session()
+        self.assertEqual(session.user_language, 'English')
+        say(session, 'e1', 'Айсана, как дела?')
+        self.assertEqual(session.user_language, 'English')
+        self.assertIn('always speak English only', session.instructions())
+        self.assertIn('Reply in English only', session.reply_language())
+
+    def test_guest_is_greeted_respectfully_and_sarcasm_is_off(self):
+        session, sent = make_session()
+        session.camera_stream, session.faces = FakeStream(), FakeFaces('Waqar Ahmad')
+        session.faces.title = lambda name: 'President of Nazarbayev University' if name == 'Waqar Ahmad' else None
+        session.ready = True
+        original = rt.FACE_SCAN_SECONDS
+        rt.FACE_SCAN_SECONDS = 0.05
+        try:
+            __import__('threading').Thread(target=session.watch_faces, daemon=True).start()
+            deadline = time.time() + 3
+            while not any('Waqar Ahmad, President of Nazarbayev University' in str(m) for m in sent) \
+                    and time.time() < deadline:
+                time.sleep(0.02)
+            session.stop.set()
+        finally:
+            rt.FACE_SCAN_SECONDS = original
+        greeting = [m for m in sent if 'President of Nazarbayev University' in str(m) and m['type'] == 'response.create']
+        self.assertTrue(greeting)
+        self.assertIn('Welcome', str(greeting[-1]))
+        self.assertNotIn('no sarcasm', session.instructions())     # humor stays on (default)
+        original_vip = rt.VIP_MINUTES
+        rt.VIP_MINUTES = 15                                         # optional respectful mode
+        try:
+            session.vip_seen('Waqar Ahmad')
+            self.assertIn('no sarcasm', session.instructions())
+        finally:
+            rt.VIP_MINUTES = original_vip
+
+
+class StopAndGreetTests(unittest.TestCase):
+    """Jetson log, Nov 23."""
+
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_stop_is_sent_once_and_confirmed_with_a_fixed_phrase(self):
+        # "Асана, стоп" -> two EMERGENCY STOPs and "Опускаю руки в ноль."
+        session, sent = make_session()
+        session.arm = FakeArm()
+        say(session, 's1', 'Асана, стоп.')
+        self.assertEqual(session.arm.stopped, 1)
+        self.assertIn('s1', session.local_items)
+        result = session.run_tool('move_arm', {'action': 'stop', 'arm': 'right'})
+        self.assertIn('Already executed', result)
+        self.assertEqual(session.arm.stopped, 1)
+        deadline = time.time() + 3
+        while not any('Стою' in str(m) for m in sent) and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(any('Стою' in str(m) for m in sent))
+
+    def test_greeting_waves_the_hand(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        say(session, 'g1', 'Айсана, поздоровайся.')
+        deadline = time.time() + 2
+        while not session.arm.calls and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(session.arm.calls[0][0], 'hand_shake')
+        session.stop.set()                              # ends the wave timer early
+
+    def test_wave_ends_by_itself_and_lowers_the_arm(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        say(session, 'w1', 'Айсана, помаши рукой 1 секунду')
+        deadline = time.time() + 4
+        while ('position', 'right', 0, 'whole', None, None) not in session.arm.calls and time.time() < deadline:
+            time.sleep(0.05)
+        actions = [c[0] for c in session.arm.calls]
+        self.assertEqual(actions, ['hand_shake', 'hand_still', 'position'])
+
+    def test_a_new_arm_command_cancels_the_wave_timer(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        say(session, 'w2', 'Айсана, помаши рукой 1 секунду')
+        time.sleep(0.3)
+        say(session, 'w3', 'Айсана, левая рука позиция два')
+        time.sleep(1.5)
+        self.assertNotIn('hand_still', [c[0] for c in session.arm.calls])
+        self.assertEqual(rt.wave_seconds('помаши рукой'), rt.WAVE_SECONDS)
+
+    def test_dance_spins_with_arms_up_then_arms_down(self):
+        session, sent = make_session()
+        session.arm, session.legs = FakeArm(), FakeLegs()
+        session.shouts = FakeShouts()
+        say(session, 'd1', 'Айсана, потанцуй 1 секунду и подними руки')
+        deadline = time.time() + 4
+        while ('position', 'both', 0, 'whole', None, None) not in session.arm.calls and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(session.legs.intents[0]['action'], 'spin_right')
+        self.assertEqual(session.legs.intents[0]['seconds'], 1.0)
+        actions = [c[:4] for c in session.arm.calls]
+        self.assertEqual(actions[0], ('position', 'right', 3, 'shoulder'))   # one arm up...
+        self.assertEqual(actions[2], ('position', 'left', 1, 'shoulder'))    # ...the other down
+        self.assertIn('hand_shake', [a[0] for a in actions])
+        self.assertEqual(actions[-1], ('position', 'both', 0, 'whole'))
+        self.assertFalse(rt.POLITE_ASK_RE.search('Ты умеешь танцевать?'))   # a question, not a request
+
+    def test_dance_arms_take_turns_then_go_down(self):
+        # Owner, Nov 26: arms up and down in turn, different arms.
+        session, _ = make_session()
+        arm = session.arm = FakeArm()
+        session.dance_id, session.wave_id = 5, 7
+        clock = [0.0]
+        real = rt.time.monotonic
+        rt.time.monotonic = lambda: clock[0]
+        try:
+            def sleep(s):
+                clock[0] += s
+                return False
+            session.dance_arms(arm, 5, 7, 10.0, sleep=sleep)
+        finally:
+            rt.time.monotonic = real
+        ups = [c[1] for c in arm.calls if c[0] == 'position' and c[2] == 3 and c[3] == 'shoulder']
+        self.assertEqual(ups[:3], ['left', 'right', 'both'])            # beats 1, 2, 3 (both up)
+        self.assertEqual(arm.calls[-1][:4], ('position', 'both', 0, 'whole'))
+        self.assertEqual(arm.calls[-2][0], 'hand_still')
+
+    def test_stop_ends_the_dance_arms_where_they_are(self):
+        session, _ = make_session()
+        arm = session.arm = FakeArm()
+        session.dance_id, session.wave_id = 1, 1
+        session.dance_arms(arm, 1, 1, 10.0, sleep=lambda s: session.stop_motion() or False)
+        self.assertEqual(arm.calls, [])                                 # no new pose, no "arms down"
+
+    def test_short_legs_errors(self):
+        self.assertIn('no answer', rt.aisana_legs.short_error(Exception('Connection to 10.42.0.148 timed out.')))
+
+
+class FaceStateTests(unittest.TestCase):
+    """Nov 26: the animated face on the robot display."""
+
+    def test_states_in_priority_order(self):
+        session, sent = make_session()
+        self.assertEqual(session.face_state()['state'], 'idle')
+        session.dialog_until = time.monotonic() + 5
+        self.assertEqual(session.face_state()['state'], 'listen')
+        session.responding = True
+        self.assertEqual(session.face_state()['state'], 'think')
+        session.playing = True
+        self.assertEqual(session.face_state()['state'], 'speak')
+        session.shouts.active = True
+        self.assertEqual(session.face_state()['state'], 'dance')
+
+    def test_mouth_follows_when_the_voice_is_heard_not_when_it_arrived(self):
+        session, sent = make_session()
+        loud = b'\x00\x30' * (rt.RATE // 2)                    # 0.5 s of loud voice
+        session.voice_clock, session.voice_written = 100.0, 0
+        session.note_voice(b'\x00\x00' * rt.RATE, now=100.0)   # 1 s of silence first
+        session.note_voice(loud, now=100.0)                      # arrives at once, heard at 101.0
+        self.assertEqual(session.voice_level(now=100.5), 0)      # still the silent second
+        self.assertGreater(session.voice_level(now=101.2), 0.5)
+        self.assertEqual(session.voice_level(now=103.0), 0)      # long finished
+
+    def test_mic_level_is_fresh_only(self):
+        session, sent = make_session()
+        session.note_usb_level(2500)
+        self.assertAlmostEqual(session.face_state()['mic'], 0.5)
+        session.mic_at -= 1
+        self.assertEqual(session.face_state()['mic'], 0)
+
+
+class PanelActionTests(unittest.TestCase):
+    def test_panel_stop_and_status(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        self.assertEqual(session.panel_action('stop'), {'ok': True})
+        self.assertEqual(session.arm.stopped, 1)
+        status = session.panel_status()
+        self.assertEqual(status['arms'], 'ready')
+        self.assertEqual(status['legs'], 'not connected')
+
+    def test_panel_moves_both_arms_to_a_position(self):
+        # Nov 26: PS5 controller buttons -> both arms to position 0..4.
+        session, sent = make_session()
+        session.arm = FakeArm()
+        self.assertTrue(session.panel_action('arm', '3')['ok'])
+        self.assertEqual(session.arm.calls, [('position', 'both', 3, 'whole', None, None)])
+        self.assertEqual(session.arm.watched[0]['position'], 3)
+        for bad in ('5', '-1', 'x', '', '3; x'):
+            self.assertFalse(session.panel_action('arm', bad)['ok'])
+        self.assertEqual(len(session.arm.calls), 1)      # nothing else was sent
+
+    def test_panel_say_speaks_exactly(self):
+        session, sent = make_session()
+        session.panel_action('say', 'Welcome to Nazarbayev University!')
+        deadline = time.time() + 3
+        while not any('Welcome to Nazarbayev University!' in str(m) for m in sent) and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(any('Welcome to Nazarbayev University!' in str(m) for m in sent))
+
+
+class ArmReconnectTests(unittest.TestCase):
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_arm_link_is_retried_when_a_command_comes(self):
+        # Jetson log, Nov 20: "NOT done: the arm controller is not connected over USB."
+        session, sent = make_session()
+        session.arm = None
+        arm = FakeArm()
+        kept = []
+        session.on_arm_connected = kept.append
+        original = rt.connect_from_environment
+        rt.connect_from_environment = lambda: arm
+        try:
+            say(session, 'a1', 'Айсана, правую руку, позиция один.')
+            deadline = time.time() + 3
+            while not arm.calls and time.time() < deadline:
+                time.sleep(0.02)
+        finally:
+            rt.connect_from_environment = original
+        self.assertIs(session.arm, arm)
+        self.assertEqual(kept, [arm])
+        self.assertTrue(arm.calls)
+
+    def test_harmless_cancel_error_is_not_printed(self):
+        session, _ = make_session()
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            session.handle({'type': 'error', 'error': {'code': 'response_cancel_not_active', 'message': 'x'}})
+        self.assertEqual(out.getvalue(), '')
+
+
+class LocalWakeTests(unittest.TestCase):
+    def test_cloud_hears_only_after_the_name_or_inside_a_conversation(self):
+        session, _ = make_session()
+        self.assertTrue(session.streaming())                  # no spotter: as before
+        session.spotter = object()
+        self.assertFalse(session.streaming())
+        session.stream_until = time.monotonic() + 5           # "Айсана" heard locally
+        self.assertTrue(session.streaming())
+        session.stream_until = 0
+        session.dialog_until = time.monotonic() + 5           # she just answered
+        self.assertTrue(session.streaming())
+        session.dialog_until = 0
+        session.motion_until = time.monotonic() + 5           # "стоп" must work while driving
+        self.assertTrue(session.streaming())
+
+
+class ConversationMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_earlier_conversations_are_loaded(self):
+        session, sent = make_session()
+        session.history = FakeHistory([(time.time() - 86400 * 1.5, 'Когда у нас пара?', 'В десять.')])
+        session.load_history()
+        text = sent[-1]['item']['content'][0]['text']
+        self.assertIn('[yesterday] User: Когда у нас пара? | Aisana: В десять.', text)
+
+    def test_answers_are_saved_but_not_noise_or_cut_replies(self):
+        session, sent = make_session()
+        session.history = FakeHistory()
+        say(session, 'h1', 'Айсана, как дела?')
+        session.handle({'type': 'response.created', 'response': {'id': 'r1'}})
+        session.handle({'type': 'response.output_audio_transcript.done', 'response_id': 'r1', 'transcript': 'Отлично.'})
+        self.assertEqual(session.history.saved, [('Айсана, как дела?', 'Отлично.')])
+        session.handle({'type': 'response.output_audio_transcript.done', 'response_id': 'r1', 'transcript': 'Ещё раз.'})
+        self.assertEqual(len(session.history.saved), 1)               # one answer per question
+        session.cut_ids.add('r2')
+        say(session, 'h2', 'Айсана, а погода?')
+        session.handle({'type': 'response.output_audio_transcript.done', 'response_id': 'r2', 'transcript': 'Секунду'})
+        self.assertEqual(len(session.history.saved), 1)
+
+    def test_voice_command_clears_history(self):
+        session, sent = make_session()
+        session.history = FakeHistory()
+        say(session, 'h3', 'Айсана, забудь наши разговоры')
+        self.assertTrue(session.history.cleared)
+
+
+class PanelArmTests(unittest.TestCase):
+    """Nov 27: panel buttons for arm positions per side, and the hand OFF button."""
+
+    def test_positions_and_off(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        self.assertTrue(session.panel_action('arm', '2')['ok'])            # PS5: both arms
+        self.assertTrue(session.panel_action('arm', 'right 4')['ok'])
+        self.assertTrue(session.panel_action('arm', 'left off')['ok'])
+        self.assertEqual([c[:3] for c in session.arm.calls],
+                         [('position', 'both', 2), ('position', 'right', 4), ('hand_off', 'left', None)])
+        self.assertFalse(session.panel_action('arm', 'right 7')['ok'])
+        self.assertFalse(session.panel_action('arm', 'top 1')['ok'])
+
+    def test_stop_waving(self):
+        # Nov 27: a separate "stop waving" (panel, PS5 D-pad down): "r g n", the arm stays.
+        session, _ = make_session()
+        session.arm = FakeArm()
+        wave = session.wave_id
+        self.assertTrue(session.panel_action('wave_stop')['ok'])
+        self.assertEqual([c[:2] for c in session.arm.calls], [('hand_still', 'right')])
+        self.assertGreater(session.wave_id, wave)          # the wave timer won't move the arm
+
+
+class JapaneseTests(unittest.TestCase):
+    """Owner, Nov 27: asked in Japanese, she answers in Japanese (no mix-up)."""
+
+    def test_detect(self):
+        self.assertEqual(rt.language_of('アイサナ、こんにちは。元気ですか？'), 'Japanese')
+        self.assertEqual(rt.language_of('今日は天気'), 'Japanese')
+        self.assertEqual(rt.language_of('Aisana, hello'), 'English')
+        self.assertEqual(rt.language_of('Айсана, привет'), 'Russian')
+
+    def test_name_in_japanese(self):
+        for text in ('アイサナ、こんにちは', 'アイサナさん、元気？', 'ねえ、アイサナ、今何時？'):
+            self.assertTrue(rt.has_wake_name(text), text)
+
+    def test_fixed_english_but_japanese_answers_in_japanese(self):
+        session, _ = make_session()
+        session.handle_transcript('j1', 'アイサナ、こんにちは')
+        self.assertEqual(session.user_language, 'Japanese')
+        self.assertIn('Japanese', session.reply_language())
+        self.assertIn('Japanese', rt.confirm_instruction('Stopped.', '', 'Japanese'))
+        session.handle_transcript('j2', 'Aisana, how are you?')
+        self.assertEqual(session.user_language, rt.FIXED_LANGUAGE or 'English')
+        if rt.FIXED_LANGUAGE:
+            self.assertIn('Japanese', session.instructions())
+
+
+class StaleSpeakerTests(unittest.TestCase):
+    """Jetson, Nov 26: an orphaned aplay from the last run kept the speaker busy."""
+
+    def make_proc(self, root, pid, args, ppid, uid):
+        import os
+        folder = os.path.join(root, str(pid))
+        os.makedirs(folder)
+        with open(os.path.join(folder, 'cmdline'), 'wb') as f:
+            f.write(b'\0'.join(a.encode() for a in args) + b'\0')
+        with open(os.path.join(folder, 'status'), 'w') as f:
+            f.write('Name:\t{}\nPPid:\t{}\nUid:\t{}\t{}\t{}\t{}\n'.format(args[0], ppid, uid, uid, uid, uid))
+
+    def test_only_orphans_on_our_device(self):
+        import tempfile
+        root = tempfile.mkdtemp()
+        play = ['aplay', '-q', '-D', 'plughw:3,0', '-t', 'raw']
+        self.make_proc(root, 100, play, 1, 1000)                       # orphan: ours
+        self.make_proc(root, 101, play, 555, 1000)                     # still has its parent
+        self.make_proc(root, 102, ['aplay', '-D', 'plughw:0,3'], 1, 1000)   # another device
+        self.make_proc(root, 103, play, 1, 0)                          # someone else's
+        self.make_proc(root, 104, ['python3', '-D', 'plughw:3,0'], 1, 1000)
+        self.assertEqual(rt.stale_audio_processes('plughw:3,0', proc=root, uid=1000), [100])
+
+
+class FaceMemoryRealtimeTests(unittest.TestCase):
+    def test_no_face_greeting_while_busy(self):
+        # Owner, Nov 26: "О, Куанышали" in the middle of a dance or an answer.
+        session, _ = make_session()
+        session.ready = True
+        session.heard_at = session.speech_started_at = -1e9
+        self.assertFalse(session.greeting_would_interrupt())       # idle: greeting is fine
+        for busy in ('responding', 'playing', 'in_speech'):
+            setattr(session, busy, True)
+            self.assertTrue(session.greeting_would_interrupt(), busy)
+            setattr(session, busy, False)
+        session.dance_until = time.monotonic() + 20                 # dancing (arms, music)
+        self.assertTrue(session.greeting_would_interrupt())
+        session.stop_motion()                                       # "стоп" ends the dance
+        self.assertFalse(session.greeting_would_interrupt())
+        session.dialog_until = time.monotonic() + 10                # a conversation is going on
+        self.assertTrue(session.greeting_would_interrupt())
+        session.dialog_until = 0.0
+        session.heard_at = time.monotonic()                         # her answer is on its way
+        self.assertTrue(session.greeting_would_interrupt())
+
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def session(self, name=None):
+        session, sent = make_session()
+        session.camera_stream, session.faces = FakeStream(), FakeFaces(name)
+        session.face_vectors = lambda seconds=2.0: ['v1', 'v2', 'v3', 'v4']
+        return session, sent
+
+    def wait_for(self, sent, text):
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if any(text in str(m) for m in sent):
+                return
+            time.sleep(0.02)
+        self.fail('never sent: ' + text)
+
+    def test_remember_me_only_on_request(self):
+        session, sent = self.session()
+        say(session, 'f1', 'Айсана, запомни меня, я Али')
+        self.wait_for(sent, 'the face of Али is now remembered')
+        self.assertEqual(session.faces.remembered, [('Али', 4)])
+        self.assertIn('f1', session.local_items)
+
+    def test_name_asked_when_missing(self):
+        session, sent = self.session()
+        say(session, 'f2', 'Айсана, запомни меня')
+        self.wait_for(sent, 'the name is needed')
+        session.dialog_until = time.monotonic() + 10
+        say(session, 'f3', 'Меня зовут Айгерим')
+        self.wait_for(sent, 'the face of Айгерим is now remembered')
+
+    def test_forget_me(self):
+        session, sent = self.session('Али')
+        say(session, 'f4', 'Айсана, забудь меня')
+        self.wait_for(sent, 'the face of Али was deleted')
+        self.assertEqual(session.faces.forgotten, ['Али'])
+
+    def test_camera_answer_uses_known_name(self):
+        # Jetson log: "Faces: Коныш Али 0.26" but the answer was "я не знаю, кто это".
+        session, sent = self.session('Али')
+        session.inspect_camera = lambda question, detail=None: (session.people_note('frame'), 'Вижу человека.')[1]
+        say(session, 'k1', 'Айсана, кто перед тобой?')
+        self.wait_for(sent, 'FIRST PERSON')
+        report = [m for m in sent if m['type'] == 'conversation.item.create'][-1]['item']['content'][0]['text']
+        self.assertIn('this is Али (center)', report)
+        self.assertNotIn('Али', session.people_note('frame'))      # the vision model never gets names
+        session.faces.name = None
+        session.people_note('frame')
+        self.assertIn('never invent names', session.people_report())
+
+    def test_camera_looks_while_the_user_speaks(self):
+        session, sent = self.session('Али')
+        looks = []
+        session.inspect_camera = lambda question, detail=None, quiet=False: looks.append(question) or 'Вижу человека.'
+        session.handle({'type': 'input_audio_buffer.speech_started'})
+        time.sleep(0.1)
+        self.assertEqual(looks, [])                          # strangers talking: no paid look
+        session.dialog_until = time.monotonic() + 10
+        session.prefetch_at = 0
+        session.handle({'type': 'input_audio_buffer.speech_started'})
+        time.sleep(0.1)
+        self.assertEqual(len(looks), 1)                      # started before the words arrived
+        say(session, 'pf1', 'Айсана, кто перед тобой?')
+        self.wait_for(sent, 'FIRST PERSON')
+        self.assertEqual(len(looks), 1)                      # no second look
+        session.prefetch_at = 0
+        session.dialog_until = time.monotonic() + 10
+        session.handle({'type': 'input_audio_buffer.speech_started'})
+        time.sleep(0.1)
+        say(session, 'pf2', 'Айсана, прочитай что тут написано')
+        time.sleep(0.3)
+        self.assertEqual(len(looks), 3)                      # reading gets its own sharp look
+
+    def test_memory_replies_are_fixed_phrases(self):
+        session, sent = self.session()
+        say(session, 'f9', 'Айсана, запомни меня, я Али')
+        self.wait_for(sent, 'Say exactly this')
+        text = sent[-1]['response']['instructions']
+        self.assertIn('Али', text)
+        self.assertNotIn('запомнил ', text)                         # feminine only
+
+    def test_greets_a_known_face_once(self):
+        session, sent = self.session('Али')
+        session.ready = True
+        original = rt.FACE_SCAN_SECONDS
+        rt.FACE_SCAN_SECONDS = 0.05
+        try:
+            worker = __import__('threading').Thread(target=session.watch_faces, daemon=True)
+            worker.start()
+            self.wait_for(sent, 'Али (you know them) just came into view')
+            time.sleep(0.3)
+            session.stop.set()
+        finally:
+            rt.FACE_SCAN_SECONDS = original
+        self.assertEqual(sum('just came into view' in str(m) for m in sent), 1)
+
+
+class VoiceStyleTests(unittest.TestCase):
+    def test_voice_style_presets(self):
+        import os
+        old = os.environ.pop('AISANA_VOICE_STYLE', None)
+        try:
+            self.assertEqual(rt.voice_style_instructions(), '')
+            os.environ['AISANA_VOICE_STYLE'] = 'cute'
+            self.assertIn('anime', rt.voice_style_instructions())
+            os.environ['AISANA_VOICE_STYLE'] = 'whisper a little'
+            self.assertEqual(rt.voice_style_instructions(), 'VOICE STYLE: whisper a little ')
+        finally:
+            os.environ.pop('AISANA_VOICE_STYLE', None)
+            if old is not None:
+                os.environ['AISANA_VOICE_STYLE'] = old
+
+
+class WakeGateTests(unittest.TestCase):
+    def setUp(self):
+        self.original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+
+    def tearDown(self):
+        rt.WAKE_GATE = self.original
+
+    def test_unaddressed_speech_is_dropped(self):
+        session, sent = make_session()
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'i1'})
+        self.assertEqual(sent, [])
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'i1', 'transcript': 'ребята, пойдём обедать'})
+        self.assertEqual(sent, [{'type': 'conversation.item.delete', 'item_id': 'i1'}])
+
+    def test_name_starts_dialogue_and_followups_answer_immediately(self):
+        session, sent = make_session()
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'i1', 'transcript': 'Айсана, привет'})
+        self.assertEqual(types(sent), ['response.create'])
+        self.assertTrue(session.dialog_active())
+        # Follow-up inside the window: respond at commit, not after STT.
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'i2'})
+        self.assertEqual(types(sent), ['response.create', 'response.create'])
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'i2', 'transcript': 'а как дела?'})
+        self.assertEqual(len(sent), 2)            # not answered twice
+
+    def test_prompt_echo_dropped_even_with_names(self):
+        session, sent = make_session()
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'e1', 'transcript': 'Айсана, Айсана, Айсана, Эйсана, آيسانا.'})
+        self.assertEqual(sent, [{'type': 'conversation.item.delete', 'item_id': 'e1'}])
+        self.assertFalse(session.dialog_active())
+
+    def test_window_expires(self):
+        session, sent = make_session()
+        session.dialog_until = time.monotonic() - 1
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'i3'})
+        self.assertEqual(sent, [])
+
+    def test_voice_stop_freezes_arms(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'i4', 'transcript': 'Айсана, стоп'})
+        self.assertEqual(session.arm.stopped, 1)
+
+
+def say(session, item_id, transcript):
+    session.handle({'type': 'input_audio_buffer.committed', 'item_id': item_id})
+    session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                    'item_id': item_id, 'transcript': transcript})
+
+
+class ArmVerificationTests(unittest.TestCase):
+    """The case from the Jetson log of 2026-11-19: the model chose a nudge."""
+
+    def test_users_exact_words_override_model_guess(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        say(session, 'i1', 'Айсана, подвигай плечом. Плечо правое в позицию 1. Позиция 4. '
+                           'Айсана, правое плечо в позицию 2.')
+        time.sleep(0.2)                               # executed at once from the words
+        result = session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'joint': 'shoulder',
+                                               'direction': 'up', 'degrees': 10})
+        self.assertEqual([c[:4] for c in session.arm.calls],
+                         [('position', 'right', 1, 'shoulder'), ('position', 'right', 4, 'shoulder'),
+                          ('position', 'right', 2, 'shoulder')])
+        self.assertIn('Already executed', result)     # the model's nudge guess is not run
+        self.assertFalse(session.arm.verified)       # no 2 s sensor wait before speaking
+        self.assertEqual(len(session.arm.watched), 3) # sensors checked in the background
+
+    def test_model_tool_path_still_checks_words(self):
+        # If the model calls move_arm before the transcript arrives, its guess is replaced.
+        session, _ = make_session()
+        session.arm = FakeArm()
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'm1'})
+        session.handle({'type': 'response.function_call_arguments.done', 'call_id': 'cm', 'name': 'move_arm',
+                        'arguments': '{}'})
+        session.handle_tool_call = lambda *a: None
+        with session.transcript_cond:
+            session.transcripts['m1'] = 'правое плечо в позицию 2'
+        result = session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'direction': 'up', 'degrees': 10})
+        self.assertEqual(session.arm.calls[0][:4], ('position', 'right', 2, 'shoulder'))
+        self.assertIn('right arm shoulder -> position 2', result)
+
+    def test_model_may_not_invent_position(self):
+        # From the Jetson log: "Рука правая." became "right arm -> position 2".
+        session, _ = make_session()
+        session.arm = FakeArm()
+        say(session, 'i8', 'Рука правая.')
+        result = session.run_tool('move_arm', {'action': 'position', 'arm': 'right', 'position': 2})
+        self.assertEqual(session.arm.calls, [])
+        self.assertIn('В какую позицию', result)
+
+    def test_sensor_problem_is_spoken(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        say(session, 'i9', 'руки в позицию ноль')
+        session.run_tool('move_arm', {'action': 'position', 'arm': 'both', 'position': 0})
+        session.arm.report(['LEFT STEPPER STOPPED: moving the wrong way.'])
+        time.sleep(1.0)
+        self.assertIn('wrong way', sent[-2]['item']['content'][0]['text'])
+        self.assertEqual(sent[-1]['type'], 'response.create')
+
+    def test_arm_tool_refused_when_user_did_not_ask(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        say(session, 'i2', 'Айсана, какая сегодня погода?')
+        result = session.run_tool('move_arm', {'action': 'position', 'arm': 'both', 'position': 3})
+        self.assertEqual(session.arm.calls, [])
+        self.assertIn('Nothing moved', result)
+
+    def test_vague_arm_request_uses_model_interpretation(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        say(session, 'i3', 'Айсана, подвигай правой рукой')
+        session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'direction': 'up', 'degrees': 15})
+        self.assertEqual(session.arm.calls[0][:2], ('nudge', 'right'))
+
+    def test_short_followup_more_allowed_after_recent_move(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        session.last_arm_at = time.monotonic()
+        say(session, 'i4', 'ещё')
+        session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'direction': 'up', 'degrees': 5})
+        self.assertEqual(len(session.arm.calls), 1)
+
+    def test_clear_command_runs_even_if_model_ignored_it(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        session.dialog_until = time.monotonic() + 20
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'i5'})
+        session.handle({'type': 'response.created'})
+        session.handle({'type': 'response.done'})            # model answered with words only
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'i5', 'transcript': 'левая рука в позицию 3'})
+        time.sleep(0.2)
+        self.assertEqual(session.arm.calls[0][:3], ('position', 'left', 3))
+        self.assertIn('Robot report', sent[-2]['item']['content'][0]['text'])
+        self.assertEqual(sent[-1]['type'], 'response.create')
+
+    def test_no_double_move_when_model_called_tool(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        session.dialog_until = time.monotonic() + 20
+        session.handle_tool_call = lambda *a: None
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'i6'})
+        session.handle({'type': 'response.created'})
+        session.handle({'type': 'response.function_call_arguments.done', 'call_id': 'c9',
+                        'name': 'move_arm', 'arguments': '{}'})
+        session.handle({'type': 'response.done'})
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'i6', 'transcript': 'левая рука в позицию 3'})
+        time.sleep(0.2)
+        self.assertEqual(session.arm.calls, [])            # tool thread owns it, net stays off
+
+    def test_first_turn_arm_command_runs_without_model_chatter(self):
+        original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+        try:
+            session, sent = make_session()
+            session.arm = FakeArm()
+            say(session, 'i7', 'Айсана, правая рука в позицию 2')
+            time.sleep(0.2)
+            self.assertEqual(session.arm.calls[0][:3], ('position', 'right', 2))
+            self.assertIn('Robot report', sent[-2]['item']['content'][0]['text'])
+            self.assertEqual(sent[-1]['response'].get('tool_choice'), 'none')   # no second arm move
+        finally:
+            rt.WAKE_GATE = original
+
+    def test_stt_hint_echo_never_moves_anything(self):
+        # From the Jetson log: noise came back as the STT command list and opened the grippers.
+        session, sent = make_session()
+        session.arm, session.legs = FakeArm(), FakeLegs()
+        session.dialog_until = time.monotonic() + 20
+        say(session, 'e9', 'поверни налево, поверни направо, развернись, развернись на 360, проедь вперёд, '
+                           'езжай назад, стой, руки в позицию, открой захват, turn left, go forward.')
+        time.sleep(0.2)
+        self.assertEqual((session.arm.calls, session.legs.intents), ([], []))
+
+
+class FakeLegs(object):
+    def __init__(self):
+        self.intents = []
+        self.stops = 0
+
+    def execute(self, intent, report=None):
+        self.intents.append(intent)
+        return 'Driving {} for 2.0 s (stops by itself).'.format(intent['action'])
+
+    def stop(self):
+        self.stops += 1
+
+
+class LegsToolTests(unittest.TestCase):
+    def test_users_words_decide_the_drive(self):
+        session, _ = make_session()
+        session.legs = FakeLegs()
+        say(session, 'l1', 'Айсана, проедь вперёд 3 секунды')
+        time.sleep(0.2)
+        result = session.run_tool('move_legs', {'action': 'forward', 'seconds': 8})
+        self.assertEqual(session.legs.intents, [session.legs.intents[0]])   # once, from the words
+        self.assertEqual(session.legs.intents[0]['seconds'], 3.0)
+        self.assertIn('Already executed', result)
+
+    def test_talk_before_her_name_still_drives(self):
+        # Jetson log, Nov 23: "Уи! Айсана на один метр назад." -> nothing moved,
+        # the tool said "Already executed" and she said "I backed up one meter".
+        session, sent = make_session()
+        session.legs = FakeLegs()
+        say(session, 'l7', 'Уи! Айсана на один метр назад.')
+        time.sleep(0.3)
+        self.assertEqual(session.legs.intents[0]['action'], 'backward')
+        self.assertEqual(session.legs.intents[0]['meters'], 1.0)
+
+    def test_rephrased_request_is_not_already_executed(self):
+        session, sent = make_session()
+        session.legs = FakeLegs()
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'l8'})
+        session.transcripts['l8'] = 'Ну вот. Айсана, проедь назад.'
+        session.rephrased_items.add('l8')
+        result = session.run_tool('move_legs', {'action': 'backward'})
+        self.assertNotIn('Already executed', result)
+        self.assertEqual(session.legs.intents[0]['action'], 'backward')
+
+    def test_late_tool_call_for_noise_is_silent(self):
+        # Nov 23: during "покружись 8 секунд" an empty turn got a move_legs call and
+        # she said "It didn't work" while spinning.
+        session, sent = make_session()
+        session.legs = FakeLegs()
+        say(session, 'l9', '')
+        result = session.run_tool('move_legs', {'action': 'spin_right', 'seconds': 8})
+        self.assertTrue(result.startswith(rt.SILENT_RESULT))
+        self.assertEqual(session.legs.intents, [])
+
+    def test_follow_me_starts_the_follower_not_a_drive(self):
+        session, sent = make_session()
+        session.legs = FakeLegs()
+        started = []
+        session.run_follow_locally = lambda item_id: started.append(item_id)
+        say(session, 'f1', 'Айсана, иди за мной')
+        self.assertEqual(started, ['f1'])
+        self.assertEqual(session.legs.intents, [])          # not "иди" = 2 s forward
+
+    def test_stop_ends_following(self):
+        session, sent = make_session()
+        session.legs = FakeLegs()
+
+        class F(object):
+            cancelled = False
+
+            def cancel(self):
+                self.cancelled = True
+
+            def active(self):
+                return not self.cancelled
+        session.follower = F()
+        say(session, 'f2', 'Айсана, стоп')
+        self.assertTrue(session.follower.cancelled)
+
+    def test_gripper_follow_up_after_talking_about_it(self):
+        # Jetson log, Nov 25: "Can you open it?" right after the gripper -> refused,
+        # then the model said "The left gripper is now open" with nothing sent.
+        session, sent = make_session()
+        arm = FakeArm()
+        session.arm = arm
+        say(session, 'g1', 'Is your left gripper closed?')
+        say(session, 'g2', 'Can you open it?')
+        result = session.run_tool('move_arm', {'arm': 'left', 'action': 'gripper_open'})
+        self.assertIn('Sent to the arms', result)
+        self.assertEqual(arm.calls[-1][:2], ('gripper_open', 'left'))
+
+    def test_refused_arm_move_forbids_claiming_it(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        say(session, 'g3', 'Can you open it?')                  # no arm talk before
+        result = session.run_tool('move_arm', {'arm': 'left', 'action': 'gripper_open'})
+        self.assertTrue(result.startswith('NOT DONE'))
+        self.assertIn('Do NOT say', result)
+
+    def test_reply_refused_as_busy_is_sent_again(self):
+        session, sent = make_session()
+        session.last_create = (time.monotonic(), {'type': 'response.create', 'response': {'instructions': 'x'}})
+        session.handle({'type': 'error', 'error': {'code': 'conversation_already_has_active_response'}})
+        del sent[:]
+        session.handle({'type': 'response.done', 'response': {'id': 'r9'}})
+        deadline = time.time() + 1
+        while time.time() < deadline and 'response.create' not in types(sent):
+            time.sleep(0.01)
+        self.assertIn('response.create', types(sent))
+
+    def test_noise_turn_does_not_cut_a_web_search_answer(self):
+        # Jetson log, Nov 26: noise during the Kia answer cut it twice ("Aisana (cut): Kia Motors,").
+        session, sent = make_session()
+        session.expect_tool_response = True                  # the web search answer is playing
+        session.handle({'type': 'response.created', 'response': {'id': 'tool1'}})
+        session.respond('n0', extend=False)                  # a reply started for the noise turn: busy
+        session.last_create, session.create_item = (time.monotonic(), {'type': 'response.create'}), 'n0'
+        session.handle({'type': 'error', 'error': {'code': 'conversation_already_has_active_response'}})
+        self.assertEqual(session.retry_item, 'n0')
+        del sent[:]
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'n0', 'transcript': ''})
+        self.assertNotIn('response.cancel', types(sent))
+        self.assertNotIn('tool1', session.cut_ids)
+        self.assertIsNone(session.retry_create)              # the noise reply is not sent again
+
+    def test_cancelled_reply_audio_is_not_played(self):
+        # Jetson log, Nov 26: the noise reply was cancelled but "They're a confident bunch—" was heard.
+        session, sent = make_session()
+        played = []
+        session.queue_audio = lambda kind, chunk=b'': played.append(kind)
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'n2'})
+        session.respond('n2', extend=False)
+        session.handle({'type': 'response.created', 'response': {'id': 'own2'}})
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'n2', 'transcript': ''})
+        session.handle({'type': 'response.output_audio.delta', 'response_id': 'own2', 'delta': 'AAAA'})
+        self.assertNotIn('audio', played)
+
+    def test_a_sentence_on_the_speaker_is_finished(self):
+        # Owner, Nov 27: "убери cut, чтобы она договаривала фразу".
+        session, sent = make_session()
+        session.queue_audio = lambda kind, chunk=b'': None
+        session.handle({'type': 'response.created', 'response': {'id': 'r1'}})
+        session.handle({'type': 'response.output_audio.delta', 'response_id': 'r1', 'delta': 'AAAA'})
+        del sent[:]
+        session.cancel_reply()                       # a command or noise in the middle of her answer
+        self.assertNotIn('response.cancel', types(sent))
+        self.assertNotIn('r1', session.cut_ids)
+        session.cancel_reply(force=True)             # "стоп" / phone button still silence her
+        self.assertIn('response.cancel', types(sent))
+
+    def test_an_unheard_reply_is_still_dropped(self):
+        session, sent = make_session()
+        session.handle({'type': 'response.created', 'response': {'id': 'r2'}})
+        del sent[:]
+        session.cancel_reply()                       # nothing reached the speaker yet
+        self.assertIn('response.cancel', types(sent))
+        self.assertIn('r2', session.cut_ids)
+
+    def test_noise_turn_still_cuts_its_own_reply(self):
+        session, sent = make_session()
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'n1'})
+        session.respond('n1', extend=False)
+        session.handle({'type': 'response.created', 'response': {'id': 'own1'}})
+        del sent[:]
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'n1', 'transcript': ''})
+        self.assertIn('response.cancel', types(sent))
+        self.assertIn('own1', session.cut_ids)
+
+    def test_long_talk_is_not_cut_by_default(self):
+        # Owner, Nov 25: let the end of a phrase be decided by the model's own pause detection.
+        session, sent = make_session()
+        session.handle({'type': 'input_audio_buffer.speech_started'})
+        self.assertEqual(rt.MAX_TURN, 0)
+        self.assertFalse(session.maybe_split_turn(100, now=session.turn_started + 60))
+
+    def test_long_nonstop_talk_is_cut_at_a_quiet_moment(self):
+        # Opt-in (AISANA_MAX_TURN=12): a minute of chatter was one turn and she answered all of it.
+        original, rt.MAX_TURN = rt.MAX_TURN, 12.0
+        self.addCleanup(setattr, rt, 'MAX_TURN', original)
+        session, sent = make_session()
+        session.handle({'type': 'input_audio_buffer.speech_started'})
+        start = session.turn_started
+        t = start
+        cut = None
+        while t < start + rt.MAX_TURN + 10:
+            t += 0.03
+            loud = int((t - start) * 100) % 50 != 0       # a short quiet 30 ms now and then
+            if session.maybe_split_turn(3000 if loud else 200, now=t):
+                cut = t - start
+                break
+        self.assertIsNotNone(cut)
+        self.assertGreaterEqual(cut, rt.MAX_TURN)
+        self.assertLess(cut, rt.MAX_TURN + 4)
+        self.assertFalse(session.maybe_split_turn(3000, now=t + 1))   # a new piece starts
+        session.handle({'type': 'input_audio_buffer.speech_stopped'})
+        self.assertFalse(session.maybe_split_turn(100, now=t + 30))   # nobody talks: never cut
+
+    def test_name_at_the_end_of_a_cut_piece_waits_for_the_rest(self):
+        session, sent = make_session()
+        session.split_pending = True
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 's1'})
+        say(session, 's1', 'ну короче мы вчера там были и вообще. Айсана, какая')
+        self.assertTrue(session.dialog_active())             # the next piece needs no name
+        self.assertIn('conversation.item.delete', types(sent))
+
+    def test_answered_turns_are_kept_as_text_not_audio(self):
+        # Nov 25: $3.53 in 2-3 h; every reply re-reads the conversation and audio
+        # input costs ~17x text. After a reply its audio items become text.
+        session, sent = make_session()
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'u1'})
+        session.transcripts['u1'] = 'Айсана, как дела?'
+        session.response_item = 'u1'
+        session.handle({'type': 'response.output_item.done', 'response_id': 'r1', 'item': {
+            'id': 'a1', 'type': 'message', 'role': 'assistant',
+            'content': [{'type': 'output_audio', 'transcript': 'Отлично!'}]}})
+        session.handle({'type': 'response.done', 'response': {'id': 'r1', 'usage': {}}})
+        session.textify_now()
+        created = [m for m in sent if m['type'] == 'conversation.item.create' and m.get('event_id', '').startswith('textify_')]
+        self.assertEqual(sorted((m['previous_item_id'], m['item']['role'], m['item']['content'][0]['text'])
+                                for m in created),
+                         [('a1', 'assistant', 'Отлично!'), ('u1', 'user', 'Айсана, как дела?')])
+        self.assertNotIn('conversation.item.delete', types(sent))          # not before the text is in
+        for m in created:
+            session.handle({'type': 'conversation.item.added', 'item': {'id': m['item']['id']}})
+        deleted = [m['item_id'] for m in sent if m['type'] == 'conversation.item.delete']
+        self.assertEqual(sorted(deleted), ['a1', 'u1'])
+
+    def test_text_history_backs_off_when_refused(self):
+        session, sent = make_session()
+        session.textify_pending['txta1'] = ('a1', 'assistant')
+        session.handle({'type': 'error', 'error': {'event_id': 'textify_txta1',
+                        'message': "Invalid value: 'output_text'. Supported content types: output_audio"}})
+        self.assertNotIn('assistant', session.textify_roles)
+        self.assertNotIn('conversation.item.delete', types(sent))           # the audio stays
+
+    def test_quiet_mode_from_the_panel(self):
+        session, sent = make_session()
+        self.assertEqual(session.panel_action('quiet', 'on'), {'ok': True, 'quiet': True})
+        self.assertTrue(rt.load_quiet())                                    # kept after a restart
+        self.assertTrue(session.panel_status()['quiet'])
+        session.panel_action('quiet', 'off')
+        self.assertFalse(rt.load_quiet())
+
+    def test_long_dance_spins_the_whole_time_in_parts(self):
+        # Owner, Nov 25: dance 20 s; each drive stays <= 10 s, so the rest comes as more drives.
+        session, sent = make_session()
+        session.legs = FakeLegs()
+        session.dance_id = 1
+        session.dance_more(1, 10.0, 10.0, sleep=lambda s: False)
+        self.assertEqual([(i['action'], i['seconds']) for i in session.legs.intents], [('spin_left', 10.0)])
+        session2, sent2 = make_session()
+        session2.legs = FakeLegs()
+        session2.dance_id = 1
+        session2.stop_motion()                              # "стоп" between the spins
+        session2.dance_more(1, 10.0, 10.0, sleep=lambda s: False)
+        self.assertEqual(session2.legs.intents, [])
+
+    def test_dance_does_not_shout_about_obstacles(self):
+        session, sent = make_session()
+        session.motion_until = time.monotonic() + 10
+        session.dance_legs_problem('obstacle ahead: 30 cm away')
+        self.assertNotIn('response.create', types(sent))    # no "Stop! Obstacle"
+        self.assertTrue(session.motion_active())            # the dance goes on
+
+    def test_polite_dance_question_dances(self):
+        # Jetson log, Nov 25: "Aisana, can you dance?" -> "I can't dance"; the panel button worked.
+        for text in ('Aisana, can you dance?', 'Айсана, можешь потанцевать?', 'Айсана, станцуешь?',
+                     'Айсана, потанцуй'):
+            session, sent = make_session()
+            danced = []
+            session.run_dance_locally = lambda item_id, transcript, danced=danced: danced.append(item_id)
+            say(session, 'd1', text)
+            self.assertEqual(danced, ['d1'], text)
+        for text in ('Aisana, do you like dancing?', 'Айсана, ты любишь танцевать?'):
+            session, sent = make_session()
+            danced = []
+            session.run_dance_locally = lambda item_id, transcript, danced=danced: danced.append(item_id)
+            say(session, 'd2', text)
+            self.assertEqual(danced, [], text)                 # a real question: she just answers
+        self.assertIn('Never say you cannot dance', rt.PROMPT)
+
+    def test_model_cannot_drive_when_not_asked(self):
+        session, _ = make_session()
+        session.legs = FakeLegs()
+        say(session, 'l2', 'Айсана, что у тебя впереди?')
+        result = session.run_tool('move_legs', {'action': 'forward'})
+        self.assertEqual(session.legs.intents, [])
+        self.assertIn('Nothing moved', result)
+
+    def test_model_may_not_invent_duration(self):
+        session, _ = make_session()
+        session.legs = FakeLegs()
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'l3'})
+        with session.transcript_cond:
+            session.transcripts['l3'] = 'Айсана, покатайся по комнате вперёд и обратно'
+        session.run_tool('move_legs', {'action': 'forward', 'seconds': 10})
+        self.assertIsNone(session.legs.intents[0]['seconds'])
+
+    def test_stop_stops_wheels_and_arms(self):
+        session, _ = make_session()
+        session.legs, session.arm = FakeLegs(), FakeArm()
+        say(session, 'l4', 'Айсана, стой!')
+        self.assertEqual((session.legs.stops, session.arm.stopped), (1, 1))
+
+    def test_spin_and_shout(self):
+        original = rt.WAKE_GATE
+        rt.WAKE_GATE = True
+        try:
+            session, sent = make_session()
+            session.legs = FakeLegs()
+            say(session, 'l5', 'Айсана, покрутись 10 секунд и кричи уииии')
+            time.sleep(0.2)
+            self.assertEqual(session.legs.intents[0]['action'], 'spin_right')
+            self.assertEqual(session.legs.intents[0]['seconds'], 10.0)
+            self.assertIn('Уииии', sent[-1]['response']['instructions'])
+            # Short fixed phrases for other commands; "Уииииии!" for every turnaround.
+            say(session, 'l7', 'Айсана, вперёд')
+            time.sleep(0.2)
+            self.assertIn('"Еду вперёд."', sent[-1]['response']['instructions'])
+            self.assertIn('nothing else', sent[-1]['response']['instructions'])
+            say(session, 'l8', 'Айсана, развернись')
+            time.sleep(0.2)
+            self.assertIn('"Уииииии!"', sent[-1]['response']['instructions'])
+            say(session, 'l9', 'Aisana, turn around')
+            time.sleep(0.2)
+            self.assertIn('"Wheeeee!"', sent[-1]['response']['instructions'])
+        finally:
+            rt.WAKE_GATE = original
+
+    def test_empty_speech_reply_is_cancelled(self):
+        # From the Jetson log: "You: " (noise) got "I'm here..." in English.
+        session, sent = make_session()
+        session.dialog_until = time.monotonic() + 20
+        session.handle({'type': 'input_audio_buffer.committed', 'item_id': 'n1'})
+        session.handle({'type': 'response.created'})
+        session.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                        'item_id': 'n1', 'transcript': ''})
+        self.assertIn({'type': 'response.cancel'}, sent)
+        self.assertEqual(sent[-1], {'type': 'conversation.item.delete', 'item_id': 'n1'})
+
+    def test_problem_report_waits_for_pending_tool_answer(self):
+        session, sent = make_session()
+        session.expect_tool_response = True            # tool answer requested, not created yet
+        session.report_problem('Legs report: ', ['blocked'])
+        time.sleep(0.3)
+        self.assertEqual(sent, [])                     # did not collide with the tool answer
+        session.expect_tool_response = False
+        time.sleep(1.0)
+        self.assertEqual(sent[-1]['type'], 'response.create')
+
+    def test_legs_not_configured(self):
+        session, sent = make_session()
+        say(session, 'l6', 'Айсана, вперёд')
+        time.sleep(0.2)
+        self.assertIn('NOT done: legs are not connected', sent[-2]['item']['content'][0]['text'])
+
+
+class ToolTests(unittest.TestCase):
+    def test_tools_offered_to_model(self):
+        names = [tool['name'] for tool in rt.tool_definitions()]
+        for name in ('inspect_camera', 'move_arm', 'move_legs', 'get_weather'):
+            self.assertIn(name, names)
+        arm_tool = [tool for tool in rt.tool_definitions() if tool['name'] == 'move_arm'][0]
+        properties = arm_tool['parameters']['properties']
+        self.assertEqual(properties['position']['maximum'], 4)
+        self.assertIn('nudge', properties['action']['enum'])
+        self.assertEqual(properties['degrees']['maximum'], 45)
+
+    def test_move_arm_goes_through_controller(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        session.last_item = None            # no transcript: model arguments are used
+        result = session.run_tool('move_arm', {'action': 'position', 'arm': 'left', 'position': 3})
+        self.assertEqual(session.arm.calls, [('position', 'left', 3, 'whole', None, None)])
+        session.run_tool('move_arm', {'action': 'nudge', 'arm': 'right', 'direction': 'up', 'degrees': 5})
+        self.assertEqual(session.arm.calls[-1], ('nudge', 'right', None, 'whole', 'up', 5))
+        self.assertIn('left arm -> position 3', result)
+
+    def test_move_arm_without_usb_is_reported_not_faked(self):
+        session, _ = make_session()
+        self.assertIn('not connected', session.run_tool('move_arm', {'action': 'stop'}))
+
+    def test_each_tool_call_runs_once(self):
+        session, _ = make_session()
+        ran = []
+        session.handle_tool_call = lambda call_id, name, arguments: ran.append((call_id, name))
+        args = json.dumps({'action': 'status'})
+        session.handle({'type': 'response.function_call_arguments.done', 'call_id': 'c1',
+                        'name': 'move_arm', 'arguments': args})
+        session.handle({'type': 'response.output_item.done', 'item': {
+            'type': 'function_call', 'call_id': 'c1', 'name': 'move_arm', 'arguments': args}})
+        time.sleep(0.1)
+        self.assertEqual(ran, [('c1', 'move_arm')])
+
+    def test_tool_output_is_sent_back_and_answered(self):
+        session, sent = make_session()
+        session.arm = FakeArm()
+        session.handle_tool_call('c2', 'move_arm', json.dumps({'action': 'gripper_open', 'arm': 'right'}))
+        self.assertEqual(types(sent), ['conversation.item.create', 'response.create'])
+        self.assertEqual(sent[0]['item']['call_id'], 'c2')
+
+    def test_failed_tool_never_invents_result(self):
+        session, sent = make_session()
+        session.handle_tool_call('c3', 'unknown_tool', '{}')
+        self.assertIn('failed', sent[0]['item']['output'])
+
+
+
+class DanceMusicTests(unittest.TestCase):
+    """Nov 25: the owner's own song plays while she dances (10 s)."""
+
+    def test_dance_lasts_twenty_seconds_by_default(self):
+        if 'AISANA_DANCE_SECONDS' not in os.environ:
+            self.assertEqual(rt.DANCE_SECONDS, 20.0)
+        self.assertLessEqual(rt.aisana_legs.MAX_SECONDS, 10.0)     # the wheels still stop after 10 s
+
+    def test_dance_picks_a_random_song_not_twice_in_a_row(self):
+        # Nov 26: two songs in ~/robot_music, a random one each dance.
+        folder = tempfile.mkdtemp()
+        for name in ('lambada.mp3', 'skazki.mp3', 'notes.txt'):
+            with open(os.path.join(folder, name), 'wb') as handle:
+                handle.write(b'x')
+        original = rt.DANCE_MUSIC_DIR
+        rt.DANCE_MUSIC_DIR = folder
+        try:
+            self.assertEqual([os.path.basename(p) for p in rt.find_all_dance_music()],
+                             ['lambada.mp3', 'skazki.mp3'])
+            player = rt.ShoutPlayer()
+            self.assertTrue(player.load_music(decode=lambda path, seconds: os.path.basename(path).encode()))
+            first = player.pick_music(choice=lambda options: options[0])
+            second = player.pick_music(choice=lambda options: options[0])
+            self.assertNotEqual(first, second)               # the other song next time
+        finally:
+            rt.DANCE_MUSIC_DIR = original
+
+    def test_finds_the_music_file(self):
+        folder = tempfile.mkdtemp()
+        self.assertIsNone(rt.find_dance_music(folder))
+        with open(os.path.join(folder, 'dance.m4a'), 'wb') as handle:
+            handle.write(b'x')
+        self.assertEqual(rt.find_dance_music(folder), os.path.join(folder, 'dance.m4a'))
+
+    def test_decodes_the_first_seconds_with_ffmpeg(self):
+        calls = []
+
+        class Done(object):
+            returncode, stdout, stderr = 0, b'\x01\x00' * rt.RATE * 10, b''
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return Done()
+        pcm = rt.decode_music('/music/dance.mp3', 10, run=run)
+        self.assertEqual(len(pcm), rt.RATE * 2 * 10)
+        self.assertIn('-t', calls[0])
+        self.assertEqual(calls[0][calls[0].index('-t') + 1], '10')
+        self.assertEqual(calls[0][calls[0].index('-ar') + 1], str(rt.RATE))
+
+    def test_bad_music_file_is_ignored(self):
+        class Failed(object):
+            returncode, stdout, stderr = 1, b'', b'Invalid data found'
+        self.assertIsNone(rt.decode_music('/music/dance.mp3', 10, run=lambda command, **kw: Failed()))
+
+    def test_player_plays_given_music_or_falls_back_to_shouts(self):
+        player = rt.ShoutPlayer()
+        self.assertFalse(player.play_for(1.0, pcm=b'\x00\x00' * 10))    # no speaker yet
+        self.assertFalse(player.play_for(1.0, pcm=None))                  # no music, no shouts
+
+
+if __name__ == '__main__':
+    unittest.main()
