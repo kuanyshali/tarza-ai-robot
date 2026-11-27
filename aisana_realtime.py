@@ -46,7 +46,7 @@ from aisana_faces import parse_memory_command
 
 RATE = 24000
 CHUNK = 1440  # 30 ms of mono S16_LE PCM
-MODEL = os.environ.get('AISANA_REALTIME_MODEL', 'gpt-realtime-2.1-mini')
+MODEL = aisana_usage.REALTIME_MODEL     # gpt-realtime-2.1 (owner, Nov 27: not mini); AISANA_REALTIME_MODEL
 VOICE = os.environ.get('AISANA_REALTIME_VOICE', 'marin')
 BARGE_IN = os.environ.get('AISANA_REALTIME_BARGE_IN', '0') == '1'
 SILENCE_MS = int(os.environ.get('AISANA_REALTIME_SILENCE_MS', '700'))
@@ -60,7 +60,7 @@ if MAX_TURN:
     MAX_TURN = max(5.0, MAX_TURN)
 # Keep the conversation as TEXT: once a turn is answered its audio items are swapped
 # for their transcripts. Every reply re-reads the whole conversation and audio input
-# costs ~17x text ($10 vs $0.60 per 1M on gpt-realtime-2.1-mini, Nov 2026).
+# costs ~8x text ($32 vs $4 per 1M on gpt-realtime-2.1, Nov 2026).
 TEXT_HISTORY = os.environ.get('AISANA_TEXT_HISTORY', '1') == '1'
 QUIET_FILE = os.environ.get('AISANA_QUIET_FILE', os.path.expanduser('~/.local/share/aisana/quiet.txt'))
 _USAGE = []
@@ -318,7 +318,7 @@ FACE_GREET_MINUTES = float(os.environ.get('AISANA_FACE_GREET_MINUTES', '30'))
 POSSESSIVE_RE = re.compile(r'\b(?:мой|моя|моё|мое|мои|my)\b', re.I)
 THING_FILLER_RE = re.compile(r'\b(?:мой|моя|моё|мое|мои|наш|наша|наше|этот|эту|эта|это|вот|my|our|this|the)\b', re.I)
 
-WAVE_SECONDS = float(os.environ.get('AISANA_WAVE_SECONDS', '6'))
+WAVE_SECONDS = float(os.environ.get('AISANA_WAVE_SECONDS', '10'))   # Nov 27: the slow shoulder needs ~6 s to rise
 # "Айсана, танцуй": arms up, right hand waves, she spins with her shouts, then arms down.
 DANCE_RE = re.compile(r'(?:\bтанцу\w*|потанцу\w*|станцу\w*|затанцу\w*|\w*танцева\w*|\bdance\b|\bdancing\b|'
                       r'билеші\w*|биле\b|ارقص\w*)', re.I)
@@ -565,8 +565,9 @@ def tool_definitions():
                          'position. For relative requests (a bit higher, lower, чуть-чуть наверх) use '
                          'action nudge with direction and degrees.'),
          'parameters': {'type': 'object', 'properties': {
-             'action': {'type': 'string', 'enum': ['position', 'nudge', 'gripper_open', 'gripper_close', 'hand_shake', 'hand_still', 'stop', 'status'],
-                        'description': 'hand_shake / hand_still: the RIGHT arm has a shaking hand (wave, greet), not a gripper; only the left arm opens/closes'},
+             'action': {'type': 'string', 'enum': ['position', 'nudge', 'gripper_open', 'gripper_close', 'hand_shake', 'hand_still', 'hand_off', 'stop', 'status'],
+                        'description': 'hand_shake / hand_still: the RIGHT arm has a shaking hand (wave, greet), not a gripper; only the left arm opens/closes. '
+                                       'hand_off: switch the hand/gripper servo OFF (limp, stops twitching) when asked to turn it off'},
              'arm': {'type': 'string', 'enum': ['right', 'left', 'both'],
                      'description': 'Use both when the user does not say which arm'},
              'position': {'type': 'integer', 'minimum': 0, 'maximum': 4,
@@ -800,6 +801,8 @@ class RealtimeAisana(object):
         self.playback_interrupted = False
         self.audio_queue = queue.Queue(maxsize=256)
         self.speaker_note = 0.0
+        self.audible_ids = set()            # replies whose sound already went to the speaker
+        self.finish_note = 0.0
         self.audio_generation = 0
         self.mute_until = 0.0
         self.follower = None                # "иди за мной" run (aisana_follow.Follower)
@@ -1516,7 +1519,7 @@ class RealtimeAisana(object):
             if pressed and not self.phone_pressed:
                 print('Push to talk: listening.')
                 if self.responding or self.playing:
-                    self.cancel_reply()                 # the operator interrupts her
+                    self.cancel_reply(force=True)       # the operator interrupts her
                 self.echo_guard_active = False
                 self.mute_until = 0.0
             if pressed or pcm:
@@ -2381,18 +2384,27 @@ class RealtimeAisana(object):
             self.wave_hello()
             return {'ok': True}
         if action == 'arm':
-            # PS5 controller / panel buttons: both arms to one position 0..4.
-            if text not in ('0', '1', '2', '3', '4'):
-                return {'ok': False, 'error': 'arm position must be 0..4'}
+            # PS5 controller / panel buttons: "2" (both arms, PS5), "right 3", "left 0",
+            # "both 4", or "<side> off" = hand / gripper servo OFF (checked6 "g f").
+            words = text.split()
+            side = words[0] if len(words) == 2 else 'both'
+            what = words[-1] if words else ''
+            if side not in ('both', 'right', 'left') or what not in ('0', '1', '2', '3', '4', 'off'):
+                return {'ok': False, 'error': 'arm: "[both|right|left] 0..4" or "<side> off"'}
             if self.arm is None:
                 self.reconnect_arm()
             if self.arm is None:
                 return {'ok': False, 'error': 'arms not connected'}
-            intents = [make_intent('position', 'both', int(text))]
+            if what == 'off':
+                intents = [make_intent('hand_off', side)]
+            else:
+                intents = [make_intent('position', side, int(what))]
             self.wave_id += 1                    # a newer arm command cancels a running wave
             result = self.arm.execute_many(intents, verify=False)
             self.last_arm_at = time.monotonic()
-            self.arm.watch(intents, self.report_arm_problem)
+            if what != 'off':
+                self.arm.watch(intents, self.report_arm_problem)
+            print('Panel: arms {} -> {}'.format(side, what))
             return {'ok': True, 'arms': result}
         if action == 'dance':
             self.run_dance_locally('panel-{}'.format(time.monotonic()), '')
@@ -2519,6 +2531,8 @@ class RealtimeAisana(object):
     def release_hold(self, drop):
         held, self.held_audio, self.hold_item = self.held_audio, [], None
         if not drop:
+            if held and self.responding:
+                self.audible_ids.add(self.response_id)
             for kind, chunk in held:
                 self.queue_audio(kind, chunk)
 
@@ -2616,7 +2630,7 @@ class RealtimeAisana(object):
             with self.arm_lock:
                 self.local_items.add(item_id)
                 self.responded_items.add(item_id)
-            self.cancel_reply()
+            self.cancel_reply(force=True)               # "стоп" also stops her talking
             phrase = {'Russian': 'Стою.', 'English': 'Stopped.', 'Kazakh': 'Тоқтадым.',
                       'Egyptian Arabic': 'وقفت.'}.get(self.user_language, 'Stopped.')
             threading.Thread(target=self.speak_report, daemon=True, args=(
@@ -2715,7 +2729,23 @@ class RealtimeAisana(object):
         if item_id in self.responded_items and self.responding and self.response_item == item_id:
             self.cancel_reply()
 
-    def cancel_reply(self):
+    def cancel_reply(self, force=False):
+        """Drop a reply that has not been heard yet. Owner, Nov 27: never cut her
+        off mid-sentence; a sentence already on the speaker is finished, and a new
+        reply waits for it (retry_create). Only "стоп" and the phone's push-to-talk
+        button (force) silence her at once."""
+        audible = self.responding and self.response_id in self.audible_ids
+        if not force and (audible or self.playing):
+            if self.responding and not audible:
+                self.cut_ids.add(self.response_id)          # the new, unheard reply goes
+                try:
+                    self.send({'type': 'response.cancel'})
+                except Exception:
+                    pass
+            elif time.monotonic() - self.finish_note > 10:
+                self.finish_note = time.monotonic()
+                print('Letting her finish the sentence (no cut).')
+            return
         if self.responding:
             self.cut_ids.add(self.response_id)
             try:
@@ -2865,6 +2895,7 @@ class RealtimeAisana(object):
                 if self.holding():
                     self.held_audio.append(('audio', chunk))
                 else:
+                    self.audible_ids.add(e.get('response_id') or self.response_id)
                     self.queue_audio('audio', chunk)
         elif typ == 'response.output_audio_transcript.done' and e.get('response_id') in self.oob_ids:
             print('Shouts recorded:', ' '.join((e.get('transcript') or '').split()))
@@ -2873,7 +2904,10 @@ class RealtimeAisana(object):
             text = ' '.join((e.get('transcript') or '').split())
             if text:
                 cut = e.get('response_id') in self.cut_ids
-                print('Aisana (cut):' if cut else 'Aisana:', text)
+                if cut and e.get('response_id') not in self.audible_ids:
+                    print('Not said (a reply to noise or to a command already handled):', text)
+                else:
+                    print('Aisana (stopped):' if cut else 'Aisana:', text)
                 if not cut:
                     self.save_turn(text)
         elif typ == 'input_audio_buffer.committed':

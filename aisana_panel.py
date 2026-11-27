@@ -350,6 +350,13 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
  pre{white-space:pre-wrap;font-size:12px;line-height:1.35;color:#aeb3c2;max-height:340px;overflow:auto;margin:0}
  #msg{min-height:20px;font-size:14px;color:#9aa0ad;margin:6px 2px}
  .sel{outline:3px solid #3b82f6}
+ .arms,.armpos{display:grid;gap:8px;margin:8px 0}
+ .arms{grid-template-columns:repeat(3,1fr)}
+ .armpos{grid-template-columns:repeat(5,1fr)}
+ .arms button{padding:10px 4px;font-size:15px;background:#232733}
+ .arms button.sel{background:#3b3f4c;outline:2px solid #3b82f6}
+ .armpos button{padding:16px 2px;font-size:22px;font-weight:700;line-height:1.1}
+ .armpos small{display:block;font-size:11px;font-weight:500;color:#cfd3dc}
 </style></head><body>
 <header><span><span id="dot" class="dot"></span>Айсана</span><span id="net" style="font-size:13px;color:#9aa0ad"></span></header>
 <main>
@@ -357,12 +364,21 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
   <button class="stop" onclick="act('stop')">СТОП</button>
   <button class="go" onclick="post('/api/start')">Включить</button>
   <button class="off-btn" onclick="if(confirm('Выключить Айсану?'))post('/api/stop')">Выключить</button>
-  <button onclick="act('wave')">👋 Помахать</button>
   <button onclick="act('dance')">💃 Танцевать</button>
   <button onclick="act('follow')">👣 Иди за мной</button>
   <button onclick="if(confirm('Калибровка поворотов: Айсана сделает полный оборот и несколько поворотов (~1 мин). Вокруг должно быть свободно. Начать?'))act('calibrate_turns')">🧭 Калибровка поворотов</button>
   <button class="off-btn" onclick="act('stop')">✋ Стой</button>
   <button style="grid-column:span 2" onclick="if(confirm('Подготовить колёса? Если нужна калибровка, колёса немного покрутятся.'))post('/api/legs')">🛞 Колёса: включить / откалибровать</button>
+ </div>
+ <div class="card">
+  <div class="row"><span>🦾 Руки</span><span id="armmsg"></span></div>
+  <div class="arms">
+   <button data-side="both" class="side sel">Обе</button><button data-side="right" class="side">Правая</button><button data-side="left" class="side">Левая</button>
+  </div>
+  <div class="armpos">
+   <button onclick="armPos('0')">0<small>вниз</small></button><button onclick="armPos('1')">1</button><button onclick="armPos('2')">2</button><button onclick="armPos('3')">3</button><button onclick="armPos('4')">4<small>вверх</small></button>
+  </div>
+  <div class="grid"><button onclick="act('wave')">👋 Помахать</button><button class="off-btn" onclick="armPos('off')">💤 Кисть / захват выкл</button></div>
  </div>
  <div class="card">
   <textarea id="text" placeholder="Текст для Айсаны"></textarea>
@@ -401,6 +417,14 @@ const msg=t=>{document.getElementById('msg').textContent=t};
 async function post(url,body){try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});const j=await r.json();msg(j.ok?'Готово':'Ошибка: '+(j.error||''));setTimeout(refresh,800)}catch(e){msg('Нет связи с роботом')}}
 const $=id=>document.getElementById(id);
 function act(a){post('/api/action',{action:a})}
+let armSide='both';
+document.querySelectorAll('.arms .side').forEach(b=>b.addEventListener('click',()=>{armSide=b.dataset.side;
+ document.querySelectorAll('.arms .side').forEach(x=>x.classList.toggle('sel',x===b))}));
+async function armPos(p){const names={both:'обе руки',right:'правая рука',left:'левая рука'};
+ try{const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'arm',text:armSide+' '+p})});
+  const j=await r.json();
+  $('armmsg').textContent=j.ok?(p==='off'?'выключено: '+names[armSide]:names[armSide]+' → '+p):'Ошибка: '+(j.error||'');
+  msg(j.ok?'Готово':'Ошибка: '+(j.error||''))}catch(e){msg('Нет связи с роботом')}}
 let hTouch=0,vTouch=0,quietOn=false;
 async function speedTest(){msg('Тест скорости… (~7 МБ трафика, до 30 с)');
  try{const j=await (await fetch('/api/speedtest',{method:'POST'})).json();

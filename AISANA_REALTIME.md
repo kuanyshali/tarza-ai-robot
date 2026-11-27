@@ -15,7 +15,7 @@ git pull --ff-only origin main
 
 Requires an existing OPENAI_API_KEY environment variable, KT USB Audio mic, Xiaomi USB Composite Device speaker and ALSA arecord/aplay.
 
-Default model: gpt-realtime-2.1-mini. Override with AISANA_REALTIME_MODEL. Default voice: marin. Override with AISANA_REALTIME_VOICE. Stop with Ctrl+C.
+Default model: gpt-realtime-2.1 (full; gpt-realtime-2.1-mini is ~3x cheaper). Override with AISANA_REALTIME_MODEL. Default voice: marin. Override with AISANA_REALTIME_VOICE. Stop with Ctrl+C.
 
 **Test with headphones or low speaker volume.** For experimental interruptions:
 

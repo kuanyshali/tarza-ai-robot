@@ -13,9 +13,12 @@ Aisana (Айсана): university voice robot on an NVIDIA Jetson Nano. The owne
   (text commands: `b 1`, `l g o`, `r m 3`, `x` emergency stop, `p` status). Only whitelisted
   commands from `aisana_arm.build_command` may be sent. Opening the port resets the board;
   wait for `Both arms ready.`. Physical motion: keep "стоп" → `x` working in both modes.
-  Latest firmware: robotic_arms_checked5.ino (Nov 23): RIGHT elbow has NO pot (positions = servo angles
-  80,106,132,158,184; rest 80 = down; status 'servo N deg (no pot)', no feedback), RIGHT arm has a shaking
-  HAND ('r g s' shake / 'r g n' stop) instead of a gripper; only the LEFT gripper opens/closes.
+  Latest firmware: robotic_arms_checked6.ino (Nov 27, copy in arm_firmware/): RIGHT elbow has NO pot
+  (positions = servo angles 60,86,112,138,164; rest 60 = down; status 'servo N deg (no pot)', no feedback);
+  RIGHT stepper readings go DOWN toward position 4 (250..140). RIGHT arm has a shaking HAND
+  ('r g s' shake / 'r g n' centre then servo OFF) instead of a gripper; only the LEFT gripper opens/closes.
+  'g f' / 'l g f' / 'b g f' = hand/gripper servo OFF at once (action hand_off, panel button, "отключи кисть").
+  Flash from the Jetson with arduino-cli (board arduino:avr:mega, library AccelStepper); stop Aisana first.
   Arm moves are verified with "p" before/after; never let the model claim motion without feedback.
   In realtime mode explicit commands are re-parsed from the STT transcript (aisana_arm.parse_arm_commands);
   model arguments are used only for vague arm requests.
@@ -31,7 +34,9 @@ Aisana (Айсана): university voice robot on an NVIDIA Jetson Nano. The owne
   (`.venv/bin/python aisana_realtime.py`); `robot.py` runs with system `python3` (JetPack cv2).
 
 ## Code map
-- `aisana_realtime.py` — main fast mode (OpenAI Realtime GA over websocket-client 1.3.1).
+- `aisana_realtime.py` — main fast mode (OpenAI Realtime GA over websocket-client 1.3.1), model
+  gpt-realtime-2.1 (owner, Nov 27: the full model, ~3x the cost of mini). A sentence already on the
+  speaker is never cut (cancel_reply only drops unheard replies); only "стоп" and the phone's PTT force it.
 - `robot.py` — classic STT → chat → TTS loop; imports cv2 and needs OPENAI_API_KEY at import,
   so tests extract its functions via `ast` (see `tests/test_robot.py::isolated`).
 - `aisana_follow.py` — "иди за мной": MobileNet-SSD person detector (cv2.dnn) + follow loop; drives only

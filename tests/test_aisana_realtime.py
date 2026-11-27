@@ -897,6 +897,21 @@ class ConversationMemoryTests(unittest.TestCase):
         self.assertTrue(session.history.cleared)
 
 
+class PanelArmTests(unittest.TestCase):
+    """Nov 27: panel buttons for arm positions per side, and the hand OFF button."""
+
+    def test_positions_and_off(self):
+        session, _ = make_session()
+        session.arm = FakeArm()
+        self.assertTrue(session.panel_action('arm', '2')['ok'])            # PS5: both arms
+        self.assertTrue(session.panel_action('arm', 'right 4')['ok'])
+        self.assertTrue(session.panel_action('arm', 'left off')['ok'])
+        self.assertEqual([c[:3] for c in session.arm.calls],
+                         [('position', 'both', 2), ('position', 'right', 4), ('hand_off', 'left', None)])
+        self.assertFalse(session.panel_action('arm', 'right 7')['ok'])
+        self.assertFalse(session.panel_action('arm', 'top 1')['ok'])
+
+
 class StaleSpeakerTests(unittest.TestCase):
     """Jetson, Nov 26: an orphaned aplay from the last run kept the speaker busy."""
 
@@ -1382,6 +1397,27 @@ class LegsToolTests(unittest.TestCase):
                         'item_id': 'n2', 'transcript': ''})
         session.handle({'type': 'response.output_audio.delta', 'response_id': 'own2', 'delta': 'AAAA'})
         self.assertNotIn('audio', played)
+
+    def test_a_sentence_on_the_speaker_is_finished(self):
+        # Owner, Nov 27: "убери cut, чтобы она договаривала фразу".
+        session, sent = make_session()
+        session.queue_audio = lambda kind, chunk=b'': None
+        session.handle({'type': 'response.created', 'response': {'id': 'r1'}})
+        session.handle({'type': 'response.output_audio.delta', 'response_id': 'r1', 'delta': 'AAAA'})
+        del sent[:]
+        session.cancel_reply()                       # a command or noise in the middle of her answer
+        self.assertNotIn('response.cancel', types(sent))
+        self.assertNotIn('r1', session.cut_ids)
+        session.cancel_reply(force=True)             # "стоп" / phone button still silence her
+        self.assertIn('response.cancel', types(sent))
+
+    def test_an_unheard_reply_is_still_dropped(self):
+        session, sent = make_session()
+        session.handle({'type': 'response.created', 'response': {'id': 'r2'}})
+        del sent[:]
+        session.cancel_reply()                       # nothing reached the speaker yet
+        self.assertIn('response.cancel', types(sent))
+        self.assertIn('r2', session.cut_ids)
 
     def test_noise_turn_still_cuts_its_own_reply(self):
         session, sent = make_session()

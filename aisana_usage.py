@@ -18,16 +18,26 @@ import time
 
 USAGE_DIR = os.environ.get('AISANA_USAGE_DIR', os.path.expanduser('~/.local/share/aisana'))
 
-PRICES = {
-    # gpt-realtime-2.1-mini, per 1M tokens
-    'text_in': 0.60, 'text_in_cached': 0.06, 'text_out': 2.40,
-    'audio_in': 10.00, 'audio_in_cached': 0.30, 'audio_out': 20.00,
-    'image_in': 0.80,
+# The realtime model (owner, Nov 27: the full model, not mini). Override with
+# AISANA_REALTIME_MODEL; the prices below follow it.
+DEFAULT_REALTIME_MODEL = 'gpt-realtime-2.1'
+REALTIME_MODEL = os.environ.get('AISANA_REALTIME_MODEL', DEFAULT_REALTIME_MODEL)
+MODEL_PRICES = {
+    # per 1M tokens, OpenAI price list (Nov 2026)
+    'gpt-realtime-2.1': {'text_in': 4.00, 'text_in_cached': 0.40, 'text_out': 24.00,
+                         'audio_in': 32.00, 'audio_in_cached': 0.40, 'audio_out': 64.00,
+                         'image_in': 5.00},
+    'gpt-realtime-2.1-mini': {'text_in': 0.60, 'text_in_cached': 0.06, 'text_out': 2.40,
+                              'audio_in': 10.00, 'audio_in_cached': 0.30, 'audio_out': 20.00,
+                              'image_in': 0.80},
+}
+PRICES = dict(MODEL_PRICES.get(REALTIME_MODEL, MODEL_PRICES[DEFAULT_REALTIME_MODEL]))
+PRICES.update({
     # transcription, per minute of audio
     'stt_minute': 0.0045,          # gpt-transcribe
     # camera answers (gpt-4o-mini), per 1M tokens
     'vision_in': 0.15, 'vision_out': 0.60,
-}
+})
 for _name in list(PRICES):
     _value = os.environ.get('AISANA_PRICE_' + _name.upper())
     if _value:

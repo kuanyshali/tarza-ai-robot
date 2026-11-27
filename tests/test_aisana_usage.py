@@ -23,12 +23,20 @@ class UsageTests(unittest.TestCase):
         meter.add_transcription(60)                       # one minute of talk heard
         meter.add_vision(3000, 100)
         s = usage.summary()
-        # 1000 text*0.6 + 4000*0.06 + 6000 audio*10 + 10000*0.3 + 100*2.4 + 500*20 = 74080 per 1M
-        self.assertAlmostEqual(s['replies_usd'], 0.074, places=3)
+        p = usage.PRICES                                  # prices of the configured model
+        expected = (1000 * p['text_in'] + 4000 * p['text_in_cached'] + 6000 * p['audio_in']
+                    + 10000 * p['audio_in_cached'] + 100 * p['text_out'] + 500 * p['audio_out']) / 1e6
+        self.assertAlmostEqual(s['replies_usd'], round(expected, 4), places=3)
         self.assertAlmostEqual(s['hearing_usd'], 0.0045, places=3)
         self.assertEqual(s['hearing_minutes'], 1.0)
         self.assertEqual((s['replies'], s['looks']), (1, 1))
         self.assertTrue(os.path.isfile(usage.path_for(usage.today())))   # the panel can read it
+
+    def test_full_model_is_the_default(self):
+        # Owner, Nov 27: the full realtime model, not mini; prices follow the model.
+        self.assertEqual(usage.DEFAULT_REALTIME_MODEL, 'gpt-realtime-2.1')
+        self.assertEqual(usage.MODEL_PRICES['gpt-realtime-2.1']['audio_out'], 64.00)
+        self.assertEqual(usage.MODEL_PRICES['gpt-realtime-2.1-mini']['audio_out'], 20.00)
 
     def test_missing_usage_is_ignored(self):
         meter = usage.UsageMeter(save_every=0)

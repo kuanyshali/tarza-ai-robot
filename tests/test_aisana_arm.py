@@ -98,19 +98,34 @@ class BuildCommandTests(unittest.TestCase):
                     arm.build_command(*args)
 
 
+class HandOffTests(unittest.TestCase):
+    # checked6 (Nov 27): "g f" switches the hand / gripper servo off at once.
+    def test_build(self):
+        self.assertEqual(arm.build_command('hand_off', 'right'), 'r g f')
+        self.assertEqual(arm.build_command('hand_off', 'left'), 'l g f')
+        self.assertEqual(arm.build_command('hand_off', 'both'), 'b g f')
+
+    def test_spoken(self):
+        for text, side in (('отключи эти грипперы', 'both'), ('выключи правую кисть', 'right'),
+                           ('turn off the left gripper', 'left')):
+            intent = arm.parse_arm_command(text)
+            self.assertEqual((intent['action'], intent['arm']), ('hand_off', side), text)
+        self.assertEqual(arm.parse_arm_command('помаши рукой')['action'], 'hand_shake')
+
+
 class NudgeCommandTests(unittest.TestCase):
     def test_up_follows_each_joints_position_direction(self):
-        # Shoulders count up toward position 4; the right elbow counts DOWN.
-        self.assertEqual(arm.nudge_commands('right', 'shoulder', 'up', 5), ['r m r 5'])
+        # checked6: the right shoulder's readings go DOWN toward position 4 (250 -> 140).
+        self.assertEqual(arm.nudge_commands('right', 'shoulder', 'up', 5), ['r m r -5'])
         self.assertEqual(arm.nudge_commands('left', 'shoulder', 'down', 10), ['l m r -10'])
-        # checked5: the right elbow has no pot, its positions are servo angles 80..184 (up = bigger).
+        # The right elbow has no pot, its positions are servo angles 60..164 (up = bigger).
         self.assertEqual(arm.nudge_commands('right', 'elbow', 'up', 5), ['r s r 5'])
         self.assertEqual(arm.nudge_commands('left', 'elbow', 'up', 5), ['l s r 5'])
         self.assertEqual(arm.nudge_commands('both', 'elbow', 'up', 10), ['r s r 10', 'l s r 10'])
-        self.assertEqual(arm.nudge_commands('both', 'whole', 'up', 10), ['r m r 10', 'l m r 10'])
+        self.assertEqual(arm.nudge_commands('both', 'whole', 'up', 10), ['r m r -10', 'l m r 10'])
 
     def test_direction_can_be_flipped(self):
-        self.assertEqual(arm.nudge_commands('right', 'shoulder', 'up', 5, up_toward_4=False), ['r m r -5'])
+        self.assertEqual(arm.nudge_commands('right', 'shoulder', 'up', 5, up_toward_4=False), ['r m r 5'])
 
     def test_nudge_limits(self):
         for args in (('right', 'shoulder', 'up', 0), ('right', 'shoulder', 'up', 46),

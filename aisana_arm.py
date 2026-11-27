@@ -27,7 +27,8 @@ BAUD = 115200
 READY_TEXT = 'Both arms ready'
 ARM_LETTERS = {'right': 'r', 'left': 'l', 'both': 'b'}
 JOINT_LETTERS = {'whole': '', 'shoulder': 'm', 'elbow': 's'}
-ACTIONS = ('position', 'nudge', 'gripper_open', 'gripper_close', 'hand_shake', 'hand_still', 'stop', 'status')
+ACTIONS = ('position', 'nudge', 'gripper_open', 'gripper_close', 'hand_shake', 'hand_still', 'hand_off',
+           'stop', 'status')
 MAX_NUDGE_DEGREES = 45
 # "Помаши рукой": the right arm is raised first (shoulder 3, elbow 4), then the hand waves.
 # AISANA_WAVE_POSE="3,4" (shoulder,elbow); "-" = do not raise.
@@ -43,13 +44,13 @@ def _wave_pose(text):
 
 WAVE_POSE = _wave_pose(os.environ.get('AISANA_WAVE_POSE', '3,4'))
 VERIFY_SECONDS = float(os.environ.get('AISANA_ARM_VERIFY_SECONDS', '1.0'))
-# Positions 0..4 from robotic_arms_checked5.ino (Nov 23). Replaced at runtime by
+# Positions 0..4 from robotic_arms_checked6.ino (Nov 27). Replaced at runtime by
 # the table the Arduino prints at start-up ("POSITIONS (pot readings)").
-# The right elbow has no pot now: its positions are servo angles (rest 80 = down,
-# +26 per position, 184 is clamped to 180 by the firmware).
+# The right elbow has no pot: its positions are servo angles (rest 60 = hanging
+# down, +26 per position). The right stepper's readings go DOWN toward position 4.
 DEFAULT_POSITION_TABLE = {
-    ('right', 'shoulder'): (47, 77, 107, 137, 167),
-    ('right', 'elbow'): (80, 106, 132, 158, 184),
+    ('right', 'shoulder'): (250, 220, 190, 160, 140),
+    ('right', 'elbow'): (60, 86, 112, 138, 164),
     ('left', 'shoulder'): (52, 82, 112, 142, 172),
     ('left', 'elbow'): (144, 174, 204, 234, 264),
 }
@@ -136,6 +137,10 @@ def build_command(action, arm='both', position=None, joint='whole'):
         return letter + (' g o' if action == 'gripper_open' else ' g c')
     if action in ('hand_shake', 'hand_still'):
         return 'r g ' + ('s' if action == 'hand_shake' else 'n')   # only the right arm has the hand
+    if action == 'hand_off':
+        # checked6 "g f": hand / gripper servo OFF at once (no signal, no twitching,
+        # nothing fights the other motors). The next shake/open/close turns it on again.
+        return letter + ' g f'
     raise ArmError('Unknown arm action: {!r}'.format(action))
 
 
@@ -507,7 +512,7 @@ def connect_from_environment(log=print, environ=None):
 # Local (no API call) parsing of explicit spoken arm commands, used by robot.py.
 # A command needs an arm word AND an action, so "что у меня в руке?" is not one.
 ARM_WORDS = re.compile(
-    r'(?:рук[аиуеой]\w*|клешн\w*|захват\w*|кист[ьи]\w*|манипулятор\w*|'
+    r'(?:рук[аиуеой]\w*|клешн\w*|захват\w*|гриппер\w*|кист[ьи]\w*|манипулятор\w*|'
     r'\barms?\b|\bgrippers?\b|\bhands?\b|\bclaws?\b|\bқол\w*|ذراع\w*|إيد\w*|ايد\w*|'
     r'локт\w*|локоть|плеч[оиа]\w*|\belbows?\b|\bshoulders?\b)', re.I)
 NUMBER_WORDS = (
@@ -523,6 +528,10 @@ HOME_WORDS = re.compile(
 STOP_WORDS = re.compile(r'(?:\bстоп\b|останов\w*|замри|\bstop\b|\bhalt\b|freeze|тоқта\w*|وقف)', re.I)
 OPEN_WORDS = re.compile(
     r'(?:открой|открыть|раскрой|разожми|разжать|отпусти|\bopen\b|\brelease\b|\bаш\b|افتح)', re.I)
+# "отключи руку / кисть / захват", "turn off the hand": the servo goes limp (checked6 "g f").
+OFF_WORDS = re.compile(
+    r'(?:отключи\w*|выключи\w*|отруби\w*|обесточ\w*|расслабь\w*|\bturn (?:it |them )?off\b|'
+    r'\bswitch (?:it |them )?off\b|\bpower (?:it |them )?off\b|\brelax\b|өшір\w*|ажырат\w*)', re.I)
 CLOSE_WORDS = re.compile(
     r'(?:закрой|закрыть|сожми|сжать|схвати|возьми|\bclose\b|\bgrab\b|\bgrip\b|\bжап\b|اقفل|امسك)', re.I)
 RIGHT_WORDS = re.compile(r'(?:прав\w*|\bright\b|\bоң\w*|يمين|اليمين)', re.I)
@@ -658,7 +667,9 @@ def describe(intents):
         elif intent['action'] == 'hand_shake':
             parts.append('right hand shaking (until told to stop)')
         elif intent['action'] == 'hand_still':
-            parts.append('right hand stops shaking')
+            parts.append('right hand stops shaking (servo off when centred)')
+        elif intent['action'] == 'hand_off':
+            parts.append('{} hand/gripper servo switched OFF (limp, no twitching)'.format(side[intent['arm']]))
         else:
             parts.append(intent['action'])
     return '; '.join(parts)
@@ -688,6 +699,8 @@ def parse_arm_command(text):
         return _intent('hand_still', 'right')     # "хватит махать рукой"
     if STOP_WORDS.search(q):
         return _intent('stop')
+    if OFF_WORDS.search(q):
+        return _intent('hand_off', arm)           # "отключи грипперы", "выключи правую руку"
     if SHAKE_WORDS.search(q) and not LEFT_WORDS.search(q):
         return _intent('hand_shake', 'right')     # "помаши рукой", "пожми руку"
     number = _position_number(q)
@@ -750,6 +763,11 @@ def arm_reply(intent, language='Russian', error=None):
                 'Kazakh': 'Бұлғап тұрмын!' if shake else 'Болды, тоқтаттым.',
                 'Egyptian Arabic': 'بسلّم!' if shake else 'خلاص وقفت.',
                 'English': 'Waving!' if shake else 'Stopped waving.'}[language]
+    if action == 'hand_off':
+        return {'Russian': 'Отключила {}.'.format({'right': 'кисть', 'left': 'захват', 'both': 'кисть и захват'}[intent.get('arm', 'both')]),
+                'Kazakh': 'Қолдың серво-моторын өшірдім.',
+                'Egyptian Arabic': 'طفيت موتور الإيد.',
+                'English': 'Hand servo switched off.'}[language]
     if action == 'position':
         number = intent['position']
         return {
